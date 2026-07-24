@@ -201,6 +201,7 @@ db.exec(`
     education TEXT,
     experience TEXT,
     skills TEXT,
+    documents TEXT,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -391,6 +392,45 @@ function seed() {
     ['role_user', 'Role & User Management summary']
   ];
   widgets.forEach((w, i) => insertConfig.run(w[0], w[1], 1, i));
+
+  // --- Two recent hires so the "New Hires" KPI (last 90 days) is meaningful ---
+  const recentHires = [
+    { ...base, employee_code: 'EMP-007', name: 'S. Reddy', email: 's.reddy@hrms.com', phone: '9000000007',
+      department: 'Engineering', branch: 'Hyderabad', designation: 'Frontend Engineer', reporting_manager: 'Priya Manager', status: 'Active' },
+    { ...base, employee_code: 'EMP-008', name: 'M. Khan', email: 'm.khan@hrms.com', phone: '9000000008',
+      department: 'QA', branch: 'Bengaluru', designation: 'QA Analyst', reporting_manager: 'K. Menon', status: 'Active' }
+  ];
+  const insertRecentHire = db.prepare(`
+    INSERT INTO employees (
+      employee_code, name, email, phone, department, branch, designation, date_of_joining, reporting_manager, status
+    ) VALUES (@employee_code, @name, @email, @phone, @department, @branch, @designation, @date_of_joining, @reporting_manager, @status)
+  `);
+  const hire1 = insertRecentHire.run({ ...recentHires[0], date_of_joining: db.prepare("SELECT date('now','-12 days') AS d").get().d }).lastInsertRowid;
+  const hire2 = insertRecentHire.run({ ...recentHires[1], date_of_joining: db.prepare("SELECT date('now','-40 days') AS d").get().d }).lastInsertRowid;
+  insertAttendance.run(hire1, 'Present');
+  insertAttendance.run(hire2, 'Present');
+
+  // --- Open positions (Open Positions KPI + Department-wise Vacancies) ---
+  const deptId = (name) => db.prepare('SELECT id FROM departments WHERE name = ?').get(name)?.id;
+  const insertPosition = db.prepare('INSERT INTO positions (department_id, title, target_headcount, status) VALUES (?, ?, ?, ?)');
+  insertPosition.run(deptId('Engineering'), 'Senior Backend Engineer', 2, 'Open');
+  insertPosition.run(deptId('QA'), 'Automation QA Engineer', 1, 'Open');
+  insertPosition.run(deptId('Sales'), 'Sales Executive', 3, 'Open');
+  insertPosition.run(deptId('Human Resources'), 'HR Business Partner', 1, 'Open');
+
+  // --- Notifications, events, tasks so the dashboard widgets are populated ---
+  const insertNotification = db.prepare('INSERT INTO notifications (title, message, target_role, created_by) VALUES (?, ?, ?, ?)');
+  insertNotification.run('Low attendance', 'Attendance dipped below 90% in Engineering this week.', 'all', adminId);
+  insertNotification.run('Payroll cut-off', 'Submit expense claims before the 25th for this cycle.', 'all', adminId);
+
+  const insertEvent = db.prepare('INSERT INTO events (title, description, event_date, target_role, created_by) VALUES (?, ?, ?, ?, ?)');
+  insertEvent.run('Public Holiday', 'Independence Day — office closed', db.prepare("SELECT date('now','+21 days') AS d").get().d, 'all', adminId);
+  insertEvent.run('Board Meeting', 'Quarterly review', db.prepare("SELECT date('now','+5 days') AS d").get().d, 'all', adminId);
+
+  const insertTask = db.prepare('INSERT INTO tasks (title, due_date, assigned_to, status, created_by) VALUES (?, ?, ?, ?, ?)');
+  insertTask.run('Review Q3 budget', db.prepare("SELECT date('now') AS d").get().d, adminId, 'Pending', adminId);
+  insertTask.run('Approve pending leave requests', db.prepare("SELECT date('now','+2 days') AS d").get().d, managerId, 'Pending', adminId);
+  insertTask.run('Submit timesheet', db.prepare("SELECT date('now','+6 days') AS d").get().d, employeeId, 'Pending', adminId);
 
   void adminId;
 }

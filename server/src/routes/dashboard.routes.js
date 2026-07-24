@@ -38,10 +38,20 @@ router.get('/summary', (req, res) => {
   const payrollRun = db.prepare('SELECT * FROM payroll_runs ORDER BY id DESC LIMIT 1').get();
   const payrollStatus = payrollRun ? payrollRun.status : 'Pending';
 
+  const newHires = db.prepare(`
+    SELECT COUNT(*) AS c FROM employees ${whereSql ? whereSql + " AND " : "WHERE "} date_of_joining >= date('now','-90 days')
+  `).get(params).c;
+  const openPositions = db.prepare("SELECT COALESCE(SUM(target_headcount),0) AS c FROM positions WHERE status = 'Open'").get().c;
+  const pendingApprovals = db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE status = 'Pending'").get().c;
+
   const kpis = [
     { label: 'Total Employees', value: total, color: 'blue' },
+    { label: 'Active / Inactive', value: `${active} / ${inactive}`, color: 'green' },
+    { label: 'New Hires (90d)', value: newHires, color: 'blue' },
+    { label: 'Open Positions', value: openPositions, color: 'gold' },
     { label: 'Present Today', value: presentToday, color: 'green' },
     { label: 'Absent Today', value: absentToday, color: 'red' },
+    { label: 'Pending Approvals', value: pendingApprovals, color: 'red' },
     { label: 'Payroll Status', value: payrollStatus, color: 'gold' }
   ];
 

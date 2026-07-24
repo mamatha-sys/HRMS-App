@@ -3,12 +3,23 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const EMPTY_FORM = {
-  name: '', email: '', phone: '', photo: '', date_of_birth: '',
+  employee_code: '', name: '', email: '', phone: '', photo: '', date_of_birth: '',
   emergency_contact_name: '', emergency_contact_relation: '', emergency_contact_number: '',
   department: '', branch: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
   bank_name: '', bank_account_number: '', ifsc_code: '', aadhaar_number: '', pan_number: '',
-  education: '', experience: '', skills: ''
+  education: '', experience: '', skills: '', documents: []
 };
+
+const MAX_FILE_BYTES = 3 * 1024 * 1024; // 3 MB per file
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function Employees() {
   const { user } = useAuth();
@@ -52,8 +63,37 @@ export default function Employees() {
     setEditingId(emp.id);
     const next = { ...EMPTY_FORM };
     Object.keys(EMPTY_FORM).forEach((k) => { next[k] = emp[k] ?? ''; });
+    next.employee_code = emp.employee_code || '';
+    next.documents = Array.isArray(emp.documents) ? emp.documents : [];
     setForm(next);
     setShowForm(true);
+  }
+
+  async function handlePhoto(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > MAX_FILE_BYTES) { setError('Photo is too large (max 3 MB).'); return; }
+    setForm((f) => ({ ...f, photo: '' }));
+    const dataUrl = await readFileAsDataUrl(file);
+    setForm((f) => ({ ...f, photo: dataUrl }));
+  }
+
+  async function handleAddDocuments(e) {
+    const files = Array.from(e.target.files || []);
+    e.target.value = ''; // allow re-selecting the same file
+    for (const file of files) {
+      if (file.size > MAX_FILE_BYTES) { setError(`"${file.name}" is too large (max 3 MB).`); continue; }
+      const dataUrl = await readFileAsDataUrl(file);
+      setForm((f) => ({ ...f, documents: [...f.documents, { name: file.name, dataUrl }] }));
+    }
+  }
+
+  function renameDocument(idx, name) {
+    setForm((f) => ({ ...f, documents: f.documents.map((d, i) => i === idx ? { ...d, name } : d) }));
+  }
+
+  function removeDocument(idx) {
+    setForm((f) => ({ ...f, documents: f.documents.filter((_, i) => i !== idx) }));
   }
 
   async function handleSubmit(e) {
@@ -111,10 +151,20 @@ export default function Employees() {
           <form onSubmit={handleSubmit}>
             <div className="section-label" style={{ paddingLeft: 0 }}>Personal information</div>
             <div className="grid2">
+              <div>
+                <label className="field-label">Employee ID {editingId ? '' : <span className="note">(optional — auto-generated if blank)</span>}</label>
+                <input value={form.employee_code} disabled={!!editingId} placeholder="e.g. EMP-009"
+                  onChange={(e) => setForm({ ...form, employee_code: e.target.value })} />
+              </div>
               {field('name', 'Full name')}
               {field('date_of_birth', 'Date of birth', 'date')}
               {field('phone', 'Phone')}
               {field('email', 'Email', 'email')}
+              <div>
+                <label className="field-label">Employee photo</label>
+                <input type="file" accept="image/*" onChange={handlePhoto} />
+                {form.photo && <img src={form.photo} alt="preview" style={{ marginTop: 6, width: 64, height: 64, objectFit: 'cover', borderRadius: 8, border: '1px solid #E2E5EA' }} />}
+              </div>
             </div>
 
             <div className="section-label" style={{ paddingLeft: 0 }}>Emergency contact</div>
@@ -165,11 +215,25 @@ export default function Employees() {
               {field('pan_number', 'PAN number')}
             </div>
 
-            <div className="section-label" style={{ paddingLeft: 0 }}>Education &amp; experience</div>
+            <div className="section-label" style={{ paddingLeft: 0 }}>Education &amp; work experience</div>
             <div className="grid2">
               {field('education', 'Education details')}
-              {field('experience', 'Experience details')}
+              {field('experience', 'Work experience details')}
               {field('skills', 'Skills & certifications')}
+            </div>
+
+            <div className="section-label" style={{ paddingLeft: 0 }}>Documents <span className="note">(offer letter, ID proof, certificates — add as many as needed)</span></div>
+            <div>
+              {form.documents.length === 0 && <div className="note" style={{ marginBottom: 6 }}>No documents added yet.</div>}
+              {form.documents.map((doc, idx) => (
+                <div key={idx} className="row" style={{ marginBottom: 6 }}>
+                  <input value={doc.name} onChange={(e) => renameDocument(idx, e.target.value)} placeholder="Document name" style={{ flex: '2 1 200px' }} />
+                  <a href={doc.dataUrl} download={doc.name} className="crumb" style={{ flexShrink: 0 }}>view</a>
+                  <button type="button" onClick={() => removeDocument(idx)} style={{ flexShrink: 0 }}>Remove</button>
+                </div>
+              ))}
+              <label className="field-label" style={{ marginTop: 8 }}>Add documents</label>
+              <input type="file" multiple accept="image/*,application/pdf" onChange={handleAddDocuments} />
             </div>
 
             <div className="row" style={{ marginTop: 14 }}>
@@ -221,7 +285,9 @@ export default function Employees() {
                     <tr>
                       <td colSpan={canEdit ? 7 : 6} style={{ textAlign: 'left', background: '#F7F8FA' }}>
                         <div style={{ padding: '10px 6px' }}>
+                          {emp.photo && <img src={emp.photo} alt={emp.name} style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: '1px solid #E2E5EA', marginBottom: 10 }} />}
                           <div className="grid2">
+                            <div>Employee ID: <strong>{emp.employee_code}</strong></div>
                             <div>Branch: <strong>{emp.branch || '—'}</strong></div>
                             <div>Reporting manager: <strong>{emp.reporting_manager || '—'}</strong></div>
                             <div>Phone: <strong>{emp.phone || '—'}</strong></div>
@@ -231,6 +297,15 @@ export default function Employees() {
                             <div>Experience: <strong>{emp.experience || '—'}</strong></div>
                             <div>Skills: <strong>{emp.skills || '—'}</strong></div>
                           </div>
+                          <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Documents</div>
+                          {emp.documents && emp.documents.length > 0 ? (
+                            <div className="pill-list">
+                              {emp.documents.map((doc, i) => (
+                                <a key={i} href={doc.dataUrl} download={doc.name} className="pill" style={{ display: 'inline-block', marginRight: 6 }}>📎 {doc.name}</a>
+                              ))}
+                            </div>
+                          ) : <div className="note">No documents uploaded.</div>}
+
                           <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Bank &amp; identity details</div>
                           {emp.sensitiveFieldsMasked ? (
                             <div className="empty">Masked — bank and identity details are only visible to Super Admin or the employee themselves.</div>

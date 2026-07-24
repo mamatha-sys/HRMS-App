@@ -3,12 +3,16 @@ import api from '../api.js';
 
 export default function ManageModules() {
   const [modules, setModules] = useState([]);
+  const [standardModules, setStandardModules] = useState([]);
   const [error, setError] = useState('');
   const [newModuleName, setNewModuleName] = useState('');
   const [newFeatureName, setNewFeatureName] = useState({});
 
   function load() {
-    api.get('/modules').then((res) => setModules(res.data.modules)).catch(() => setError('Could not load modules.'));
+    api.get('/modules').then((res) => {
+      setModules(res.data.modules);
+      setStandardModules(res.data.standardModules || []);
+    }).catch(() => setError('Could not load modules.'));
   }
   useEffect(load, []);
 
@@ -47,6 +51,18 @@ export default function ManageModules() {
 
       {error && <div className="banner error">{error}</div>}
 
+      <div className="section-label" style={{ paddingLeft: 0 }}>Existing modules</div>
+      <div className="card">
+        <div className="feature-meta" style={{ marginBottom: 8 }}>Built-in modules already in the system (configure their access in Manage Roles):</div>
+        {standardModules.map((m) => (
+          <div key={m.id} style={{ padding: '6px 0', borderTop: '1px solid #EEF0F3' }}>
+            <div className="feature-name" style={{ fontSize: 13.5 }}>{m.code}. {m.name} <span className="note">({m.features.length} features)</span></div>
+          </div>
+        ))}
+        {standardModules.length === 0 && <div className="empty">No built-in modules.</div>}
+      </div>
+
+      {modules.length > 0 && <div className="section-label" style={{ paddingLeft: 0 }}>Custom modules</div>}
       {modules.map((m) => (
         <div key={m.id} className="card">
           <div className="feature-name">{m.name}</div>
@@ -67,7 +83,7 @@ export default function ManageModules() {
       ))}
 
       <div className="card">
-        <div className="feature-name" style={{ marginBottom: 10 }}>Add module</div>
+        <div className="feature-name" style={{ marginBottom: 10 }}>Add a new custom module</div>
         <form onSubmit={addModule} className="row">
           <input placeholder="New module name (e.g. Asset Management)" value={newModuleName} onChange={(e) => setNewModuleName(e.target.value)} required />
           <button className="primary" type="submit">+ Add module</button>

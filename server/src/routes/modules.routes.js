@@ -8,8 +8,17 @@ router.use(requireAuth);
 router.get('/', (req, res) => {
   const modules = db.prepare('SELECT * FROM custom_modules ORDER BY id').all();
   const features = db.prepare('SELECT * FROM custom_features ORDER BY id').all();
+
+  // The built-in module catalog (from the permission system) so the "Add module" screen
+  // also lists the previous/standard modules, not just custom ones.
+  const standardModules = db.prepare('SELECT * FROM perm_modules ORDER BY sort_order, id').all().map((m) => ({
+    ...m,
+    features: db.prepare('SELECT id, name FROM perm_features WHERE module_id = ? ORDER BY sort_order, id').all(m.id)
+  }));
+
   res.json({
-    modules: modules.map((m) => ({ ...m, features: features.filter((f) => f.module_id === m.id) }))
+    modules: modules.map((m) => ({ ...m, features: features.filter((f) => f.module_id === m.id) })),
+    standardModules
   });
 });
 
