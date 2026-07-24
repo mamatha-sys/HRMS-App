@@ -75,6 +75,24 @@ router.post('/login', (req, res) => {
   res.json({ token, user: publicUser(user) });
 });
 
+// Password-authenticated self-service recovery for a mismatched/bad face enrollment —
+// clears the stored reference so the next successful login re-enrolls fresh.
+router.post('/reset-face', (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
+  if (!user.active) {
+    return res.status(403).json({ error: 'This account has been deactivated. Contact your administrator.' });
+  }
+
+  db.prepare('UPDATE users SET face_descriptor = NULL WHERE id = ?').run(user.id);
+  res.json({ ok: true });
+});
+
 router.get('/me', requireAuth, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.sub);
   if (!user) return res.status(404).json({ error: 'User not found' });

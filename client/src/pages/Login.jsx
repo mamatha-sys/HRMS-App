@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
 import { loadFaceModels, extractFaceDescriptor, detectFacePresence } from '../faceApi.js';
+import api from '../api.js';
 
 export default function Login() {
   const { login } = useAuth();
@@ -20,6 +21,8 @@ export default function Login() {
   const [cameraStatus, setCameraStatus] = useState('loading'); // loading | ready | error
   const [facePresent, setFacePresent] = useState(false);
   const [videoInfo, setVideoInfo] = useState('');
+  const [faceMismatch, setFaceMismatch] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +68,7 @@ export default function Login() {
     e.preventDefault();
     setError('');
     setInfo('');
+    setFaceMismatch(false);
 
     if (cameraStatus !== 'ready') {
       setError('Camera is not ready yet. Please allow camera access and wait for it to load.');
@@ -86,9 +90,27 @@ export default function Login() {
       }
       navigate(location.state?.from || '/dashboard', { replace: true });
     } catch (err) {
-      setError(err.response?.data?.error || 'Login failed');
+      const message = err.response?.data?.error || 'Login failed';
+      setError(message);
+      if (message.toLowerCase().includes('does not match the enrolled face')) {
+        setFaceMismatch(true);
+      }
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleResetFace() {
+    setResetting(true);
+    setError('');
+    try {
+      await api.post('/auth/reset-face', { email, password });
+      setFaceMismatch(false);
+      setInfo('Face enrollment cleared. Click "Capture face & Sign in" again to enroll your current face.');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not reset face enrollment.');
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -99,6 +121,14 @@ export default function Login() {
         <div className="login-subtitle">Sign in with email, password &amp; face verification</div>
 
         {error && <div className="banner error">{error}</div>}
+        {faceMismatch && (
+          <div className="banner error" style={{ marginTop: -10 }}>
+            If this is really your account, your enrolled face may be from a bad earlier capture.{' '}
+            <button type="button" onClick={handleResetFace} disabled={resetting} style={{ textDecoration: 'underline', border: 'none', background: 'none', color: '#B3401E', padding: 0, fontWeight: 700 }}>
+              {resetting ? 'Resetting...' : 'Reset my face enrollment'}
+            </button>
+          </div>
+        )}
         {info && <div className="banner" style={{ background: '#E8EEF9', border: '1px solid #2E5CB8', color: '#2E5CB8' }}>{info}</div>}
 
         <form onSubmit={handleSubmit}>

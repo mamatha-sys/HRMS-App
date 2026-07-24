@@ -40,6 +40,17 @@ export default function UserManagement() {
     }
   }
 
+  async function resetFace(id) {
+    if (!window.confirm('Clear this user\'s enrolled face? Their next successful login will re-enroll a new one.')) return;
+    setError('');
+    try {
+      await api.put(`/users/${id}/reset-face`);
+      load();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not reset face enrollment.');
+    }
+  }
+
   return (
     <div>
       <h1>Role &amp; User Management</h1>
@@ -77,6 +88,9 @@ export default function UserManagement() {
                     <button disabled={u.id === currentUser.id} onClick={() => toggleActive(u)}>
                       {u.active ? 'Deactivate' : 'Reactivate'}
                     </button>
+                    {u.faceEnrolled && (
+                      <button style={{ marginLeft: 6 }} onClick={() => resetFace(u.id)}>Reset face</button>
+                    )}
                   </td>
                 </tr>
               ))}
