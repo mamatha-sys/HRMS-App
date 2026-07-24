@@ -527,9 +527,29 @@ seed();
 // Non-destructive migrations for tables that already exist in older databases
 // (ALTER ... ADD COLUMN is a no-op-safe way to evolve without wiping user data).
 function migrate() {
-  const cols = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
-  if (!cols.includes('check_in_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_in_time TEXT');
-  if (!cols.includes('check_out_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_out_time TEXT');
+  const att = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
+  if (!att.includes('check_in_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_in_time TEXT');
+  if (!att.includes('check_out_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_out_time TEXT');
+  if (!att.includes('method')) db.exec("ALTER TABLE attendance ADD COLUMN method TEXT NOT NULL DEFAULT 'Web Check-in'");
+
+  // Detailed salary components (earnings + statutory deductions) — added with sensible defaults
+  // so existing rows get a realistic structure without a reset.
+  const sal = db.prepare('PRAGMA table_info(salary_structures)').all().map((c) => c.name);
+  if (!sal.includes('conveyance')) db.exec('ALTER TABLE salary_structures ADD COLUMN conveyance INTEGER NOT NULL DEFAULT 1600');
+  if (!sal.includes('special_allowance')) db.exec('ALTER TABLE salary_structures ADD COLUMN special_allowance INTEGER NOT NULL DEFAULT 8000');
+  if (!sal.includes('pf')) db.exec('ALTER TABLE salary_structures ADD COLUMN pf INTEGER NOT NULL DEFAULT 4080');
+  if (!sal.includes('pt')) db.exec('ALTER TABLE salary_structures ADD COLUMN pt INTEGER NOT NULL DEFAULT 200');
+  if (!sal.includes('tds')) db.exec('ALTER TABLE salary_structures ADD COLUMN tds INTEGER NOT NULL DEFAULT 850');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS leave_types (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      code TEXT NOT NULL UNIQUE,
+      annual_quota INTEGER NOT NULL DEFAULT 0,
+      unpaid INTEGER NOT NULL DEFAULT 0
+    );
+  `);
 }
 
 // Idempotent seed for the Leave/Payroll modules — fills defaults for existing employees
@@ -543,6 +563,15 @@ function seedModuleData() {
   if (db.prepare('SELECT COUNT(*) AS c FROM salary_structures').get().c === 0) {
     const ins = db.prepare('INSERT INTO salary_structures (employee_id, basic, hra, allowances, deductions) VALUES (?, 40000, 16000, 8000, 4000)');
     employees.forEach((e) => ins.run(e.id));
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM leave_types').get().c === 0) {
+    const ins = db.prepare('INSERT INTO leave_types (name, code, annual_quota, unpaid) VALUES (?, ?, ?, ?)');
+    ins.run('Casual Leave', 'CL', 12, 0);
+    ins.run('Sick Leave', 'SL', 10, 0);
+    ins.run('Earned Leave', 'EL', 18, 0);
+    ins.run('Maternity', 'ML', 182, 0);
+    ins.run('Paternity', 'PL', 15, 0);
+    ins.run('Loss of Pay', 'LWP', 0, 1);
   }
 }
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -7,8 +8,7 @@ const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 
 export default function Payroll() {
   const { user } = useAuth();
-  const canHR = HR_ROLES.includes(user?.role);
-  return canHR ? <HRPayroll /> : <MyPayroll />;
+  return HR_ROLES.includes(user?.role) ? <HRPayroll /> : <MyPayroll />;
 }
 
 function MyPayroll() {
@@ -31,14 +31,7 @@ function MyPayroll() {
     <div>
       <h1>Payroll</h1>
       <div className="subtitle">Your salary structure and payslips.</div>
-      {structure && (
-        <div className="kpi-row">
-          <div className="kpi-card blue"><div className="kpi-label">Basic</div><div className="kpi-value text">{inr(structure.basic)}</div></div>
-          <div className="kpi-card green"><div className="kpi-label">HRA</div><div className="kpi-value text">{inr(structure.hra)}</div></div>
-          <div className="kpi-card gold"><div className="kpi-label">Allowances</div><div className="kpi-value text">{inr(structure.allowances)}</div></div>
-          <div className="kpi-card red"><div className="kpi-label">Net / month</div><div className="kpi-value text">{inr(structure.net)}</div></div>
-        </div>
-      )}
+      {structure && <SalaryBreakdown s={structure} />}
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>My payslips</div>
         {payslips.length === 0 && <div className="empty">No payslips generated yet.</div>}
@@ -55,7 +48,29 @@ function MyPayroll() {
   );
 }
 
+function SalaryBreakdown({ s, badge }) {
+  return (
+    <div className="card">
+      <div className="feature-name" style={{ marginBottom: 8 }}>{badge && <span className="widget-badge">{badge}</span>}Salary Structure</div>
+      <div className="section-label" style={{ paddingLeft: 0, color: '#1E8E5A' }}>Earnings</div>
+      <div className="rec-row"><span>Basic</span><span>{inr(s.basic)}</span></div>
+      <div className="rec-row"><span>HRA</span><span>{inr(s.hra)}</span></div>
+      <div className="rec-row"><span>Conveyance Allowance</span><span>{inr(s.conveyance)}</span></div>
+      <div className="rec-row"><span>Special Allowance</span><span>{inr(s.special_allowance)}</span></div>
+      <div className="rec-row" style={{ fontWeight: 700 }}><span>Gross</span><span>{inr(s.gross)}</span></div>
+      <div className="section-label" style={{ paddingLeft: 0, color: '#B3401E', marginTop: 6 }}>Deductions</div>
+      <div className="rec-row"><span>PF (Provident Fund)</span><span>−{inr(s.pf)}</span></div>
+      <div className="rec-row"><span>PT (Professional Tax)</span><span>−{inr(s.pt)}</span></div>
+      <div className="rec-row"><span>TDS (Income Tax)</span><span>−{inr(s.tds)}</span></div>
+      <div className="rec-row" style={{ fontWeight: 700 }}><span>Total Deductions</span><span>−{inr(s.total_deductions)}</span></div>
+      <div className="rec-row" style={{ fontWeight: 700, background: '#F2F4F8', borderRadius: 6, marginTop: 4 }}><span>Net Pay</span><span>{inr(s.net)}</span></div>
+    </div>
+  );
+}
+
 function HRPayroll() {
+  const { user } = useAuth();
+  const [ov, setOv] = useState(null);
   const [structures, setStructures] = useState([]);
   const [payslips, setPayslips] = useState([]);
   const [error, setError] = useState('');
@@ -63,14 +78,16 @@ function HRPayroll() {
   const [period, setPeriod] = useState('July 2026');
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({});
+  const [showTable, setShowTable] = useState(false);
 
   function load() {
-    api.get('/payroll/structures').then((r) => setStructures(r.data.structures)).catch(() => setError('Could not load.'));
+    api.get('/payroll/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load overview.'));
+    api.get('/payroll/structures').then((r) => setStructures(r.data.structures)).catch(() => {});
     api.get('/payroll/payslips').then((r) => setPayslips(r.data.payslips)).catch(() => {});
   }
   useEffect(load, []);
 
-  function startEdit(s) { setEditing(s.employee_id); setDraft({ basic: s.basic, hra: s.hra, allowances: s.allowances, deductions: s.deductions }); }
+  function startEdit(s) { setEditing(s.employee_id); setDraft({ basic: s.basic, hra: s.hra, conveyance: s.conveyance, special_allowance: s.special_allowance, pf: s.pf, pt: s.pt, tds: s.tds }); }
   async function save(id) {
     setError('');
     try { await api.put(`/payroll/structures/${id}`, draft); setEditing(null); load(); }
@@ -81,52 +98,80 @@ function HRPayroll() {
     try { const r = await api.post('/payroll/run', { period }); setInfo(`Payroll for ${period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Run failed.'); }
   }
+  async function exportCsv() {
+    const lines = ['code,name,department,basic,hra,conveyance,special_allowance,pf,pt,tds,net', ...structures.map((s) => `${s.employee_code},${s.name},${s.department || ''},${s.basic},${s.hra},${s.conveyance},${s.special_allowance},${s.pf},${s.pt},${s.tds},${s.net}`)];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'salary-structures.csv'; a.click(); URL.revokeObjectURL(url);
+  }
 
   return (
     <div>
       <h1>Payroll Management</h1>
-      <div className="subtitle">Maintain salary structures and run payroll to generate payslips.</div>
+      <div className="subtitle">Signed in as: <strong>{user?.name}</strong></div>
+      {ov?.banner && <div className="banner info">{ov.banner}</div>}
       {error && <div className="banner error">{error}</div>}
       {info && <div className="banner info">{info}</div>}
 
-      <div className="card">
-        <div className="row" style={{ alignItems: 'center' }}>
-          <div className="feature-name">Run payroll</div>
-          <div style={{ flex: 1 }} />
-          <input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="e.g. July 2026" style={{ width: 'auto' }} />
-          <button className="primary" onClick={runPayroll}>Run for period</button>
-        </div>
-        <div className="note" style={{ marginTop: 6 }}>Generates one payslip per Active employee from their current salary structure (skips periods already run).</div>
+      <div className="filter-bar">
+        <select disabled><option>All Departments</option></select>
+        <select disabled><option>Cycle</option></select>
+        <div className="spacer" />
+        <button className="primary" onClick={exportCsv}>Export</button>
       </div>
 
-      <div className="card">
-        <div className="feature-name" style={{ marginBottom: 8 }}>Salary structures</div>
-        <div className="matrix-wrap">
-          <table>
-            <thead><tr><th>Code</th><th>Name</th><th>Basic</th><th>HRA</th><th>Allowances</th><th>Deductions</th><th>Net</th><th></th></tr></thead>
-            <tbody>{structures.map((s) => (
-              <tr key={s.employee_id}>
-                <td>{s.employee_code}</td><td>{s.name}</td>
-                {editing === s.employee_id ? (
-                  <>
-                    {['basic', 'hra', 'allowances', 'deductions'].map((k) => (
-                      <td key={k}><input value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} style={{ width: 80 }} /></td>
-                    ))}
-                    <td>{inr((+draft.basic || 0) + (+draft.hra || 0) + (+draft.allowances || 0) - (+draft.deductions || 0))}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}><button className="primary" onClick={() => save(s.employee_id)}>Save</button> <button onClick={() => setEditing(null)}>Cancel</button></td>
-                  </>
-                ) : (
-                  <>
-                    <td>{inr(s.basic)}</td><td>{inr(s.hra)}</td><td>{inr(s.allowances)}</td><td>{inr(s.deductions)}</td>
-                    <td><strong>{inr(s.net)}</strong></td>
-                    <td><button onClick={() => startEdit(s)}>Edit</button></td>
-                  </>
-                )}
-              </tr>
-            ))}</tbody>
-          </table>
+      {ov && (
+        <div className="kpi-row">
+          {ov.kpis.map((k) => <div key={k.label} className={'kpi-card ' + k.color}><div className="kpi-label">{k.label}</div><div className={'kpi-value' + (typeof k.value === 'string' ? ' text' : '')}>{k.value}</div></div>)}
+        </div>
+      )}
+
+      <div className="dashboard-grid">
+        {ov && <SalaryBreakdown s={ov.structureTemplate} badge={1} />}
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Quick Actions</div>
+          <div className="row" style={{ flexWrap: 'wrap' }}>
+            <input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="e.g. July 2026" style={{ flex: '1 1 140px' }} />
+            <button className="primary" onClick={runPayroll}>Run Payroll</button>
+          </div>
+          <button style={{ width: '100%', marginTop: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowTable((v) => !v)}>
+            {showTable ? '− Hide salary structures table' : '+ Configure salary structures'}
+          </button>
+          {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', marginTop: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
         </div>
       </div>
+
+      {showTable && (
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}>Salary structures</div>
+          <div className="matrix-wrap">
+            <table>
+              <thead><tr><th>Code</th><th>Name</th><th>Basic</th><th>HRA</th><th>Conv.</th><th>Special</th><th>PF</th><th>PT</th><th>TDS</th><th>Net</th><th></th></tr></thead>
+              <tbody>{structures.map((s) => (
+                <tr key={s.employee_id}>
+                  <td>{s.employee_code}</td><td>{s.name}</td>
+                  {editing === s.employee_id ? (
+                    <>
+                      {['basic', 'hra', 'conveyance', 'special_allowance', 'pf', 'pt', 'tds'].map((k) => (
+                        <td key={k}><input value={draft[k]} onChange={(e) => setDraft({ ...draft, [k]: e.target.value })} style={{ width: 70 }} /></td>
+                      ))}
+                      <td>{inr((+draft.basic || 0) + (+draft.hra || 0) + (+draft.conveyance || 0) + (+draft.special_allowance || 0) - (+draft.pf || 0) - (+draft.pt || 0) - (+draft.tds || 0))}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}><button className="primary" onClick={() => save(s.employee_id)}>Save</button> <button onClick={() => setEditing(null)}>Cancel</button></td>
+                    </>
+                  ) : (
+                    <>
+                      <td>{inr(s.basic)}</td><td>{inr(s.hra)}</td><td>{inr(s.conveyance)}</td><td>{inr(s.special_allowance)}</td>
+                      <td>{inr(s.pf)}</td><td>{inr(s.pt)}</td><td>{inr(s.tds)}</td>
+                      <td><strong>{inr(s.net)}</strong></td>
+                      <td><button onClick={() => startEdit(s)}>Edit</button></td>
+                    </>
+                  )}
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>Generated payslips</div>

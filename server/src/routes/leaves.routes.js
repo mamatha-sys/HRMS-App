@@ -25,7 +25,75 @@ function daysBetween(from, to) {
   return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 
-const withName = (rows) => rows.map((r) => ({ ...r, employee_name: db.prepare('SELECT name FROM employees WHERE id = ?').get(r.employee_id)?.name }));
+const empOf = (id) => db.prepare('SELECT name, department FROM employees WHERE id = ?').get(id) || {};
+const withName = (rows) => rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name }));
+
+const SCOPE_BANNER = {
+  super_admin: 'Full, unrestricted access — configures Leave Types/Policy and every approval cap itself.',
+  hr_admin: 'Company-wide leave — review, decide and configure leave types across all departments.',
+  manager: 'Team/organization leave — review and decide requests.',
+  assistant_manager: 'Team/organization leave — review and decide requests.'
+};
+
+// Approval chain, bottom → top, from the role workflow (paused roles skipped, employee excluded).
+function approvalChainLabel() {
+  const roles = db.prepare("SELECT name FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC").all();
+  return roles.map((r) => r.name).join(' → ');
+}
+function firstApprover() {
+  const r = db.prepare("SELECT name FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get();
+  return r?.name || 'Manager';
+}
+
+// HR overview: KPIs + approval chain + leave types + on-leave-by-department.
+router.get('/overview', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+
+  const pending = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Pending'").get().c;
+  const approvedMtd = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Approved' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").get().c;
+  const rejectedMtd = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Rejected' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").get().c;
+  const onLeaveToday = db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND date('now') BETWEEN from_date AND to_date").all();
+
+  const chainList = db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC LIMIT 8").all()
+    .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, waiting_on: firstApprover() }));
+
+  // Group today's approved leaves by department.
+  const byDept = {};
+  db.prepare('SELECT name FROM departments ORDER BY name').all().forEach((d) => { byDept[d.name] = []; });
+  onLeaveToday.forEach((l) => {
+    const e = empOf(l.employee_id);
+    const dept = e.department || 'Unassigned';
+    (byDept[dept] = byDept[dept] || []).push({ name: e.name, type: l.type, from_date: l.from_date, to_date: l.to_date, reason: l.reason });
+  });
+
+  res.json({
+    banner: SCOPE_BANNER[req.user.role],
+    kpis: [
+      { label: 'Pending Requests', value: pending, color: 'blue' },
+      { label: 'Approved (MTD)', value: approvedMtd, color: 'green' },
+      { label: 'Rejected (MTD)', value: rejectedMtd, color: 'red' },
+      { label: 'Employees on Leave Today', value: onLeaveToday.length, color: 'gold' }
+    ],
+    chainLabel: approvalChainLabel(),
+    chainList,
+    leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all(),
+    byDept: Object.entries(byDept).map(([department, people]) => ({ department, people }))
+  });
+});
+
+// Leave types (any authed user can read; only super admin configures).
+router.get('/types', (req, res) => res.json({ leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all() }));
+
+router.post('/types', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can add leave types' });
+  const { name, code, annual_quota, unpaid } = req.body || {};
+  if (!name || !code) return res.status(400).json({ error: 'name and code are required' });
+  try {
+    db.prepare('INSERT INTO leave_types (name, code, annual_quota, unpaid) VALUES (?, ?, ?, ?)')
+      .run(name.trim(), code.trim().toUpperCase(), Math.max(0, parseInt(annual_quota, 10) || 0), unpaid ? 1 : 0);
+    res.status(201).json({ leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all() });
+  } catch { res.status(409).json({ error: 'A leave type with this code already exists' }); }
+});
 
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
