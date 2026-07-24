@@ -18,10 +18,73 @@ db.exec(`
     name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('super_admin','manager','employee')),
+    role TEXT NOT NULL,
     face_descriptor TEXT,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    scope_description TEXT,
+    is_system INTEGER NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS perm_modules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS perm_features (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module_id INTEGER NOT NULL REFERENCES perm_modules(id) ON DELETE CASCADE,
+    category TEXT,
+    name TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS role_permissions (
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    feature_id INTEGER NOT NULL REFERENCES perm_features(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    PRIMARY KEY (role_id, feature_id, action)
+  );
+
+  CREATE TABLE IF NOT EXISTS attendance (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    date TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('Present','Absent','Leave')),
+    UNIQUE(employee_id, date)
+  );
+
+  CREATE TABLE IF NOT EXISTS payroll_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Processing' CHECK (status IN ('Processing','Completed','Pending')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL,
+    requester TEXT NOT NULL,
+    detail TEXT,
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+    decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS dashboard_config (
+    widget_key TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    visible INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0
   );
 
   CREATE TABLE IF NOT EXISTS departments (
@@ -219,6 +282,115 @@ function seed() {
   const sensitiveFields = ['bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number'];
   sensitiveFields.forEach((f) => insertFieldPerm.run('manager', f, 'hidden'));
   sensitiveFields.forEach((f) => insertFieldPerm.run('employee', f, 'view'));
+
+  // --- Roles catalog (matches the documented role model) ---
+  const insertRole = db.prepare('INSERT INTO roles (key, name, scope_description, is_system, sort_order) VALUES (?, ?, ?, ?, ?)');
+  const roleRows = [
+    { key: 'super_admin', name: 'Super Admin', scope: 'Company-wide (all branches, all departments)', system: 1 },
+    { key: 'hr_admin', name: 'HR Admin', scope: 'Company-wide (all branches, all departments)', system: 0 },
+    { key: 'manager', name: 'Manager', scope: 'All departments, company-wide', system: 0 },
+    { key: 'assistant_manager', name: 'Assistant Manager', scope: 'All departments, company-wide (supporting role)', system: 0 },
+    { key: 'stl', name: 'Senior Team Lead (STL)', scope: 'Team-A & Team-B (Educational), plus Medical & Manufacturing', system: 0 },
+    { key: 'tl', name: 'Team Lead (TL)', scope: 'Single team (direct reports only)', system: 0 },
+    { key: 'employee', name: 'Employee (Self-Service)', scope: 'Own record only', system: 0 }
+  ];
+  const roleIds = {};
+  roleRows.forEach((r, i) => { roleIds[r.key] = insertRole.run(r.key, r.name, r.scope, r.system, i).lastInsertRowid; });
+
+  // --- Module & feature catalog (drives the permission matrix) ---
+  const MODULE_CATALOG = [
+    { code: '01', name: 'Dashboard Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Total Employees (Attendance, Leaves)', 'Total Branches', 'Total Departments', 'Alerts Notifications', 'Total Expenses', 'Total Deposits', 'Total Salaries Paid', 'AI Requests', 'Asset Allocation', 'Quick Actions', 'Upcoming Events', 'Calendar'] },
+      { category: 'Approval & Policy Configuration', items: ['Pending Approvals'] }
+    ]},
+    { code: '02', name: 'Employee Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Employee Directory', 'Add Employee', 'Employee Profile', 'Personal Information', 'Contact Details', 'Employment Details', 'Documents', 'Education & Experience'] },
+      { category: 'Restricted Fields', items: ['Bank Details', 'Identity Documents (Aadhaar / PAN)'] }
+    ]},
+    { code: '03', name: 'Organization Structure', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Departments', 'Branches', 'Org Chart', 'Reporting Hierarchy'] }
+    ]},
+    { code: '05', name: 'Recruitment Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Open Positions', 'Department Vacancies', 'Candidates', 'Interviews'] }
+    ]},
+    { code: '06', name: 'Onboarding Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Onboarding Checklist', 'Document Collection', 'Induction'] }
+    ]},
+    { code: '07', name: 'Attendance & Time Tracking', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Daily Attendance', 'Check-in / Check-out', 'Regularization', 'Timesheets'] }
+    ]},
+    { code: '08', name: 'Leave Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Leave Application', 'Leave Balance', 'Leave Approval', 'Leave Policy'] }
+    ]},
+    { code: '09', name: 'Payroll Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Payslips', 'Salary Structure', 'Payroll Run', 'Deductions'] }
+    ]},
+    { code: '10', name: 'Performance Management (PMS)', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Goals', 'Appraisals', 'Reviews'] }
+    ]},
+    { code: '11', name: 'Learning Management System (LMS)', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Courses', 'Enrollments', 'Certifications'] }
+    ]},
+    { code: '12', name: 'Asset Management', groups: [
+      { category: 'Core Records & Day-to-Day Operations', items: ['Asset Register', 'Asset Allocation', 'Maintenance'] }
+    ]}
+  ];
+
+  const insertModule = db.prepare('INSERT INTO perm_modules (code, name, sort_order) VALUES (?, ?, ?)');
+  const insertFeature = db.prepare('INSERT INTO perm_features (module_id, category, name, sort_order) VALUES (?, ?, ?, ?)');
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+
+  MODULE_CATALOG.forEach((m, mi) => {
+    const moduleId = insertModule.run(m.code, m.name, mi).lastInsertRowid;
+    let fi = 0;
+    m.groups.forEach((g) => {
+      g.items.forEach((item) => {
+        const featureId = insertFeature.run(moduleId, g.category, item, fi++).lastInsertRowid;
+        // Default grants: super_admin & hr_admin get every action; all other roles get baseline View.
+        roleRows.forEach((r) => {
+          if (r.key === 'super_admin' || r.key === 'hr_admin') {
+            ACTIONS.forEach((a) => insertGrant.run(roleIds[r.key], featureId, a));
+          } else {
+            insertGrant.run(roleIds[r.key], featureId, 'View');
+          }
+        });
+      });
+    });
+  });
+
+  // --- Attendance for today (drives Present/Absent KPIs) ---
+  const insertAttendance = db.prepare("INSERT INTO attendance (employee_id, date, status) VALUES (?, date('now'), ?)");
+  db.prepare('SELECT id, status FROM employees').all().forEach((e, i) => {
+    const present = e.status === 'Active' && i % 6 !== 2; // one active employee marked absent for realism
+    insertAttendance.run(e.id, present ? 'Present' : 'Absent');
+  });
+
+  // --- Payroll run status ---
+  db.prepare('INSERT INTO payroll_runs (period, status) VALUES (?, ?)').run('Current month', 'Processing');
+
+  // --- Pending approvals ---
+  const insertApproval = db.prepare('INSERT INTO approvals (type, requester, detail, status) VALUES (?, ?, ?, ?)');
+  insertApproval.run('Leave', 'Arjun Employee', 'Casual leave — 2 days', 'Pending');
+  insertApproval.run('Expense', 'P. Nair', 'Travel reimbursement — ₹4,500', 'Pending');
+  insertApproval.run('Requisition', 'K. Menon', 'New QA headcount — 1 position', 'Pending');
+
+  // --- Dashboard widget visibility config ---
+  const insertConfig = db.prepare('INSERT INTO dashboard_config (widget_key, label, visible, sort_order) VALUES (?, ?, ?, ?)');
+  const widgets = [
+    ['kpis', 'KPI cards (Employees, Present, Absent, Payroll)'],
+    ['growth_chart', 'Employee / Organization Growth chart'],
+    ['hiring_chart', 'New Hires by Year chart'],
+    ['department_chart', 'Department Strength & Distribution chart'],
+    ['approvals', 'Pending Approvals'],
+    ['tasks', 'Pending Tasks & Reminders'],
+    ['notifications', 'Alerts & Notifications'],
+    ['quick_actions', 'Quick Actions'],
+    ['vacancies', 'Department-wise Vacancies'],
+    ['calendar', 'Calendar & Upcoming Events'],
+    ['role_user', 'Role & User Management summary']
+  ];
+  widgets.forEach((w, i) => insertConfig.run(w[0], w[1], 1, i));
 
   void adminId;
 }

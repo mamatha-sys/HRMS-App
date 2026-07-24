@@ -9,6 +9,8 @@ import CustomFeature from './pages/CustomFeature.jsx';
 import Organization from './pages/Organization.jsx';
 import Permissions from './pages/Permissions.jsx';
 import UserManagement from './pages/UserManagement.jsx';
+import ManageRoles from './pages/ManageRoles.jsx';
+import Configurations from './pages/Configurations.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -29,6 +31,8 @@ export default function App() {
         <Route path="/recruitment" element={<Recruitment />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
+        <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />
+        <Route path="/roles" element={<RequireSuperAdmin><ManageRoles /></RequireSuperAdmin>} />
         <Route path="/organization" element={<RequireSuperAdmin><Organization /></RequireSuperAdmin>} />
         <Route path="/permissions" element={<RequireSuperAdmin><Permissions /></RequireSuperAdmin>} />
         <Route path="/users" element={<RequireSuperAdmin><UserManagement /></RequireSuperAdmin>} />

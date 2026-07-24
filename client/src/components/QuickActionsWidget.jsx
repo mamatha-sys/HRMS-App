@@ -2,8 +2,8 @@ import { Link } from 'react-router-dom';
 
 const ACTIONS = [
   { to: '/employees', label: '+ Add Employee', roles: ['super_admin', 'manager'] },
-  { to: '/permissions', label: '+ Configure permissions', roles: ['super_admin'] },
-  { to: '/users', label: '+ Manage Roles', roles: ['super_admin'] },
+  { to: '/configurations', label: '+ Configure Dashboard', roles: ['super_admin'] },
+  { to: '/roles', label: '+ Manage Roles', roles: ['super_admin'] },
   { to: '/manage-modules', label: '+ Add Module', roles: ['super_admin'] },
   { to: '/manage-modules', label: '+ Add Features', roles: ['super_admin'] }
 ];

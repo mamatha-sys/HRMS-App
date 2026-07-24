@@ -23,14 +23,26 @@ router.get('/summary', (req, res) => {
   const active = db.prepare(`SELECT COUNT(*) AS c FROM employees ${whereSql ? whereSql + " AND status = 'Active'" : "WHERE status = 'Active'"}`).get(params).c;
   const inactive = total - active;
   const departments = db.prepare(`SELECT COUNT(DISTINCT department) AS c FROM employees ${whereSql}`).get(params).c;
-  const openPositions = db.prepare("SELECT COALESCE(SUM(target_headcount),0) AS c FROM positions WHERE status = 'Open'").get().c;
+
+  // Today's attendance, respecting the same department/branch/status filter via a join on employees.
+  const empFilter = whereSql ? whereSql.replace(/(department|branch|status)/g, 'e.$1') : '';
+  const presentToday = db.prepare(`
+    SELECT COUNT(*) AS c FROM attendance a JOIN employees e ON e.id = a.employee_id
+    WHERE a.date = date('now') AND a.status = 'Present' ${empFilter ? 'AND ' + empFilter.replace('WHERE ', '') : ''}
+  `).get(params).c;
+  const absentToday = db.prepare(`
+    SELECT COUNT(*) AS c FROM attendance a JOIN employees e ON e.id = a.employee_id
+    WHERE a.date = date('now') AND a.status = 'Absent' ${empFilter ? 'AND ' + empFilter.replace('WHERE ', '') : ''}
+  `).get(params).c;
+
+  const payrollRun = db.prepare('SELECT * FROM payroll_runs ORDER BY id DESC LIMIT 1').get();
+  const payrollStatus = payrollRun ? payrollRun.status : 'Pending';
 
   const kpis = [
     { label: 'Total Employees', value: total, color: 'blue' },
-    { label: 'Active', value: active, color: 'green' },
-    { label: 'Inactive', value: inactive, color: 'red' },
-    { label: 'Departments', value: departments, color: 'gold' },
-    { label: 'Open Positions', value: openPositions, color: 'gold' }
+    { label: 'Present Today', value: presentToday, color: 'green' },
+    { label: 'Absent Today', value: absentToday, color: 'red' },
+    { label: 'Payroll Status', value: payrollStatus, color: 'gold' }
   ];
 
   const departmentBreakdown = db
@@ -49,13 +61,18 @@ router.get('/summary', (req, res) => {
 
   const usersCount = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
 
+  const configRows = db.prepare('SELECT widget_key, visible FROM dashboard_config').all();
+  const widgetVisibility = {};
+  configRows.forEach((c) => { widgetVisibility[c.widget_key] = !!c.visible; });
+
   res.json({
     role: req.user.role,
     kpis,
     departmentBreakdown,
     growthTrend,
     hiringTrend,
-    usersCount
+    usersCount,
+    widgetVisibility
   });
 });
 

@@ -9,12 +9,15 @@ import TasksWidget from '../components/TasksWidget.jsx';
 import VacanciesWidget from '../components/VacanciesWidget.jsx';
 import QuickActionsWidget from '../components/QuickActionsWidget.jsx';
 import RoleUserSummaryWidget from '../components/RoleUserSummaryWidget.jsx';
+import ApprovalsWidget from '../components/ApprovalsWidget.jsx';
 
 const BANNERS = {
   super_admin: 'Full, unrestricted access — every widget below, organization-wide, no scope restriction.',
-  manager: 'Team/organization view — bank and identity fields are masked on records that are not your own, per Manage Permissions.',
+  manager: 'Team/organization view — bank and identity fields are masked on records that are not your own, per Manage Roles.',
   employee: 'You see only your own information — no organization-wide or team data on this screen.'
 };
+
+const DECIDER_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -23,6 +26,9 @@ export default function Dashboard() {
   const [departments, setDepartments] = useState([]);
   const [branches, setBranches] = useState([]);
   const [filters, setFilters] = useState({ department: '', branch: '', status: '' });
+
+  const canManage = user?.role === 'super_admin' || user?.role === 'manager';
+  const canDecide = DECIDER_ROLES.includes(user?.role);
 
   function load(f) {
     const params = {};
@@ -46,6 +52,9 @@ export default function Dashboard() {
     a.href = url; a.download = 'employees.csv'; a.click();
     URL.revokeObjectURL(url);
   }
+
+  const vis = summary?.widgetVisibility || {};
+  const show = (key) => vis[key] !== false;
 
   return (
     <div>
@@ -73,45 +82,41 @@ export default function Dashboard() {
               <option value="Inactive">Inactive</option>
             </select>
             <div className="spacer" />
-            {(user?.role === 'super_admin' || user?.role === 'manager') && (
-              <button className="primary" onClick={downloadCsv}>Export</button>
-            )}
+            {canManage && <button className="primary" onClick={downloadCsv}>Export</button>}
           </div>
 
-          <div className="kpi-row">
-            {summary.kpis.map((k) => (
-              <div key={k.label} className={'kpi-card ' + k.color}>
-                <div className="kpi-label">{k.label}</div>
-                <div className="kpi-value">{k.value}</div>
-              </div>
-            ))}
-          </div>
-
-          <div className="dashboard-grid">
-            <div>
-              <LineChart title="Employee / Organization Growth" data={summary.growthTrend} exportFilename="growth.csv" />
-              <BarChart title="New Hires by Year" data={summary.hiringTrend} exportFilename="hiring.csv" />
-              <BarChart title="Department Strength & Distribution" data={summary.departmentBreakdown.map((d) => ({ label: d.department, value: d.count }))} exportFilename="departments.csv" />
-            </div>
-            <div>
-              <TasksWidget badge={1} canAssignOthers={user?.role === 'super_admin' || user?.role === 'manager'} />
-            </div>
-            <div>
-              <NotificationsWidget badge={2} canCreate={user?.role === 'super_admin' || user?.role === 'manager'} />
-            </div>
-          </div>
-
-          <div className="dashboard-grid">
-            <QuickActionsWidget badge={3} role={user?.role} />
-            <VacanciesWidget badge={4} />
-            <EventsWidget badge={5} canCreate={user?.role === 'super_admin' || user?.role === 'manager'} />
-          </div>
-
-          {user?.role === 'super_admin' && (
-            <div className="dashboard-grid">
-              <RoleUserSummaryWidget badge={6} usersCount={summary.usersCount} />
+          {show('kpis') && (
+            <div className="kpi-row">
+              {summary.kpis.map((k) => (
+                <div key={k.label} className={'kpi-card ' + k.color}>
+                  <div className="kpi-label">{k.label}</div>
+                  <div className={'kpi-value' + (typeof k.value === 'string' ? ' text' : '')}>{k.value}</div>
+                </div>
+              ))}
             </div>
           )}
+
+          <div className="dashboard-grid">
+            <div>
+              {show('growth_chart') && <LineChart title="Employee / Organization Growth" data={summary.growthTrend} exportFilename="growth.csv" />}
+              {show('hiring_chart') && <BarChart title="New Hires by Year" data={summary.hiringTrend} exportFilename="hiring.csv" />}
+              {show('department_chart') && <BarChart title="Department Strength & Distribution" data={summary.departmentBreakdown.map((d) => ({ label: d.department, value: d.count }))} exportFilename="departments.csv" />}
+            </div>
+            <div>
+              {show('approvals') && <ApprovalsWidget badge={1} canDecide={canDecide} />}
+              {show('tasks') && <TasksWidget badge={2} canAssignOthers={canManage} />}
+            </div>
+            <div>
+              {show('notifications') && <NotificationsWidget badge={3} canCreate={canManage} />}
+              {show('calendar') && <EventsWidget badge={4} canCreate={canManage} />}
+            </div>
+          </div>
+
+          <div className="dashboard-grid">
+            {show('quick_actions') && <QuickActionsWidget badge={5} role={user?.role} />}
+            {show('vacancies') && <VacanciesWidget badge={6} />}
+            {show('role_user') && user?.role === 'super_admin' && <RoleUserSummaryWidget badge={7} usersCount={summary.usersCount} />}
+          </div>
         </>
       )}
 
