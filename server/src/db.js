@@ -194,17 +194,22 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     employee_code TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
+    email TEXT UNIQUE,
     phone TEXT,
     photo TEXT,
     date_of_birth TEXT,
     emergency_contact_name TEXT,
     emergency_contact_relation TEXT,
     emergency_contact_number TEXT,
+    address_street TEXT,
+    address_city TEXT,
+    address_state TEXT,
+    address_country TEXT,
+    address_pincode TEXT,
     department TEXT NOT NULL,
     branch TEXT,
     designation TEXT NOT NULL,
-    date_of_joining TEXT NOT NULL,
+    date_of_joining TEXT,
     reporting_manager TEXT,
     status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','On Probation','Exited')),
     bank_name TEXT,
@@ -216,6 +221,8 @@ db.exec(`
     experience TEXT,
     skills TEXT,
     documents TEXT,
+    stage TEXT NOT NULL DEFAULT 'locked' CHECK (stage IN ('draft','assigned','submitted','locked')),
+    edit_requested INTEGER NOT NULL DEFAULT 0,
     user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -233,6 +240,8 @@ function seed() {
   const adminId = insertUser.run('Super Admin', 'admin@hrms.com', hash('Admin@123'), 'super_admin').lastInsertRowid;
   const managerId = insertUser.run('Priya Manager', 'manager@hrms.com', hash('Manager@123'), 'manager').lastInsertRowid;
   const employeeId = insertUser.run('Arjun Employee', 'employee@hrms.com', hash('Employee@123'), 'employee').lastInsertRowid;
+  // A spare employee-role login with no employee record yet — used to demo Stage 2 (HR assigns a draft to an employee).
+  insertUser.run('New Joiner', 'newjoiner@hrms.com', hash('Joiner@123'), 'employee');
 
   const insertEmployee = db.prepare(`
     INSERT INTO employees (
@@ -281,6 +290,16 @@ function seed() {
       department: 'QA', branch: 'Bengaluru', designation: 'QA Lead', date_of_joining: '2021-09-17', reporting_manager: 'Super Admin', status: 'Active' }
   ];
   rows.forEach((r) => insertEmployee.run(r));
+
+  // Varied onboarding stages so every stage is visible in the demo:
+  // EMP-002 (Arjun, the employee login) is 'assigned' → log in as employee@hrms.com to fill & submit.
+  // EMP-003 is 'submitted' → HR sees it under review. EMP-005 is 'draft' → HR can assign it.
+  const setStage = db.prepare('UPDATE employees SET stage = ? WHERE employee_code = ?');
+  setStage.run('assigned', 'EMP-002');
+  setStage.run('submitted', 'EMP-003');
+  setStage.run('draft', 'EMP-005');
+  // Give the seeded records a sample address.
+  db.prepare("UPDATE employees SET address_street='12 MG Road', address_city='Hyderabad', address_state='Telangana', address_country='India', address_pincode='500081' WHERE employee_code IN ('EMP-001','EMP-002')").run();
 
   const insertDept = db.prepare('INSERT INTO departments (name, parent_department_id) VALUES (?, ?)');
   const engId = insertDept.run('Engineering', null).lastInsertRowid;

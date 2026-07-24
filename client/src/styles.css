@@ -60,6 +60,8 @@ td:first-child { font-weight: 600; }
 .status-tag.present { background: #E4F5EC; color: #1E8E5A; }
 .status-tag.absent { background: #FBEAE5; color: #B3401E; }
 .status-tag.pending { background: #FBF2DE; color: #946E0A; }
+.status-tag.locked { background: #EEF0F3; color: #5A6472; }
+.status-tag.info { background: #E8EEF9; color: #2E5CB8; }
 
 .banner { padding: 10px 14px; border-radius: 8px; font-size: 12.5px; margin-bottom: 16px; font-weight: 600; }
 .banner.error { background: #FBEAE5; border: 1px solid #B3401E; color: #B3401E; }

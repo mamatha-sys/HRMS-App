@@ -43,7 +43,14 @@ Login requires email + password **and** a webcam face capture:
 ## Modules (sidebar)
 
 - **Dashboard** — role-scoped. KPI cards (Total Employees, Active / Inactive, New Hires (90d), Open Positions, Present Today, Absent Today, Pending Approvals, Payroll Status), Employee/Organization Growth line chart, New Hires bar chart, Department Strength bar chart, and numbered widgets: Pending Approvals (with Approve/Reject), Tasks, Alerts & Notifications, Calendar & Events, Quick Actions, Department-wise Vacancies, and a Role & User summary. A department/branch/status filter bar re-computes the KPIs and charts. Which widgets appear is controlled by **Configurations**.
-- **Employee Management** — its own KPI cards (Total Employees, Active, On Probation, Exited) and a table with an expandable detail view. The add/edit form captures: Employee ID (optional — auto-generated if blank), personal info, **employee photo upload** (with preview), emergency contact, employment details, bank details, education & work experience, and a **Documents** section where you upload any number of files each with an **editable label name** (offer letter, ID proof, certificates). Photos and documents are stored with the record and shown in the detail view. Bank fields are masked for managers viewing other employees' records. Department/branch are selected from real master data. Employee status is Active / On Probation / Exited.
+- **Employee Management** — its own KPI cards (Total Employees, Active, On Probation, Exited), quick-action links (Bulk Import, Add Departments, Add Branch, Configuration Policies), and a **5-stage onboarding workflow** per record:
+  1. **HR creates a draft** — Employee ID + Name + Department + Designation.
+  2. **HR assigns** the draft to an employee-role user so they can fill it in.
+  3. **Employee fills** their own details (photo, address — street/city/state/country/pincode, emergency contact, bank, education, documents) and **Submits**. Employees can't change their department/designation/status.
+  4. **HR reviews** and **Approves** (the profile **locks**) or **Rejects** (back to the employee).
+  5. Once locked, nobody can edit until the **employee raises an edit request** and **HR approves** it, which unlocks the profile for re-filling → back to step 3/4.
+
+  Each record shows a Stage badge (Draft / Assigned / Submitted / Locked). The **Documents** section takes any number of files each with an **editable label name**. Bank fields are masked for managers viewing others' records. Status is Active / On Probation / Exited.
 
 ### Admin (Super Admin only)
 
