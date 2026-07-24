@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext.jsx';
-import { loadFaceModels, extractFaceDescriptor } from '../faceApi.js';
+import { loadFaceModels, extractFaceDescriptor, detectFacePresence } from '../faceApi.js';
 
 export default function Login() {
   const { login } = useAuth();
@@ -10,6 +10,7 @@ export default function Login() {
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const detectLoopRef = useRef(null);
 
   const [email, setEmail] = useState('admin@hrms.com');
   const [password, setPassword] = useState('Admin@123');
@@ -17,6 +18,7 @@ export default function Login() {
   const [info, setInfo] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [cameraStatus, setCameraStatus] = useState('loading'); // loading | ready | error
+  const [facePresent, setFacePresent] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -24,7 +26,9 @@ export default function Login() {
     async function setup() {
       try {
         await loadFaceModels();
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
+        });
         if (cancelled) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -35,6 +39,12 @@ export default function Login() {
           await videoRef.current.play();
         }
         setCameraStatus('ready');
+
+        detectLoopRef.current = setInterval(async () => {
+          if (cancelled || !videoRef.current) return;
+          const present = await detectFacePresence(videoRef.current);
+          if (!cancelled) setFacePresent(present);
+        }, 500);
       } catch (err) {
         setCameraStatus('error');
         setError('Camera/model setup failed: ' + (err.message || 'permission denied or unsupported browser.'));
@@ -44,6 +54,7 @@ export default function Login() {
 
     return () => {
       cancelled = true;
+      if (detectLoopRef.current) clearInterval(detectLoopRef.current);
       streamRef.current?.getTracks().forEach((t) => t.stop());
     };
   }, []);
@@ -62,7 +73,7 @@ export default function Login() {
     try {
       const descriptor = await extractFaceDescriptor(videoRef.current);
       if (!descriptor) {
-        setError('No face detected. Center your face in the frame, ensure good lighting, and try again.');
+        setError('No face detected. Move closer, face the camera directly, and make sure the room is well lit.');
         setSubmitting(false);
         return;
       }
@@ -111,6 +122,11 @@ export default function Login() {
             <video ref={videoRef} muted playsInline className="camera-video" />
             {cameraStatus === 'loading' && <div className="camera-overlay">Loading camera &amp; face models...</div>}
             {cameraStatus === 'error' && <div className="camera-overlay">Camera unavailable</div>}
+            {cameraStatus === 'ready' && (
+              <div className={'face-indicator ' + (facePresent ? 'ok' : 'warn')}>
+                {facePresent ? '✓ Face detected' : 'No face detected'}
+              </div>
+            )}
           </div>
           <div className="note" style={{ marginBottom: 10 }}>
             First login enrolls your face for this account. Later logins are blocked if the captured face doesn't match.
