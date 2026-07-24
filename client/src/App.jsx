@@ -14,6 +14,9 @@ import Configurations from './pages/Configurations.jsx';
 import ConfigurationPolicies from './pages/ConfigurationPolicies.jsx';
 import OrgStructure from './pages/OrgStructure.jsx';
 import BulkImport from './pages/BulkImport.jsx';
+import Attendance from './pages/Attendance.jsx';
+import Leave from './pages/Leave.jsx';
+import Payroll from './pages/Payroll.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -31,6 +34,9 @@ export default function App() {
       >
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/employees" element={<Employees />} />
+        <Route path="/attendance" element={<Attendance />} />
+        <Route path="/leave" element={<Leave />} />
+        <Route path="/payroll" element={<Payroll />} />
         <Route path="/recruitment" element={<Recruitment />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />

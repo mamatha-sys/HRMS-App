@@ -52,6 +52,10 @@ Login requires email + password **and** a webcam face capture:
 
   Each record shows a Stage badge (Draft / Assigned / Submitted / Locked). The **Documents** section takes any number of files each with an **editable label name**. Bank fields are masked for managers viewing others' records. Status is Active / On Probation / Exited.
 
+- **Attendance** — Employees check in / check out (times recorded) and see their last-30-days history, and can raise a **regularization** request (routed to the approvals queue). HR gets a per-date grid of every employee with a Present/Absent/Leave marker and a live Present/Absent/On-Leave/Unmarked summary.
+- **Leave Management** — Employees see their Casual/Sick/Earned balance, apply for leave (days auto-computed, blocked if over balance), and track their requests. HR approves/rejects; an approval deducts the balance.
+- **Payroll** — HR maintains per-employee salary structures (basic/HRA/allowances/deductions → net) and runs payroll for a period, generating one payslip per Active employee (re-runs skip already-generated periods). Employees see their structure and download their payslips.
+
 ### Admin (Super Admin only)
 
 - **Configurations** — customize the Dashboard: toggle which cards/charts/widgets are shown. Persisted server-side; applies to everyone's dashboard.

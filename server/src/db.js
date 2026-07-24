@@ -190,6 +190,49 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  -- Leave Management module
+  CREATE TABLE IF NOT EXISTS leaves (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    type TEXT NOT NULL CHECK (type IN ('Casual','Sick','Earned')),
+    from_date TEXT NOT NULL,
+    to_date TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+    decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS leave_balances (
+    employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
+    casual INTEGER NOT NULL DEFAULT 12,
+    sick INTEGER NOT NULL DEFAULT 8,
+    earned INTEGER NOT NULL DEFAULT 15
+  );
+
+  -- Payroll Management module
+  CREATE TABLE IF NOT EXISTS salary_structures (
+    employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
+    basic INTEGER NOT NULL DEFAULT 0,
+    hra INTEGER NOT NULL DEFAULT 0,
+    allowances INTEGER NOT NULL DEFAULT 0,
+    deductions INTEGER NOT NULL DEFAULT 0
+  );
+
+  CREATE TABLE IF NOT EXISTS payslips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+    period TEXT NOT NULL,
+    basic INTEGER NOT NULL,
+    hra INTEGER NOT NULL,
+    allowances INTEGER NOT NULL,
+    deductions INTEGER NOT NULL,
+    net INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(employee_id, period)
+  );
+
   CREATE TABLE IF NOT EXISTS employees (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     employee_code TEXT NOT NULL UNIQUE,
@@ -480,5 +523,30 @@ function seed() {
 }
 
 seed();
+
+// Non-destructive migrations for tables that already exist in older databases
+// (ALTER ... ADD COLUMN is a no-op-safe way to evolve without wiping user data).
+function migrate() {
+  const cols = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
+  if (!cols.includes('check_in_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_in_time TEXT');
+  if (!cols.includes('check_out_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_out_time TEXT');
+}
+
+// Idempotent seed for the Leave/Payroll modules — fills defaults for existing employees
+// only when the tables are empty, so it runs safely on a database that already has data.
+function seedModuleData() {
+  const employees = db.prepare('SELECT id FROM employees').all();
+  if (db.prepare('SELECT COUNT(*) AS c FROM leave_balances').get().c === 0) {
+    const ins = db.prepare('INSERT INTO leave_balances (employee_id, casual, sick, earned) VALUES (?, 12, 8, 15)');
+    employees.forEach((e) => ins.run(e.id));
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM salary_structures').get().c === 0) {
+    const ins = db.prepare('INSERT INTO salary_structures (employee_id, basic, hra, allowances, deductions) VALUES (?, 40000, 16000, 8000, 4000)');
+    employees.forEach((e) => ins.run(e.id));
+  }
+}
+
+migrate();
+seedModuleData();
 
 export default db;
