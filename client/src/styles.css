@@ -62,6 +62,18 @@ td:first-child { font-weight: 600; }
 
 .banner { padding: 10px 14px; border-radius: 8px; font-size: 12.5px; margin-bottom: 16px; font-weight: 600; }
 .banner.error { background: #FBEAE5; border: 1px solid #B3401E; color: #B3401E; }
+.banner.info { background: #FBF2DE; border: 1px solid #946E0A; color: #946E0A; }
+
+.filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; align-items: center; }
+.filter-bar select { width: auto; min-width: 140px; }
+.filter-bar .spacer { flex: 1; }
+
+.dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; align-items: start; margin-bottom: 14px; }
+
+.widget-badge { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: #B3401E; color: #fff; font-size: 11px; font-weight: 700; margin-right: 8px; }
+
+.mini-progress { height: 8px; background: #EEF0F3; border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.mini-progress .fill { height: 100%; }
 
 .login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #161E33; }
 .login-card { background: #fff; border-radius: 12px; padding: 32px 28px; width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,.25); }

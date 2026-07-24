@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../api.js';
 
-export default function EventsWidget({ canCreate }) {
+export default function EventsWidget({ canCreate, badge }) {
   const [events, setEvents] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState('');
@@ -35,7 +35,7 @@ export default function EventsWidget({ canCreate }) {
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div className="feature-name">Calendar &amp; Upcoming Events</div>
+        <div className="feature-name">{badge && <span className="widget-badge">{badge}</span>}Calendar &amp; Upcoming Events</div>
         {canCreate && <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add event'}</button>}
       </div>
 

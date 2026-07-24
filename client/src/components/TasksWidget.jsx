@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-export default function TasksWidget({ canAssignOthers }) {
+export default function TasksWidget({ canAssignOthers, badge }) {
   const { user } = useAuth();
   const [tasks, setTasks] = useState([]);
   const [assignees, setAssignees] = useState([]);
@@ -44,7 +44,7 @@ export default function TasksWidget({ canAssignOthers }) {
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div className="feature-name">Pending Tasks &amp; Reminders</div>
+        <div className="feature-name">{badge && <span className="widget-badge">{badge}</span>}Pending Tasks &amp; Reminders</div>
         <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add task'}</button>
       </div>
 

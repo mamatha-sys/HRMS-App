@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import api from '../api.js';
 
-export default function NotificationsWidget({ canCreate }) {
+export default function NotificationsWidget({ canCreate, badge }) {
   const [notifications, setNotifications] = useState([]);
   const [showForm, setShowForm] = useState(false);
   const [title, setTitle] = useState('');
@@ -34,7 +34,7 @@ export default function NotificationsWidget({ canCreate }) {
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-        <div className="feature-name">Alerts &amp; Notifications</div>
+        <div className="feature-name">{badge && <span className="widget-badge">{badge}</span>}Alerts &amp; Notifications</div>
         {canCreate && <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Send'}</button>}
       </div>
 
