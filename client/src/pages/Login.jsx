@@ -19,6 +19,7 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
   const [cameraStatus, setCameraStatus] = useState('loading'); // loading | ready | error
   const [facePresent, setFacePresent] = useState(false);
+  const [videoInfo, setVideoInfo] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +40,7 @@ export default function Login() {
           await videoRef.current.play();
         }
         setCameraStatus('ready');
+        setVideoInfo(`${videoRef.current.videoWidth}×${videoRef.current.videoHeight}`);
 
         detectLoopRef.current = setInterval(async () => {
           if (cancelled || !videoRef.current) return;
@@ -130,6 +132,7 @@ export default function Login() {
           </div>
           <div className="note" style={{ marginBottom: 10 }}>
             First login enrolls your face for this account. Later logins are blocked if the captured face doesn't match.
+            {videoInfo && ` (camera resolution: ${videoInfo})`}
           </div>
 
           <button className="primary login-submit" type="submit" disabled={submitting || cameraStatus !== 'ready'}>
