@@ -16,6 +16,7 @@ import modulesRoutes from './routes/modules.routes.js';
 import rolesRoutes from './routes/roles.routes.js';
 import approvalsRoutes from './routes/approvals.routes.js';
 import configRoutes from './routes/config.routes.js';
+import policiesRoutes from './routes/policies.routes.js';
 
 const app = express();
 app.use(cors());
@@ -37,6 +38,7 @@ app.use('/api/modules', modulesRoutes);
 app.use('/api/roles', rolesRoutes);
 app.use('/api/approvals', approvalsRoutes);
 app.use('/api/config', configRoutes);
+app.use('/api/policies', policiesRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

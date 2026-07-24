@@ -11,6 +11,9 @@ import Permissions from './pages/Permissions.jsx';
 import UserManagement from './pages/UserManagement.jsx';
 import ManageRoles from './pages/ManageRoles.jsx';
 import Configurations from './pages/Configurations.jsx';
+import ConfigurationPolicies from './pages/ConfigurationPolicies.jsx';
+import OrgStructure from './pages/OrgStructure.jsx';
+import BulkImport from './pages/BulkImport.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -32,6 +35,9 @@ export default function App() {
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
         <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />
+        <Route path="/policies" element={<RequireSuperAdmin><ConfigurationPolicies /></RequireSuperAdmin>} />
+        <Route path="/org-structure" element={<RequireSuperAdmin><OrgStructure /></RequireSuperAdmin>} />
+        <Route path="/bulk-import" element={<BulkImport />} />
         <Route path="/roles" element={<RequireSuperAdmin><ManageRoles /></RequireSuperAdmin>} />
         <Route path="/organization" element={<RequireSuperAdmin><Organization /></RequireSuperAdmin>} />
         <Route path="/permissions" element={<RequireSuperAdmin><Permissions /></RequireSuperAdmin>} />

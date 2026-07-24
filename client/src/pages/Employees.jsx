@@ -12,6 +12,12 @@ const EMPTY_FORM = {
 
 const MAX_FILE_BYTES = 3 * 1024 * 1024; // 3 MB per file
 
+function statusClass(status) {
+  if (status === 'Active') return 'present';
+  if (status === 'On Probation') return 'pending';
+  return 'absent';
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -141,6 +147,15 @@ export default function Employees() {
       {error && <div className="banner error">{error}</div>}
 
       {canEdit && (
+        <div className="kpi-row">
+          <div className="kpi-card blue"><div className="kpi-label">Total Employees</div><div className="kpi-value">{employees.length}</div></div>
+          <div className="kpi-card green"><div className="kpi-label">Active</div><div className="kpi-value">{employees.filter((e) => e.status === 'Active').length}</div></div>
+          <div className="kpi-card gold"><div className="kpi-label">On Probation</div><div className="kpi-value">{employees.filter((e) => e.status === 'On Probation').length}</div></div>
+          <div className="kpi-card red"><div className="kpi-label">Exited</div><div className="kpi-value">{employees.filter((e) => e.status === 'Exited').length}</div></div>
+        </div>
+      )}
+
+      {canEdit && (
         <div className="row" style={{ marginBottom: 14, justifyContent: 'flex-end' }}>
           <button className="primary" onClick={startCreate}>+ Add employee</button>
         </div>
@@ -197,7 +212,8 @@ export default function Employees() {
                 <label className="field-label">Status</label>
                 <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
                   <option value="Active">Active</option>
-                  <option value="Inactive">Inactive</option>
+                  <option value="On Probation">On Probation</option>
+                  <option value="Exited">Exited</option>
                 </select>
               </div>
             </div>
@@ -207,12 +223,6 @@ export default function Employees() {
               {field('bank_name', 'Bank name')}
               {field('bank_account_number', 'Account number')}
               {field('ifsc_code', 'IFSC code')}
-            </div>
-
-            <div className="section-label" style={{ paddingLeft: 0 }}>Identity documents <span className="note">(restricted)</span></div>
-            <div className="grid2">
-              {field('aadhaar_number', 'Aadhaar number')}
-              {field('pan_number', 'PAN number')}
             </div>
 
             <div className="section-label" style={{ paddingLeft: 0 }}>Education &amp; work experience</div>
@@ -273,7 +283,7 @@ export default function Employees() {
                     <td>{emp.department}</td>
                     <td>{emp.designation}</td>
                     <td>{emp.date_of_joining}</td>
-                    <td><span className={'status-tag ' + (emp.status === 'Active' ? 'present' : 'absent')}>{emp.status}</span></td>
+                    <td><span className={'status-tag ' + statusClass(emp.status)}>{emp.status}</span></td>
                     {canEdit && (
                       <td>
                         <button onClick={() => startEdit(emp)}>Edit</button>
@@ -306,16 +316,14 @@ export default function Employees() {
                             </div>
                           ) : <div className="note">No documents uploaded.</div>}
 
-                          <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Bank &amp; identity details</div>
+                          <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Bank details</div>
                           {emp.sensitiveFieldsMasked ? (
-                            <div className="empty">Masked — bank and identity details are only visible to Super Admin or the employee themselves.</div>
+                            <div className="empty">Masked — bank details are only visible to Super Admin or the employee themselves.</div>
                           ) : (
                             <div className="grid2">
                               <div>Bank: <strong>{emp.bank_name || '—'}</strong></div>
                               <div>Account number: <strong>{emp.bank_account_number || '—'}</strong></div>
                               <div>IFSC: <strong>{emp.ifsc_code || '—'}</strong></div>
-                              <div>Aadhaar: <strong>{emp.aadhaar_number || '—'}</strong></div>
-                              <div>PAN: <strong>{emp.pan_number || '—'}</strong></div>
                             </div>
                           )}
                         </div>

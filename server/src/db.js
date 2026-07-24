@@ -30,6 +30,7 @@ db.exec(`
     name TEXT NOT NULL,
     scope_description TEXT,
     is_system INTEGER NOT NULL DEFAULT 0,
+    paused INTEGER NOT NULL DEFAULT 0,
     sort_order INTEGER NOT NULL DEFAULT 0
   );
 
@@ -90,13 +91,25 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS departments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    parent_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL
+    parent_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS branches (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    location TEXT
+    location TEXT,
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS policies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category TEXT NOT NULL CHECK (category IN ('business','rule','setting')),
+    name TEXT NOT NULL,
+    value TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
   CREATE TABLE IF NOT EXISTS field_permissions (
@@ -156,6 +169,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS custom_modules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -192,7 +206,7 @@ db.exec(`
     designation TEXT NOT NULL,
     date_of_joining TEXT NOT NULL,
     reporting_manager TEXT,
-    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Inactive')),
+    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','On Probation','Exited')),
     bank_name TEXT,
     bank_account_number TEXT,
     ifsc_code TEXT,
@@ -260,7 +274,7 @@ function seed() {
     { ...base, employee_code: 'EMP-003', name: 'D. Fernandes', email: 'd.fernandes@hrms.com', phone: '9000000003',
       department: 'QA', branch: 'Bengaluru', designation: 'QA Engineer', date_of_joining: '2022-01-10', reporting_manager: 'K. Menon', status: 'Active' },
     { ...base, employee_code: 'EMP-004', name: 'R. Iyer', email: 'r.iyer@hrms.com', phone: '9000000004',
-      department: 'Sales', branch: 'Chennai', designation: 'Sales Executive', date_of_joining: '2020-11-20', reporting_manager: 'P. Nair', status: 'Inactive' },
+      department: 'Sales', branch: 'Chennai', designation: 'Sales Executive', date_of_joining: '2020-11-20', reporting_manager: 'P. Nair', status: 'Exited' },
     { ...base, employee_code: 'EMP-005', name: 'P. Nair', email: 'p.nair@hrms.com', phone: '9000000005',
       department: 'Sales', branch: 'Chennai', designation: 'Sales Manager', date_of_joining: '2019-08-05', reporting_manager: 'Super Admin', status: 'Active' },
     { ...base, employee_code: 'EMP-006', name: 'K. Menon', email: 'k.menon@hrms.com', phone: '9000000006',
@@ -398,7 +412,7 @@ function seed() {
     { ...base, employee_code: 'EMP-007', name: 'S. Reddy', email: 's.reddy@hrms.com', phone: '9000000007',
       department: 'Engineering', branch: 'Hyderabad', designation: 'Frontend Engineer', reporting_manager: 'Priya Manager', status: 'Active' },
     { ...base, employee_code: 'EMP-008', name: 'M. Khan', email: 'm.khan@hrms.com', phone: '9000000008',
-      department: 'QA', branch: 'Bengaluru', designation: 'QA Analyst', reporting_manager: 'K. Menon', status: 'Active' }
+      department: 'QA', branch: 'Bengaluru', designation: 'QA Analyst', reporting_manager: 'K. Menon', status: 'On Probation' }
   ];
   const insertRecentHire = db.prepare(`
     INSERT INTO employees (
@@ -431,6 +445,17 @@ function seed() {
   insertTask.run('Review Q3 budget', db.prepare("SELECT date('now') AS d").get().d, adminId, 'Pending', adminId);
   insertTask.run('Approve pending leave requests', db.prepare("SELECT date('now','+2 days') AS d").get().d, managerId, 'Pending', adminId);
   insertTask.run('Submit timesheet', db.prepare("SELECT date('now','+6 days') AS d").get().d, employeeId, 'Pending', adminId);
+
+  // --- Configuration policies (business policies, custom rules, settings) ---
+  const insertPolicy = db.prepare('INSERT INTO policies (category, name, value) VALUES (?, ?, ?)');
+  insertPolicy.run('business', 'Probation period', '6 months');
+  insertPolicy.run('business', 'Notice period', '30 days');
+  insertPolicy.run('business', 'Work week', 'Monday–Friday, 9:00–18:00');
+  insertPolicy.run('business', 'Casual leave / year', '12 days');
+  insertPolicy.run('rule', 'Auto-approve leave under 1 day', 'Enabled');
+  insertPolicy.run('rule', 'Flag attendance below 90%', 'Enabled');
+  insertPolicy.run('setting', 'Default branch for new hires', 'Hyderabad');
+  insertPolicy.run('setting', 'Payroll cut-off day', '25th of month');
 
   void adminId;
 }

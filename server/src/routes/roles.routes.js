@@ -13,9 +13,41 @@ router.get('/', (req, res) => {
   const withCounts = roles.map((r) => ({
     ...r,
     is_system: !!r.is_system,
+    paused: !!r.paused,
     userCount: db.prepare('SELECT COUNT(*) AS c FROM users WHERE role = ?').get(r.key).c
   }));
   res.json({ roles: withCounts });
+});
+
+// Persist a new workflow order (array of role ids, top-to-bottom).
+// Declared before "/:id" so Express doesn't treat "reorder" as an id.
+router.put('/reorder', (req, res) => {
+  const { order } = req.body || {};
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array of role ids' });
+  const update = db.prepare('UPDATE roles SET sort_order = ? WHERE id = ?');
+  const tx = db.transaction((ids) => ids.forEach((id, i) => update.run(i, id)));
+  tx(order);
+  res.json({ ok: true });
+});
+
+// Rename / re-scope a role (Edit).
+router.put('/:id', (req, res) => {
+  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  const { name, scope_description } = req.body || {};
+  db.prepare('UPDATE roles SET name = COALESCE(?, name), scope_description = COALESCE(?, scope_description) WHERE id = ?')
+    .run(name?.trim() || null, scope_description ?? null, req.params.id);
+  res.json({ role: db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id) });
+});
+
+// Pause / resume a role in the workflow. Super Admin cannot be paused.
+router.put('/:id/pause', (req, res) => {
+  const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
+  if (!role) return res.status(404).json({ error: 'Role not found' });
+  if (role.is_system) return res.status(400).json({ error: 'The Super Admin role cannot be paused.' });
+  const paused = req.body?.paused ? 1 : 0;
+  db.prepare('UPDATE roles SET paused = ? WHERE id = ?').run(paused, req.params.id);
+  res.json({ role: db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id) });
 });
 
 router.post('/', (req, res) => {

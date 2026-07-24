@@ -33,6 +33,20 @@ router.post('/', requireRole('super_admin'), (req, res) => {
   }
 });
 
+router.put('/:id', requireRole('super_admin'), (req, res) => {
+  const module_ = db.prepare('SELECT * FROM custom_modules WHERE id = ?').get(req.params.id);
+  if (!module_) return res.status(404).json({ error: 'Module not found' });
+  const { name, status } = req.body || {};
+  if (status && !['Active', 'Paused'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  try {
+    db.prepare('UPDATE custom_modules SET name = COALESCE(?, name), status = COALESCE(?, status) WHERE id = ?')
+      .run(name?.trim() || null, status || null, req.params.id);
+    res.json({ module: db.prepare('SELECT * FROM custom_modules WHERE id = ?').get(req.params.id) });
+  } catch {
+    res.status(409).json({ error: 'A module with this name already exists' });
+  }
+});
+
 router.post('/:moduleId/features', requireRole('super_admin'), (req, res) => {
   const { name } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });

@@ -2,10 +2,14 @@ import { Link } from 'react-router-dom';
 
 const ACTIONS = [
   { to: '/employees', label: '+ Add Employee', roles: ['super_admin', 'manager'] },
+  { to: '/bulk-import', label: '+ Bulk Import', roles: ['super_admin', 'manager'] },
+  { to: '/organization', label: '+ Add Departments', roles: ['super_admin'] },
+  { to: '/organization', label: '+ Add Branch', roles: ['super_admin'] },
+  { to: '/policies', label: '+ Configuration Policies', roles: ['super_admin'] },
+  { to: '/org-structure', label: '+ Organization Structure', roles: ['super_admin'] },
   { to: '/configurations', label: '+ Configure Dashboard', roles: ['super_admin'] },
   { to: '/roles', label: '+ Manage Roles', roles: ['super_admin'] },
-  { to: '/manage-modules', label: '+ Add Module', roles: ['super_admin'] },
-  { to: '/manage-modules', label: '+ Add Features', roles: ['super_admin'] }
+  { to: '/manage-modules', label: '+ Add Module / Features', roles: ['super_admin'] }
 ];
 
 export default function QuickActionsWidget({ role, badge }) {

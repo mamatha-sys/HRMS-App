@@ -59,6 +59,7 @@ td:first-child { font-weight: 600; }
 .status-tag { padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 600; }
 .status-tag.present { background: #E4F5EC; color: #1E8E5A; }
 .status-tag.absent { background: #FBEAE5; color: #B3401E; }
+.status-tag.pending { background: #FBF2DE; color: #946E0A; }
 
 .banner { padding: 10px 14px; border-radius: 8px; font-size: 12.5px; margin-bottom: 16px; font-weight: 600; }
 .banner.error { background: #FBEAE5; border: 1px solid #B3401E; color: #B3401E; }
@@ -100,6 +101,12 @@ td:first-child { font-weight: 600; }
 .scope-banner { background: #FBF2DE; border: 1px solid #E4CE8F; color: #8A5A0A; padding: 10px 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600; margin-bottom: 16px; }
 .crumb { font-size: 12.5px; color: #2E5CB8; cursor: pointer; }
 .crumb:hover { text-decoration: underline; }
+
+.workflow-node { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #E2E5EA; border-radius: 8px; background: #fff; }
+.workflow-node:hover { border-color: #C7CEDA; background: #FBFCFE; }
+.workflow-node .drag-handle { cursor: grab; color: #B0B7C3; font-size: 16px; user-select: none; }
+.workflow-node .step-num { width: 22px; height: 22px; border-radius: 50%; background: #E8EEF9; color: #2E5CB8; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.workflow-arrow { text-align: center; color: #B0B7C3; font-size: 14px; line-height: 1.4; }
 
 .login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #161E33; }
 .login-card { background: #fff; border-radius: 12px; padding: 32px 28px; width: 380px; box-shadow: 0 10px 40px rgba(0,0,0,.25); }

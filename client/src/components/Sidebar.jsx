@@ -23,8 +23,14 @@ export default function Sidebar() {
           <NavLink to="/configurations" className={item}>
             <span className="dot" />Configurations
           </NavLink>
+          <NavLink to="/policies" className={item}>
+            <span className="dot" />Configuration Policies
+          </NavLink>
           <NavLink to="/roles" className={item}>
             <span className="dot" />Manage Roles
+          </NavLink>
+          <NavLink to="/org-structure" className={item}>
+            <span className="dot" />Organization Structure
           </NavLink>
         </>
       )}

@@ -111,6 +111,44 @@ router.post('/', requireRole('super_admin', 'manager'), (req, res) => {
   res.status(201).json({ employee: present(employee, req.user) });
 });
 
+// Bulk import — used by the Quick Actions "Bulk import" screen.
+// Applies a default department/branch/joining date to rows that don't specify their own.
+router.post('/bulk', requireRole('super_admin', 'manager'), (req, res) => {
+  const { rows, defaultDepartment, defaultBranch, defaultJoiningDate } = req.body || {};
+  if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows must be a non-empty array' });
+
+  const results = { inserted: 0, skipped: 0, errors: [] };
+  const insertOne = db.transaction((list) => {
+    list.forEach((raw, i) => {
+      const row = {
+        name: raw.name?.trim(),
+        email: raw.email?.trim(),
+        designation: raw.designation?.trim(),
+        department: (raw.department || defaultDepartment || '').trim(),
+        branch: (raw.branch || defaultBranch || '').trim() || null,
+        date_of_joining: (raw.date_of_joining || defaultJoiningDate || '').trim(),
+        phone: raw.phone?.trim() || null,
+        status: ['Active', 'On Probation', 'Exited'].includes(raw.status) ? raw.status : 'Active'
+      };
+      if (!row.name || !row.email || !row.department || !row.designation || !row.date_of_joining) {
+        results.errors.push(`Row ${i + 1}: missing name/email/department/designation/joining date`);
+        return;
+      }
+      if (db.prepare('SELECT id FROM employees WHERE email = ?').get(row.email)) {
+        results.skipped++;
+        return;
+      }
+      db.prepare(`
+        INSERT INTO employees (employee_code, name, email, phone, department, branch, designation, date_of_joining, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(nextEmployeeCode(), row.name, row.email, row.phone, row.department, row.branch, row.designation, row.date_of_joining, row.status);
+      results.inserted++;
+    });
+  });
+  insertOne(rows);
+  res.json(results);
+});
+
 router.put('/:id', requireRole('super_admin', 'manager'), (req, res) => {
   const emp = db.prepare('SELECT * FROM employees WHERE id = ?').get(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });

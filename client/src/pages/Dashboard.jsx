@@ -79,7 +79,8 @@ export default function Dashboard() {
             <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
               <option value="">All Statuses</option>
               <option value="Active">Active</option>
-              <option value="Inactive">Inactive</option>
+              <option value="On Probation">On Probation</option>
+              <option value="Exited">Exited</option>
             </select>
             <div className="spacer" />
             {canManage && <button className="primary" onClick={downloadCsv}>Export</button>}

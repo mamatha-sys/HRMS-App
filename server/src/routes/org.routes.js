@@ -23,6 +23,20 @@ router.post('/departments', requireRole('super_admin'), (req, res) => {
   }
 });
 
+router.put('/departments/:id', requireRole('super_admin'), (req, res) => {
+  const dept = db.prepare('SELECT * FROM departments WHERE id = ?').get(req.params.id);
+  if (!dept) return res.status(404).json({ error: 'Department not found' });
+  const { name, status } = req.body || {};
+  if (status && !['Active', 'Paused'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  try {
+    db.prepare('UPDATE departments SET name = COALESCE(?, name), status = COALESCE(?, status) WHERE id = ?')
+      .run(name?.trim() || null, status || null, req.params.id);
+    res.json({ department: db.prepare('SELECT * FROM departments WHERE id = ?').get(req.params.id) });
+  } catch {
+    res.status(409).json({ error: 'A department with this name already exists' });
+  }
+});
+
 router.delete('/departments/:id', requireRole('super_admin'), (req, res) => {
   const inUse = db.prepare('SELECT COUNT(*) AS c FROM departments WHERE parent_department_id = ?').get(req.params.id).c;
   if (inUse > 0) return res.status(409).json({ error: 'Cannot delete a department that has sub-departments' });
@@ -41,6 +55,20 @@ router.post('/branches', requireRole('super_admin'), (req, res) => {
   try {
     const info = db.prepare('INSERT INTO branches (name, location) VALUES (?, ?)').run(name, location || null);
     res.status(201).json({ branch: db.prepare('SELECT * FROM branches WHERE id = ?').get(info.lastInsertRowid) });
+  } catch {
+    res.status(409).json({ error: 'A branch with this name already exists' });
+  }
+});
+
+router.put('/branches/:id', requireRole('super_admin'), (req, res) => {
+  const branch = db.prepare('SELECT * FROM branches WHERE id = ?').get(req.params.id);
+  if (!branch) return res.status(404).json({ error: 'Branch not found' });
+  const { name, location, status } = req.body || {};
+  if (status && !['Active', 'Paused'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  try {
+    db.prepare('UPDATE branches SET name = COALESCE(?, name), location = COALESCE(?, location), status = COALESCE(?, status) WHERE id = ?')
+      .run(name?.trim() || null, location ?? null, status || null, req.params.id);
+    res.json({ branch: db.prepare('SELECT * FROM branches WHERE id = ?').get(req.params.id) });
   } catch {
     res.status(409).json({ error: 'A branch with this name already exists' });
   }

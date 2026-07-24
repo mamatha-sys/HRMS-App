@@ -7,6 +7,9 @@ export default function ManageModules() {
   const [error, setError] = useState('');
   const [newModuleName, setNewModuleName] = useState('');
   const [newFeatureName, setNewFeatureName] = useState({});
+  const [featureFormOpen, setFeatureFormOpen] = useState({});
+  const [editingModule, setEditingModule] = useState(null);
+  const [editName, setEditName] = useState('');
 
   function load() {
     api.get('/modules').then((res) => {
@@ -42,6 +45,33 @@ export default function ManageModules() {
     }
   }
 
+  async function toggleModuleStatus(m) {
+    setError('');
+    try {
+      await api.put(`/modules/${m.id}`, { status: m.status === 'Paused' ? 'Active' : 'Paused' });
+      load();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not update module.');
+    }
+  }
+
+  function startEditModule(m) {
+    setEditingModule(m.id);
+    setEditName(m.name);
+  }
+
+  async function saveModuleName(m, e) {
+    e.preventDefault();
+    setError('');
+    try {
+      await api.put(`/modules/${m.id}`, { name: editName });
+      setEditingModule(null);
+      load();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not rename module.');
+    }
+  }
+
   return (
     <div>
       <h1>Manage modules &amp; features</h1>
@@ -64,21 +94,47 @@ export default function ManageModules() {
 
       {modules.length > 0 && <div className="section-label" style={{ paddingLeft: 0 }}>Custom modules</div>}
       {modules.map((m) => (
-        <div key={m.id} className="card">
-          <div className="feature-name">{m.name}</div>
+        <div key={m.id} className="card" style={{ opacity: m.status === 'Paused' ? 0.6 : 1 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            {editingModule === m.id ? (
+              <form onSubmit={(e) => saveModuleName(m, e)} className="row" style={{ flex: 1, marginBottom: 0 }}>
+                <input value={editName} onChange={(e) => setEditName(e.target.value)} autoFocus />
+                <button className="primary" type="submit">Save</button>
+                <button type="button" onClick={() => setEditingModule(null)}>Cancel</button>
+              </form>
+            ) : (
+              <div className="feature-name">
+                {m.name}{' '}
+                <span className={'status-tag ' + (m.status === 'Paused' ? 'pending' : 'present')} style={{ marginLeft: 6 }}>{m.status}</span>
+              </div>
+            )}
+            {editingModule !== m.id && (
+              <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                <button onClick={() => startEditModule(m)}>Edit</button>
+                <button onClick={() => toggleModuleStatus(m)}>{m.status === 'Paused' ? 'Resume' : 'Pause'}</button>
+              </span>
+            )}
+          </div>
+
           {m.features.map((f) => (
             <div key={f.id} className="feature-meta" style={{ marginTop: 4 }}>• {f.name}</div>
           ))}
-          {m.features.length === 0 && <div className="empty" style={{ padding: 10 }}>No features yet.</div>}
+          {m.features.length === 0 && <div className="empty" style={{ padding: 10, marginTop: 8 }}>No features yet.</div>}
 
-          <form onSubmit={(e) => addFeature(m.id, e)} className="row" style={{ marginTop: 10 }}>
-            <input
-              placeholder="New feature name (e.g. Onboarding Checklist)"
-              value={newFeatureName[m.id] || ''}
-              onChange={(e) => setNewFeatureName((prev) => ({ ...prev, [m.id]: e.target.value }))}
-            />
-            <button className="primary" type="submit">+ Add feature</button>
-          </form>
+          {featureFormOpen[m.id] ? (
+            <form onSubmit={(e) => addFeature(m.id, e)} className="row" style={{ marginTop: 10 }}>
+              <input
+                placeholder="New feature name (e.g. Onboarding Checklist)"
+                value={newFeatureName[m.id] || ''}
+                onChange={(e) => setNewFeatureName((prev) => ({ ...prev, [m.id]: e.target.value }))}
+                autoFocus
+              />
+              <button className="primary" type="submit">Add</button>
+              <button type="button" onClick={() => setFeatureFormOpen((p) => ({ ...p, [m.id]: false }))}>Cancel</button>
+            </form>
+          ) : (
+            <button style={{ marginTop: 10 }} onClick={() => setFeatureFormOpen((p) => ({ ...p, [m.id]: true }))}>+ Add features</button>
+          )}
         </div>
       ))}
 

@@ -43,7 +43,7 @@ Login requires email + password **and** a webcam face capture:
 ## Modules (sidebar)
 
 - **Dashboard** — role-scoped. KPI cards (Total Employees, Active / Inactive, New Hires (90d), Open Positions, Present Today, Absent Today, Pending Approvals, Payroll Status), Employee/Organization Growth line chart, New Hires bar chart, Department Strength bar chart, and numbered widgets: Pending Approvals (with Approve/Reject), Tasks, Alerts & Notifications, Calendar & Events, Quick Actions, Department-wise Vacancies, and a Role & User summary. A department/branch/status filter bar re-computes the KPIs and charts. Which widgets appear is controlled by **Configurations**.
-- **Employee Management** — full employee records with an expandable detail view. The add/edit form captures: Employee ID (optional — auto-generated if blank), personal info, **employee photo upload** (with preview), emergency contact, employment details, bank/identity documents, education & work experience, and a **Documents** section where you upload any number of files (offer letter, ID proof, certificates) each with an editable name. Photos and documents are stored with the record and shown in the detail view. Bank/Aadhaar/PAN fields are masked for managers viewing other employees' records. Department/branch are selected from real master data.
+- **Employee Management** — its own KPI cards (Total Employees, Active, On Probation, Exited) and a table with an expandable detail view. The add/edit form captures: Employee ID (optional — auto-generated if blank), personal info, **employee photo upload** (with preview), emergency contact, employment details, bank details, education & work experience, and a **Documents** section where you upload any number of files each with an **editable label name** (offer letter, ID proof, certificates). Photos and documents are stored with the record and shown in the detail view. Bank fields are masked for managers viewing other employees' records. Department/branch are selected from real master data. Employee status is Active / On Probation / Exited.
 
 ### Admin (Super Admin only)
 
@@ -53,10 +53,18 @@ Login requires email + password **and** a webcam face capture:
   - **Edit Access** — per role, a data-scope banner plus the module list (Dashboard Management, Employee Management, Organization, Recruitment, Onboarding, Attendance, Leave, Payroll, PMS, LMS, Asset Management).
   - **Configure** — a feature × action permission matrix: each feature (grouped by category) has checkboxes for the 12 actions (View, Create, Edit, Delete, Approve, Reject, Assign, Import, Export, Download, Print, Manage). Toggles persist immediately. Super Admin's matrix is read-only (always full access).
 
-Other screens remain available at their routes (reachable from the dashboard Quick Actions / Role & User widget) but were removed from the sidebar to keep it focused on Dashboard + Employee Management:
-- **Role & User Management** — list users, change roles (any of the 7 catalog roles), deactivate/reactivate, reset a user's enrolled face, and **+ Add user** (creates a login with name/email/password/role).
-- **Manage Modules & Features** — lists the built-in/previous modules (read-only) and lets you add custom modules + features that appear in the sidebar as generic record-list screens.
-- Recruitment, Reports, Organization Structure.
+Admin screens (in the sidebar for Super Admin, plus reachable from dashboard Quick Actions):
+- **Configurations** — toggle which dashboard widgets are visible.
+- **Configuration Policies** — Business Policies, Custom Rules, and Configuration Settings, each add/edit/remove.
+- **Manage Roles** — the role catalog → edit access → feature × action permission matrix.
+- **Organization Structure** — the office hierarchy and **approval/escalation workflow** (Super Admin → HR Admin → Manager → Assistant Manager → STL → TL → Employee). Leave/attendance/alert/issue requests flow top-to-bottom through this chain. **Drag** a role to reorder the workflow; **Add Role**, **Edit**, and **Pause** are supported — roles are never deleted. Super Admin can't be paused.
+
+Other screens (reachable from Quick Actions):
+- **Bulk Import** — paste or upload a CSV of employees; choose a department scope (all, or force one department) and a default joining month/year; rows are inserted with per-row overrides, duplicates skipped, errors reported.
+- **Add Departments / Add Branch** (Organization) — departments and branches with created-date history and Edit / Pause (paused entries stay on record).
+- **Manage Modules & Features** — lists built-in/previous modules, and lets you add custom modules with **Edit / Pause** and an **+ Add features** button per module.
+- **Role & User Management** — list users, change roles, deactivate/reactivate, reset a user's enrolled face, and **+ Add user**.
+- Recruitment, Reports.
 
 ## Role model & enforcement
 
