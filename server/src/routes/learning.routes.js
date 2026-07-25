@@ -235,7 +235,9 @@ router.get('/courses/:id/enrollments', (req, res) => {
   const enrolledIds = new Set(enrollments.map((e) => e.employee_id));
   const employees = db.prepare("SELECT id, name, employee_code FROM employees WHERE status = 'Active' ORDER BY name").all()
     .filter((e) => !enrolledIds.has(e.id));
-  res.json({ course, enrollments, availableEmployees: employees });
+  const materials = db.prepare('SELECT id, title, file_type, created_at, data_url FROM course_materials WHERE course_id = ? ORDER BY created_at').all(course.id);
+  const questionCount = db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(course.id).c;
+  res.json({ course: { ...course, materials, questionCount }, enrollments, availableEmployees: employees });
 });
 
 router.post('/courses/:id/enrollments', (req, res) => {

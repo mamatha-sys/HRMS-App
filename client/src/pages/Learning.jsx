@@ -131,12 +131,6 @@ function HRLearning() {
   const [reports, setReports] = useState(null);
   const [certifications, setCertifications] = useState(null);
   const [error, setError] = useState('');
-  const [managing, setManaging] = useState(null);
-  const [enr, setEnr] = useState(null);
-  const [addEmployeeId, setAddEmployeeId] = useState('');
-  const [materialTitle, setMaterialTitle] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [scoreDrafts, setScoreDrafts] = useState({});
 
   function load() { api.get('/learning/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load learning overview.')); }
   useEffect(load, []);
@@ -145,48 +139,9 @@ function HRLearning() {
 
   function goto(target) { setScreen(target); }
 
-  async function toggleAllowDownload(course) {
-    setError('');
-    try { await api.put(`/learning/courses/${course.id}`, { allow_download: !course.allow_download }); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
-  }
-  async function openEnrollments(courseId) {
-    setManaging(courseId); setError('');
-    try { const r = await api.get(`/learning/courses/${courseId}/enrollments`); setEnr(r.data); }
-    catch (err) { setError(err.response?.data?.error || 'Could not load enrollments.'); }
-  }
-  async function enroll(courseId) {
-    if (!addEmployeeId) return;
-    setError('');
-    try { await api.post(`/learning/courses/${courseId}/enrollments`, { employee_id: addEmployeeId }); setAddEmployeeId(''); openEnrollments(courseId); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
-  }
-  async function saveEnrollment(enrollmentId, courseId, patch) {
-    setError('');
-    try { await api.put(`/learning/enrollments/${enrollmentId}`, patch); openEnrollments(courseId); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
-  }
-  async function uploadMaterial(courseId, file) {
-    if (file.size > MATERIAL_MAX_BYTES) { setError(`"${file.name}" is too large (max 8 MB).`); return; }
-    if (!materialTitle.trim()) { setError('Give the material a title first.'); return; }
-    setUploading(true); setError('');
-    try {
-      const data_url = await readFileAsDataUrl(file);
-      const file_type = file.type === 'application/pdf' ? 'pdf' : (file.type.startsWith('video/') ? 'video' : 'other');
-      await api.post(`/learning/courses/${courseId}/materials`, { title: materialTitle.trim(), file_type, data_url });
-      setMaterialTitle('');
-      load();
-    } catch (err) { setError(err.response?.data?.error || 'Could not upload material.'); }
-    finally { setUploading(false); }
-  }
-  async function deleteMaterial(id) {
-    setError('');
-    try { await api.delete(`/learning/materials/${id}`); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not delete material.'); }
-  }
-
   if (screen === 'newCourse') return <NewCourseScreen onDone={() => { load(); goto('dashboard'); }} onCancel={() => goto('dashboard')} setGlobalError={setError} />;
   if (screen === 'assessment') return <AssessmentScreen courseId={activeCourseId} onBack={() => { load(); goto('dashboard'); }} />;
+  if (screen === 'courseDetail') return <CourseDetailScreen courseId={activeCourseId} isSuperAdmin={user?.role === 'super_admin'} onManageAssessment={() => goto('assessment')} onBack={() => { load(); goto('dashboard'); }} />;
   if (screen === 'courses') return <CoursesScreen onBack={() => goto('dashboard')} onAdd={() => goto('newCourse')} />;
   if (screen === 'enrollment') return <EnrollmentScreen onBack={() => goto('dashboard')} />;
   if (screen === 'assessmentsList') return <AssessmentsListScreen onBack={() => goto('dashboard')} />;
@@ -272,60 +227,12 @@ function HRLearning() {
                 <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
                   <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
                     <strong>{c.title}</strong>
-                    <span style={{ display: 'flex', gap: 6 }}>
-                      {!!c.mandatory && <span className="status-tag pending">Mandatory</span>}
-                      <span className={'status-tag ' + (c.allow_download ? 'present' : 'info')}>{c.allow_download ? 'Download allowed' : 'View only'}</span>
-                    </span>
+                    {!!c.mandatory && <span className="status-tag pending">Mandatory</span>}
                   </div>
                   <div className="feature-meta">
-                    {c.completed} / {c.enrolled} completed ({c.completionPct}%) · {c.certified} certified · {c.pass_mark != null ? `Pass mark: ${c.pass_mark}%` : 'No assessment'} · {c.questionCount} question(s)
+                    {c.completed} / {c.enrolled} completed ({c.completionPct}%) · {c.pass_mark != null ? `Pass mark: ${c.pass_mark}%` : 'No assessment'}
                   </div>
-
-                  <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                    {user?.role === 'super_admin' && <button onClick={() => toggleAllowDownload(c)}>{c.allow_download ? 'Disable download/copy' : 'Allow download/copy'}</button>}
-                    <button onClick={() => openEnrollments(c.id)}>Manage Enrollments</button>
-                    <button onClick={() => { setActiveCourseId(c.id); goto('assessment'); }}>Manage Assessment ({c.questionCount})</button>
-                  </div>
-
-                  <div style={{ marginTop: 8 }}>
-                    <div className="feature-meta">Materials ({c.materials.length})</div>
-                    {c.materials.map((m) => (
-                      <div key={m.id} className="rec-row"><span>{m.title} ({m.file_type})</span><button onClick={() => deleteMaterial(m.id)}>Remove</button></div>
-                    ))}
-                    <div className="row" style={{ flexWrap: 'wrap', marginTop: 4 }}>
-                      <input placeholder="Material title" value={managing === c.id ? materialTitle : ''} onFocus={() => setManaging(c.id)} onChange={(e) => setMaterialTitle(e.target.value)} style={{ flex: '1 1 140px' }} />
-                      <input type="file" accept="application/pdf,video/*" disabled={uploading} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadMaterial(c.id, f); }} />
-                    </div>
-                  </div>
-
-                  {managing === c.id && enr && enr.course.id === c.id && (
-                    <div className="card" style={{ marginTop: 8, background: '#F7F8FA' }}>
-                      <div className="feature-name" style={{ marginBottom: 8 }}>Course details &amp; enrollments</div>
-                      <div className="feature-meta" style={{ marginBottom: 8 }}>{c.title} · {c.mandatory ? 'Mandatory' : 'Optional'} · {c.pass_mark != null ? `Pass mark ${c.pass_mark}%` : 'No assessment'} · {c.materials.length} material(s)</div>
-                      <div className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
-                        <select value={addEmployeeId} onChange={(e) => setAddEmployeeId(e.target.value)} style={{ flex: '1 1 160px' }}>
-                          <option value="">Enroll an employee…</option>
-                          {enr.availableEmployees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
-                        </select>
-                        <button className="primary" onClick={() => enroll(c.id)}>Enroll</button>
-                      </div>
-                      {enr.enrollments.length === 0 && <div className="empty">No one enrolled yet.</div>}
-                      {enr.enrollments.map((e) => (
-                        <div key={e.id} className="rec-row">
-                          <span>{e.name} ({e.employee_code}){e.certificate_issued ? <span className="status-tag present" style={{ marginLeft: 6 }}>Certified</span> : null}</span>
-                          <span className="row" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                            {c.pass_mark != null && (
-                              <input type="number" min="0" max="100" placeholder="Score %" value={scoreDrafts[e.id] ?? e.score ?? ''} onChange={(ev) => setScoreDrafts({ ...scoreDrafts, [e.id]: ev.target.value })} style={{ width: 70 }} />
-                            )}
-                            <label className="row" style={{ alignItems: 'center', gap: 4 }}>
-                              <input type="checkbox" checked={!!e.completed} onChange={(ev) => saveEnrollment(e.id, c.id, { completed: ev.target.checked, score: scoreDrafts[e.id] })} style={{ width: 16, height: 16 }} /> Completed
-                            </label>
-                            {c.pass_mark != null && <button onClick={() => saveEnrollment(e.id, c.id, { score: scoreDrafts[e.id] ?? e.score })}>Save score</button>}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <button style={{ marginTop: 6 }} onClick={() => { setActiveCourseId(c.id); goto('courseDetail'); }}>View Course</button>
                 </div>
               ))}
             </div>
@@ -524,6 +431,127 @@ function AssessmentScreen({ courseId, onBack }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Course Detail" screen: materials + per-employee score/certificate actions,
+// replacing the inline "Manage Enrollments" panel that used to clutter the main course list. ---
+function CourseDetailScreen({ courseId, isSuperAdmin, onManageAssessment, onBack }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [addEmployeeId, setAddEmployeeId] = useState('');
+  const [materialTitle, setMaterialTitle] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [scoreDrafts, setScoreDrafts] = useState({});
+
+  function load() { api.get(`/learning/courses/${courseId}/enrollments`).then((r) => setData(r.data)).catch(() => setError('Could not load course.')); }
+  useEffect(load, [courseId]);
+
+  async function toggleAllowDownload() {
+    setError('');
+    try { await api.put(`/learning/courses/${courseId}`, { allow_download: !data.course.allow_download }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
+  async function enroll(e) {
+    e.preventDefault();
+    if (!addEmployeeId) return;
+    setError('');
+    try { await api.post(`/learning/courses/${courseId}/enrollments`, { employee_id: addEmployeeId }); setAddEmployeeId(''); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
+  }
+  async function saveEnrollment(enrollmentId, patch) {
+    setError('');
+    try { await api.put(`/learning/enrollments/${enrollmentId}`, patch); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
+  async function uploadMaterial(file) {
+    if (file.size > MATERIAL_MAX_BYTES) { setError(`"${file.name}" is too large (max 8 MB).`); return; }
+    if (!materialTitle.trim()) { setError('Give the material a title first.'); return; }
+    setUploading(true); setError('');
+    try {
+      const data_url = await readFileAsDataUrl(file);
+      const file_type = file.type === 'application/pdf' ? 'pdf' : (file.type.startsWith('video/') ? 'video' : 'other');
+      await api.post(`/learning/courses/${courseId}/materials`, { title: materialTitle.trim(), file_type, data_url });
+      setMaterialTitle('');
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not upload material.'); }
+    finally { setUploading(false); }
+  }
+  async function deleteMaterial(id) {
+    setError('');
+    try { await api.delete(`/learning/materials/${id}`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not delete material.'); }
+  }
+
+  const course = data?.course;
+  return (
+    <div>
+      <h1>{course ? course.title : 'Course Detail'}</h1>
+      {course && (
+        <div className="subtitle">
+          {course.mandatory ? 'Mandatory training' : 'Optional training'}
+          {course.pass_mark != null ? ` — Assessment pass mark: ${course.pass_mark}%. A certificate is only issued after the assessment is passed.` : ' — No assessment defined.'}
+        </div>
+      )}
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+
+      {!data ? <div className="empty">Loading…</div> : (
+        <div className="dashboard-grid">
+          <div className="card">
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+              <div className="feature-name">Course Materials</div>
+              <div className="row" style={{ gap: 6 }}>
+                {isSuperAdmin && <button onClick={toggleAllowDownload}>{course.allow_download ? 'Disable download/copy' : 'Allow download/copy'}</button>}
+                <button onClick={onManageAssessment}>Manage Assessment ({course.questionCount})</button>
+              </div>
+            </div>
+            {course.materials.length === 0 && <div className="empty">No materials uploaded yet.</div>}
+            {course.materials.map((m) => (
+              <div key={m.id} className="rec-row">
+                <span>{m.file_type === 'video' ? '🎬' : '📄'} {m.title}</span>
+                <span className="row" style={{ gap: 6 }}>
+                  <a className="pill" href={m.data_url} target="_blank" rel="noreferrer">{m.file_type === 'video' ? 'Watch Video' : 'View Document'}</a>
+                  <button onClick={() => deleteMaterial(m.id)}>Remove</button>
+                </span>
+              </div>
+            ))}
+            <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+              <input placeholder="Material title" value={materialTitle} onChange={(e) => setMaterialTitle(e.target.value)} style={{ flex: '1 1 140px' }} />
+              <input type="file" accept="application/pdf,video/*" disabled={uploading} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) uploadMaterial(f); }} />
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="feature-name" style={{ marginBottom: 8 }}>Enrolled Employees</div>
+            {data.enrollments.length === 0 && <div className="empty">No one enrolled yet.</div>}
+            {data.enrollments.map((e) => (
+              <div key={e.id} style={{ borderTop: '1px solid #EEF0F3', padding: '8px 0' }}>
+                <div className="row" style={{ justifyContent: 'space-between' }}>
+                  <strong>{e.name}</strong>
+                  <span className={'status-tag ' + (e.certificate_issued ? 'present' : 'info')}>{e.certificate_issued ? 'Certified' : 'Not certified'}</span>
+                </div>
+                {e.score != null && <div className="feature-meta">Assessment score: {e.score}%</div>}
+                {course.pass_mark != null && (
+                  <div className="row" style={{ marginTop: 4, gap: 6 }}>
+                    <input type="number" min="0" max="100" placeholder="Score %" value={scoreDrafts[e.id] ?? e.score ?? ''} onChange={(ev) => setScoreDrafts({ ...scoreDrafts, [e.id]: ev.target.value })} style={{ width: 80 }} />
+                    <button onClick={() => saveEnrollment(e.id, { score: scoreDrafts[e.id] ?? e.score })}>Record Score</button>
+                    {!e.certificate_issued && <button onClick={() => saveEnrollment(e.id, { completed: true, score: scoreDrafts[e.id] ?? e.score })}>Issue Certificate</button>}
+                  </div>
+                )}
+              </div>
+            ))}
+            <form onSubmit={enroll} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
+              <select value={addEmployeeId} onChange={(e) => setAddEmployeeId(e.target.value)} style={{ flex: '1 1 160px' }}>
+                <option value="">Enroll an employee…</option>
+                {data.availableEmployees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+              </select>
+              <button className="primary" type="submit">Enroll</button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
