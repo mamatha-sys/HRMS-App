@@ -20,6 +20,10 @@ import policiesRoutes from './routes/policies.routes.js';
 import attendanceRoutes from './routes/attendance.routes.js';
 import leavesRoutes from './routes/leaves.routes.js';
 import payrollRoutes from './routes/payroll.routes.js';
+import recruitmentRoutes from './routes/recruitment.routes.js';
+import performanceRoutes from './routes/performance.routes.js';
+import learningRoutes from './routes/learning.routes.js';
+import assetsRoutes from './routes/assets.routes.js';
 
 const app = express();
 app.use(cors());
@@ -45,6 +49,10 @@ app.use('/api/policies', policiesRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/leaves', leavesRoutes);
 app.use('/api/payroll', payrollRoutes);
+app.use('/api/recruitment', recruitmentRoutes);
+app.use('/api/performance', performanceRoutes);
+app.use('/api/learning', learningRoutes);
+app.use('/api/assets', assetsRoutes);
 
 app.use((err, req, res, next) => {
   console.error(err);

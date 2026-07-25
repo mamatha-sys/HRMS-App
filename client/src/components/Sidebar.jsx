@@ -25,6 +25,18 @@ export default function Sidebar() {
       <NavLink to="/payroll" className={item}>
         <span className="dot" />Payroll
       </NavLink>
+      <NavLink to="/recruitment" className={item}>
+        <span className="dot" />Recruitment
+      </NavLink>
+      <NavLink to="/performance" className={item}>
+        <span className="dot" />Performance Management
+      </NavLink>
+      <NavLink to="/learning" className={item}>
+        <span className="dot" />Learning Management
+      </NavLink>
+      <NavLink to="/assets" className={item}>
+        <span className="dot" />Asset Management
+      </NavLink>
 
       {user?.role === 'super_admin' && (
         <>

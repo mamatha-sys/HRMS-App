@@ -75,6 +75,19 @@ Login requires email + password **and** a webcam face capture:
 
   Employees see their own dynamic breakdown (including any late-arrival cut) and download payslips.
 
+- **Recruitment** — scope banner, filters + Export, KPI row (Open Requisitions/Active Candidates/Offers Pending/Onboarding In Progress/Exiting Employees):
+  - **Job Requisitions** — HR/Manager can **+ Add Requisition** (department, title, openings); every new requisition starts **Pending Approval** and must be **Approved** or **Rejected**; an approved requisition can then have its **Manage Posting** boards set (e.g. "LinkedIn, Naukri"), shown as "Live on: …".
+  - **Candidate Pipeline** — **+ Add Candidate** against any requisition with an optional interview panel; each candidate **Move to &lt;next stage&gt;**s through a fixed pipeline (Resume Screening → Technical Interview → HR Interview → Offer → Hired).
+  - **Onboarding — New Hires** — **+ Add New Hire** (name, designation, department, start date) with an onboarding-progress percentage.
+  - **Offboarding — Exiting Employees** — tracks a real employee's last working day and a clearance checklist; **+1 clearance** bumps the checklist and auto-marks **Cleared** once complete.
+  - **Department-wise Vacancies** — reuses the real employee headcount vs. open-position-target computation (unchanged from the original Recruitment page). Non-HR roles (TL/STL/Employee) see this vacancies view read-only; the rest of the module is HR/Manager-run.
+
+- **Performance Management** (Super Admin/HR/Manager) — KPI row (Reviews In Progress/Avg Rating (Org)). **Performance Reviews**: each review carries a goal + KPI text, independent **Self-Assessment** and **Manager Assessment** statuses, and a 1–5 **Submit Manager Assessment** rating. **Rule: a review cannot be marked complete until both self- and manager-assessment are submitted** — the **Mark Review Complete** button is disabled, and the server rejects the request, until both are `Submitted`. **Key Features** (8) and **Field-Level Access** are shown as an informational reference panel (this prototype's other 7 features/fields aren't separately built out yet).
+
+- **Learning Management** (Super Admin/HR/Manager) — KPI row (Active Courses/Total Enrolled). **Training Courses**: HR can **+ Add Course** (title, optional pass mark, mandatory flag) and **Manage Enrollments** per course — enroll any active employee and toggle their completion, which live-updates the course's completed/enrolled count and %. Same **Key Features** (8) / **Field-Level Access** reference panel as above.
+
+- **Asset Management** (Super Admin/HR/Manager) — KPI row (Total Assets/Assigned/In Store). **Asset Inventory**: **+ Add Asset** (name, category, cost); **Assign** to any active employee, **Return** it to the pool, or **Send for Repair** / **Back In Store**. **Rule: an asset cannot be assigned to more than one active employee at a time** — an already-assigned asset must be **Return**ed before it can be reassigned (enforced server-side, not just hidden in the UI). Same **Key Features** (9) / **Field-Level Access** reference panel as above.
+
 Role access is strictly layered: **Super Admin has full, unrestricted access everywhere** (every module, every admin screen, read-only-safe on its own role); **HR Admin** and **Manager/Assistant Manager** get the operational HR screens (Attendance/Leave/Payroll/Employee Management) but are blocked from Super-Admin-only configuration (Manage Roles, Configurations, adding Leave Types) — verified via direct API checks.
 
 ### Admin (Super Admin only)

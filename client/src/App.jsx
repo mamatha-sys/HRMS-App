@@ -17,6 +17,9 @@ import BulkImport from './pages/BulkImport.jsx';
 import Attendance from './pages/Attendance.jsx';
 import Leave from './pages/Leave.jsx';
 import Payroll from './pages/Payroll.jsx';
+import Performance from './pages/Performance.jsx';
+import Learning from './pages/Learning.jsx';
+import Assets from './pages/Assets.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -38,6 +41,9 @@ export default function App() {
         <Route path="/leave" element={<Leave />} />
         <Route path="/payroll" element={<Payroll />} />
         <Route path="/recruitment" element={<Recruitment />} />
+        <Route path="/performance" element={<Performance />} />
+        <Route path="/learning" element={<Learning />} />
+        <Route path="/assets" element={<Assets />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
         <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />

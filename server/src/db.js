@@ -635,6 +635,87 @@ function migrate() {
     );
   `);
 
+  // Recruitment: `positions` becomes "Job Requisitions" — every requisition now needs HR/manager
+  // approval before it's live, and can be posted to job boards once approved.
+  const posCols = db.prepare('PRAGMA table_info(positions)').all().map((c) => c.name);
+  if (!posCols.includes('requested_by')) db.exec('ALTER TABLE positions ADD COLUMN requested_by TEXT');
+  if (!posCols.includes('approval_status')) db.exec("ALTER TABLE positions ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'Approved' CHECK (approval_status IN ('Pending Approval','Approved','Rejected'))");
+  if (!posCols.includes('posted_boards')) db.exec('ALTER TABLE positions ADD COLUMN posted_boards TEXT');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      position_id INTEGER REFERENCES positions(id) ON DELETE SET NULL,
+      panel TEXT,
+      feedback_status TEXT NOT NULL DEFAULT 'No feedback yet' CHECK (feedback_status IN ('No feedback yet','Feedback submitted')),
+      stage TEXT NOT NULL DEFAULT 'Resume Screening' CHECK (stage IN ('Resume Screening','Technical Interview','HR Interview','Offer','Hired')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS new_hires (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      designation TEXT,
+      department TEXT,
+      start_date TEXT,
+      onboarding_pct INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS exits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+      name TEXT NOT NULL,
+      department TEXT,
+      last_working_day TEXT,
+      clearance_current INTEGER NOT NULL DEFAULT 0,
+      clearance_total INTEGER NOT NULL DEFAULT 4,
+      status TEXT NOT NULL DEFAULT 'Serving Notice' CHECK (status IN ('Serving Notice','Cleared')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS performance_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_name TEXT NOT NULL,
+      team TEXT,
+      goal_text TEXT NOT NULL,
+      kpi_text TEXT,
+      self_assessment_status TEXT NOT NULL DEFAULT 'Pending' CHECK (self_assessment_status IN ('Pending','Submitted')),
+      manager_assessment_status TEXT NOT NULL DEFAULT 'Pending' CHECK (manager_assessment_status IN ('Pending','Submitted')),
+      rating INTEGER,
+      status TEXT NOT NULL DEFAULT 'In Progress' CHECK (status IN ('In Progress','Completed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS courses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      mandatory INTEGER NOT NULL DEFAULT 0,
+      pass_mark INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS course_enrollments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      completed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(course_id, employee_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS assets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      category TEXT,
+      assigned_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'In Store' CHECK (status IN ('Assigned','In Store','Under Repair')),
+      cost INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   migrateLeavesTable();
 }
 
@@ -748,6 +829,67 @@ function seedModuleData() {
   const bottomRole = db.prepare("SELECT id FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get();
   if (bottomRole) {
     db.prepare("UPDATE leaves SET current_stage_role_id = ? WHERE status = 'Pending' AND current_stage_role_id IS NULL").run(bottomRole.id);
+  }
+
+  // --- Recruitment / Performance / Learning / Asset demo data (candidates, reviews, courses
+  // etc. are prospective/fictional records, not tied to real employees, except where an
+  // employee_id FK legitimately references one — e.g. assigning a real asset to a real employee
+  // doesn't modify that employee's own record). ---
+  const deptId = (name) => db.prepare('SELECT id FROM departments WHERE name = ?').get(name)?.id;
+  if (db.prepare('SELECT COUNT(*) AS c FROM candidates').get().c === 0) {
+    const posByTitle = (title) => db.prepare('SELECT id FROM positions WHERE title = ?').get(title)?.id;
+    const insCand = db.prepare('INSERT INTO candidates (name, position_id, panel, feedback_status, stage) VALUES (?, ?, ?, ?, ?)');
+    insCand.run('A. Verma', posByTitle('Senior Backend Engineer'), 'Usha, Vasavi', 'No feedback yet', 'Technical Interview');
+    insCand.run('J. Thomas', posByTitle('Senior Backend Engineer'), null, 'No feedback yet', 'Resume Screening');
+    insCand.run('M. Khan', posByTitle('Automation QA Engineer'), 'Ragini', 'Feedback submitted', 'Offer');
+    insCand.run('S. Rao', posByTitle('Sales Executive'), 'Bhavana', 'Feedback submitted', 'HR Interview');
+  }
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM new_hires').get().c === 0) {
+    const insHire = db.prepare('INSERT INTO new_hires (name, designation, department, start_date, onboarding_pct) VALUES (?, ?, ?, ?, ?)');
+    insHire.run('N. Kavya', 'Trainer', 'Educational', db.prepare("SELECT date('now','+3 days') AS d").get().d, 14);
+    insHire.run('Supriya', 'Recruiter', 'Medical', db.prepare("SELECT date('now','+33 days') AS d").get().d, 0);
+  }
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM exits').get().c === 0) {
+    const r_iyer = db.prepare("SELECT id, name, department FROM employees WHERE employee_code = 'EMP-004'").get();
+    if (r_iyer) {
+      db.prepare('INSERT INTO exits (employee_id, name, department, last_working_day, clearance_current, clearance_total, status) VALUES (?, ?, ?, ?, 0, 4, ?)')
+        .run(r_iyer.id, r_iyer.name, r_iyer.department, db.prepare("SELECT date('now','+21 days') AS d").get().d, 'Serving Notice');
+    }
+  }
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM performance_reviews').get().c === 0) {
+    const insRev = db.prepare('INSERT INTO performance_reviews (employee_name, team, goal_text, kpi_text, self_assessment_status, manager_assessment_status, rating, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    insRev.run('Ragini', null, 'Ship v2 of the reporting module', 'On-time delivery', 'Submitted', 'Pending', null, 'In Progress');
+    insRev.run('Usha', 'Team-A', 'Reduce support ticket backlog by 30%', 'Backlog reduction %', 'Submitted', 'Submitted', 4, 'Completed');
+    insRev.run('Vasavi', null, 'Complete QA automation certification', 'Certification completion', 'Pending', 'Pending', null, 'In Progress');
+  }
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM courses').get().c === 0) {
+    const insCourse = db.prepare('INSERT INTO courses (title, mandatory, pass_mark) VALUES (?, ?, ?)');
+    const c1 = insCourse.run('Workplace Safety & Compliance', 1, 70).lastInsertRowid;
+    const c2 = insCourse.run('Advanced Excel for Reporting', 0, 70).lastInsertRowid;
+    const c3 = insCourse.run('Leadership Fundamentals', 0, null).lastInsertRowid;
+    if (db.prepare('SELECT COUNT(*) AS c FROM course_enrollments').get().c === 0) {
+      const insEnr = db.prepare('INSERT INTO course_enrollments (course_id, employee_id, completed) VALUES (?, ?, ?)');
+      const emps = db.prepare('SELECT id FROM employees ORDER BY id').all();
+      // Rough completion ratios matching the prototype (74% / 50% / 100%), capped to how many real employees exist.
+      const enroll = (courseId, n, completedN) => emps.slice(0, n).forEach((e, i) => insEnr.run(courseId, e.id, i < completedN ? 1 : 0));
+      enroll(c1, Math.min(emps.length, 9), Math.min(emps.length, 7));
+      enroll(c2, Math.min(emps.length, 6), Math.min(emps.length, 3));
+      enroll(c3, Math.min(emps.length, 4), Math.min(emps.length, 4));
+    }
+  }
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM assets').get().c === 0) {
+    const emp1 = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-001'").get()?.id || null;
+    const emp3 = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-003'").get()?.id || null;
+    const insAsset = db.prepare('INSERT INTO assets (name, category, assigned_employee_id, status, cost) VALUES (?, ?, ?, ?, ?)');
+    insAsset.run('Dell Latitude 5440', 'Laptop', emp1, emp1 ? 'Assigned' : 'In Store', 78000);
+    insAsset.run('iPhone 14', 'Mobile', emp3, emp3 ? 'Assigned' : 'In Store', 65000);
+    insAsset.run('HP LaserJet Pro', 'Printer', null, 'In Store', 22000);
+    insAsset.run('Dell Latitude 5440', 'Laptop', null, 'Under Repair', 78000);
   }
 }
 
