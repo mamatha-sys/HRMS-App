@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -8,21 +9,38 @@ router.use(requireAuth);
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const isHR = (role) => HR_ROLES.includes(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
-const BALANCE_COL = { Casual: 'casual', Sick: 'sick', Earned: 'earned' };
-const CODE_OF_TYPE = { Casual: 'CL', Sick: 'SL', Earned: 'EL' };
 
-function ensureBalance(employeeId) {
-  let bal = db.prepare('SELECT * FROM leave_balances WHERE employee_id = ?').get(employeeId);
-  if (!bal) {
-    db.prepare('INSERT INTO leave_balances (employee_id) VALUES (?)').run(employeeId);
-    bal = db.prepare('SELECT * FROM leave_balances WHERE employee_id = ?').get(employeeId);
-  }
-  return bal;
+function activeTypes() { return db.prepare('SELECT * FROM leave_types WHERE active = 1 ORDER BY id').all(); }
+function allTypes() { return db.prepare('SELECT * FROM leave_types ORDER BY id').all(); }
+function typeById(id) { return db.prepare('SELECT * FROM leave_types WHERE id = ?').get(id); }
+
+function ensureBalances(employeeId) {
+  const types = allTypes();
+  const have = new Set(db.prepare('SELECT leave_type_id FROM employee_leave_balances WHERE employee_id = ?').all(employeeId).map((r) => r.leave_type_id));
+  const ins = db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?)');
+  types.forEach((t) => { if (!have.has(t.id)) ins.run(employeeId, t.id, t.annual_quota); });
+}
+function balanceOf(employeeId, leaveTypeId) {
+  ensureBalances(employeeId);
+  return db.prepare('SELECT balance FROM employee_leave_balances WHERE employee_id = ? AND leave_type_id = ?').get(employeeId, leaveTypeId)?.balance ?? 0;
+}
+function setBalance(employeeId, leaveTypeId, balance) {
+  db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?) ON CONFLICT(employee_id, leave_type_id) DO UPDATE SET balance = excluded.balance')
+    .run(employeeId, leaveTypeId, balance);
+}
+function logBalanceHistory(employeeId, leaveTypeName, change, balanceAfter, reason, actorId) {
+  db.prepare('INSERT INTO leave_balance_history (employee_id, leave_type, change, balance_after, reason, created_by) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(employeeId, leaveTypeName, change, balanceAfter, reason, actorId || null);
 }
 
-function logBalanceHistory(employeeId, leaveType, change, balanceAfter, reason, actorId) {
-  db.prepare('INSERT INTO leave_balance_history (employee_id, leave_type, change, balance_after, reason, created_by) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(employeeId, leaveType, change, balanceAfter, reason, actorId || null);
+// All balances for an employee, active types only (paused types are hidden everywhere).
+function balancesFor(employeeId) {
+  ensureBalances(employeeId);
+  return db.prepare(`
+    SELECT lt.id AS leave_type_id, lt.name, lt.code, lt.unpaid, elb.balance
+    FROM leave_types lt LEFT JOIN employee_leave_balances elb ON elb.leave_type_id = lt.id AND elb.employee_id = ?
+    WHERE lt.active = 1 ORDER BY lt.id
+  `).all(employeeId);
 }
 
 function daysBetween(from, to) {
@@ -41,23 +59,6 @@ const SCOPE_BANNER = {
   manager: 'Team/organization leave — review and decide requests.',
   assistant_manager: 'Team/organization leave — review and decide requests.'
 };
-
-// The approval chain, bottom (least authority) → top, from the live role workflow.
-// Paused roles are skipped and 'employee' is excluded — this drives both the display label
-// and the actual sequential gating below, so reordering/pausing roles in Organization
-// Structure changes how leave approval really flows, not just what's shown.
-function chainRoles() {
-  return db.prepare("SELECT * FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC").all();
-}
-function bottomRole() {
-  return chainRoles()[0] || db.prepare("SELECT * FROM roles WHERE key = 'super_admin'").get();
-}
-function roleAbove(sortOrder) {
-  return db.prepare("SELECT * FROM roles WHERE key != 'employee' AND paused = 0 AND sort_order < ? ORDER BY sort_order DESC LIMIT 1").get(sortOrder);
-}
-function approvalChainLabel() {
-  return chainRoles().map((r) => r.name).join(' → ');
-}
 
 // HR overview: KPIs + approval chain + leave types + on-leave-by-department.
 router.get('/overview', (req, res) => {
@@ -92,22 +93,26 @@ router.get('/overview', (req, res) => {
     ],
     chainLabel: approvalChainLabel(),
     chainList,
-    leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all(),
+    leaveTypes: allTypes(),
     byDept: Object.entries(byDept).map(([department, people]) => ({ department, people }))
   });
 });
 
-// --- Leave types: read by anyone authed; edit/pause by Super Admin only ---
-router.get('/types', (req, res) => res.json({ leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all() }));
+// --- Leave types: read by anyone authed; edit/pause/add by Super Admin only ---
+router.get('/types', (req, res) => res.json({ leaveTypes: allTypes() }));
 
 router.post('/types', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can add leave types' });
   const { name, code, annual_quota, unpaid } = req.body || {};
   if (!name || !code) return res.status(400).json({ error: 'name and code are required' });
+  const quota = unpaid ? 0 : Math.max(0, parseInt(annual_quota, 10) || 0);
   try {
-    db.prepare('INSERT INTO leave_types (name, code, annual_quota, unpaid) VALUES (?, ?, ?, ?)')
-      .run(name.trim(), code.trim().toUpperCase(), Math.max(0, parseInt(annual_quota, 10) || 0), unpaid ? 1 : 0);
-    res.status(201).json({ leaveTypes: db.prepare('SELECT * FROM leave_types ORDER BY id').all() });
+    const info = db.prepare('INSERT INTO leave_types (name, code, annual_quota, unpaid) VALUES (?, ?, ?, ?)')
+      .run(name.trim(), code.trim().toUpperCase(), quota, unpaid ? 1 : 0);
+    // Provision a balance row for every existing employee so the new type is immediately usable.
+    const ins = db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?)');
+    db.prepare('SELECT id FROM employees').all().forEach((e) => ins.run(e.id, info.lastInsertRowid, quota));
+    res.status(201).json({ leaveTypes: allTypes() });
   } catch { res.status(409).json({ error: 'A leave type with this code already exists' }); }
 });
 
@@ -115,9 +120,11 @@ router.put('/types/:id', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can edit leave types' });
   const t = db.prepare('SELECT * FROM leave_types WHERE id = ?').get(req.params.id);
   if (!t) return res.status(404).json({ error: 'Leave type not found' });
-  const { name, annual_quota } = req.body || {};
-  db.prepare('UPDATE leave_types SET name = COALESCE(?, name), annual_quota = COALESCE(?, annual_quota) WHERE id = ?')
-    .run(name?.trim() || null, annual_quota !== undefined ? Math.max(0, parseInt(annual_quota, 10) || 0) : null, req.params.id);
+  const { name, annual_quota, unpaid } = req.body || {};
+  const nextUnpaid = unpaid === undefined ? t.unpaid : (unpaid ? 1 : 0);
+  const nextQuota = nextUnpaid ? 0 : (annual_quota !== undefined ? Math.max(0, parseInt(annual_quota, 10) || 0) : t.annual_quota);
+  db.prepare('UPDATE leave_types SET name = COALESCE(?, name), annual_quota = ?, unpaid = ? WHERE id = ?')
+    .run(name?.trim() || null, nextQuota, nextUnpaid, req.params.id);
   res.json({ leaveType: db.prepare('SELECT * FROM leave_types WHERE id = ?').get(req.params.id) });
 });
 
@@ -129,27 +136,30 @@ router.put('/types/:id/pause', (req, res) => {
   res.json({ leaveType: db.prepare('SELECT * FROM leave_types WHERE id = ?').get(req.params.id) });
 });
 
-// --- Reports: balances table + full balance-change history ---
+// --- Reports: per-type balances table + full balance-change history ---
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const balances = db.prepare(`
-    SELECT e.id AS employee_id, e.employee_code, e.name, e.department, lb.casual, lb.sick, lb.earned
-    FROM employees e LEFT JOIN leave_balances lb ON lb.employee_id = e.id ORDER BY e.id
-  `).all();
+  const types = activeTypes();
+  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const balances = employees.map((e) => {
+    const values = {};
+    types.forEach((t) => { values[t.id] = balanceOf(e.id, t.id); });
+    return { employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department, values };
+  });
   const history = db.prepare(`
     SELECT h.*, e.name AS employee_name FROM leave_balance_history h JOIN employees e ON e.id = h.employee_id
     ORDER BY h.created_at DESC LIMIT 200
   `).all();
-  res.json({ balances, history });
+  res.json({ leaveTypes: types, balances, history });
 });
 
 router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const balances = db.prepare(`
-    SELECT e.employee_code, e.name, e.department, lb.casual, lb.sick, lb.earned
-    FROM employees e LEFT JOIN leave_balances lb ON lb.employee_id = e.id ORDER BY e.id
-  `).all();
-  const csv = ['code,name,department,casual,sick,earned', ...balances.map((b) => `${b.employee_code},${b.name},${b.department},${b.casual ?? ''},${b.sick ?? ''},${b.earned ?? ''}`)].join('\n');
+  const types = activeTypes();
+  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const header = ['code', 'name', 'department', ...types.map((t) => t.code)];
+  const rows = employees.map((e) => [e.employee_code, e.name, e.department, ...types.map((t) => balanceOf(e.id, t.id))].join(','));
+  const csv = [header.join(','), ...rows].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="leave-balances.csv"');
   res.send(csv);
@@ -179,6 +189,15 @@ router.get('/cancellations', (req, res) => {
   res.json({ cancellations: rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
 });
 
+function restoreBalanceForLeave(leave) {
+  if (!leave.leave_type_id) return;
+  const lt = typeById(leave.leave_type_id);
+  if (!lt || lt.unpaid) return;
+  const newBal = balanceOf(leave.employee_id, leave.leave_type_id) + leave.days;
+  setBalance(leave.employee_id, leave.leave_type_id, newBal);
+  logBalanceHistory(leave.employee_id, leave.type, leave.days, newBal, `Leave cancelled (${leave.from_date} to ${leave.to_date})`, null);
+}
+
 function decideCancel(finalStatus) {
   return (req, res) => {
     if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
@@ -188,13 +207,7 @@ function decideCancel(finalStatus) {
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(c.leave_id);
 
     if (finalStatus === 'Approved') {
-      const col = BALANCE_COL[leave.type];
-      if (col) {
-        const bal = ensureBalance(leave.employee_id);
-        const newBal = bal[col] + leave.days;
-        db.prepare(`UPDATE leave_balances SET ${col} = ? WHERE employee_id = ?`).run(newBal, leave.employee_id);
-        logBalanceHistory(leave.employee_id, leave.type, leave.days, newBal, `Leave cancelled (${leave.from_date} to ${leave.to_date})`, req.user.sub);
-      }
+      restoreBalanceForLeave(leave);
       db.prepare('UPDATE leaves SET cancelled = 1, cancel_requested = 0 WHERE id = ?').run(leave.id);
     } else {
       db.prepare('UPDATE leaves SET cancel_requested = 0 WHERE id = ?').run(leave.id);
@@ -213,34 +226,35 @@ router.get('/', (req, res) => {
     return res.json({ leaves: withName(rows) });
   }
   const me = myEmployee(req.user.sub);
-  if (!me) return res.json({ leaves: [], balance: null });
+  if (!me) return res.json({ leaves: [], balances: [] });
   const rows = db.prepare('SELECT * FROM leaves WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
-  res.json({ leaves: withName(rows), balance: ensureBalance(me.id) });
+  res.json({ leaves: withName(rows), balances: balancesFor(me.id) });
 });
 
 router.get('/balance', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  res.json({ balance: ensureBalance(me.id) });
+  res.json({ balances: balancesFor(me.id) });
 });
 
 router.post('/', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { type, from_date, to_date, reason } = req.body || {};
-  if (!BALANCE_COL[type] || !from_date || !to_date) return res.status(400).json({ error: 'type, from_date and to_date are required' });
+  const { leave_type_id, from_date, to_date, reason } = req.body || {};
+  const lt = leave_type_id ? typeById(leave_type_id) : null;
+  if (!lt || !from_date || !to_date) return res.status(400).json({ error: 'leave_type_id, from_date and to_date are required' });
+  if (!lt.active) return res.status(400).json({ error: `${lt.name} is currently paused and cannot be applied for.` });
   if (to_date < from_date) return res.status(400).json({ error: 'End date cannot be before start date' });
 
-  const lt = db.prepare('SELECT * FROM leave_types WHERE code = ?').get(CODE_OF_TYPE[type]);
-  if (lt && !lt.active) return res.status(400).json({ error: `${type} leave is currently paused and cannot be applied for.` });
-
   const days = daysBetween(from_date, to_date);
-  const bal = ensureBalance(me.id);
-  if (bal[BALANCE_COL[type]] < days) return res.status(400).json({ error: `Not enough ${type} leave balance (${bal[BALANCE_COL[type]]} left, ${days} requested)` });
+  if (!lt.unpaid) {
+    const bal = balanceOf(me.id, lt.id);
+    if (bal < days) return res.status(400).json({ error: `Not enough ${lt.name} balance (${bal} left, ${days} requested)` });
+  }
 
   const stage = bottomRole();
-  const info = db.prepare('INSERT INTO leaves (employee_id, type, from_date, to_date, days, reason, current_stage_role_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(me.id, type, from_date, to_date, days, reason || null, stage ? stage.id : null);
+  const info = db.prepare('INSERT INTO leaves (employee_id, leave_type_id, type, from_date, to_date, days, reason, current_stage_role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(me.id, lt.id, lt.name, from_date, to_date, days, reason || null, stage ? stage.id : null);
   res.status(201).json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(info.lastInsertRowid)])[0] });
 });
 
@@ -259,43 +273,46 @@ router.post('/:id/request-cancel', (req, res) => {
   res.status(201).json({ ok: true });
 });
 
-// Sequential approval chain. A role may act once its authority is at least as senior as the
-// leave's current stage (skip-level approval is allowed); acting from a lower stage advances
-// the chain to the next role above the actor, or finalizes if none remain. Super Admin always
-// finalizes immediately, matching its full-access status elsewhere in the app.
+// Employee withdraws their own still-pending cancellation request.
+router.post('/:id/withdraw-cancel', (req, res) => {
+  const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
+  if (!leave) return res.status(404).json({ error: 'Leave request not found' });
+  const me = myEmployee(req.user.sub);
+  if ((!me || leave.employee_id !== me.id) && !isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const pending = db.prepare("SELECT * FROM leave_cancellations WHERE leave_id = ? AND status = 'Pending'").get(leave.id);
+  if (!pending) return res.status(400).json({ error: 'There is no pending cancellation request to withdraw.' });
+  db.prepare('DELETE FROM leave_cancellations WHERE id = ?').run(pending.id);
+  db.prepare('UPDATE leaves SET cancel_requested = 0 WHERE id = ?').run(leave.id);
+  res.json({ ok: true });
+});
+
+// Sequential approval chain — see server/src/utils/chain.js for the shared mechanics
+// (also used by Attendance regularization requests).
 function decide(finalStatus) {
   return (req, res) => {
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
     if (!leave) return res.status(404).json({ error: 'Leave request not found' });
     if (leave.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
 
-    const actorRole = db.prepare('SELECT * FROM roles WHERE key = ?').get(req.user.role);
-    if (!actorRole || actorRole.key === 'employee') return res.status(403).json({ error: 'Insufficient permissions' });
+    const result = evaluateDecision(req.user.role, leave.current_stage_role_id, finalStatus === 'Rejected');
+    if (result.error) return res.status(403).json({ error: result.error });
 
-    if (req.user.role !== 'super_admin') {
-      let stage = leave.current_stage_role_id ? db.prepare('SELECT * FROM roles WHERE id = ?').get(leave.current_stage_role_id) : null;
-      if (!stage) stage = bottomRole();
-      if (actorRole.sort_order > stage.sort_order) {
-        return res.status(403).json({ error: `Waiting on ${stage.name} to act first.` });
+    if (result.finalized) {
+      if (finalStatus === 'Approved') {
+        const lt = leave.leave_type_id ? typeById(leave.leave_type_id) : null;
+        if (lt && !lt.unpaid) {
+          const bal = balanceOf(leave.employee_id, lt.id);
+          if (bal < leave.days) return res.status(400).json({ error: 'Employee no longer has enough balance' });
+          const newBal = bal - leave.days;
+          setBalance(leave.employee_id, lt.id, newBal);
+          logBalanceHistory(leave.employee_id, leave.type, -leave.days, newBal, `Leave approved (${leave.from_date} to ${leave.to_date})`, req.user.sub);
+        }
+        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL WHERE id = ?').run('Approved', req.user.sub, leave.id);
+      } else {
+        db.prepare('UPDATE leaves SET status = ?, decided_by = ? WHERE id = ?').run('Rejected', req.user.sub, leave.id);
       }
-    }
-
-    if (finalStatus === 'Rejected') {
-      db.prepare('UPDATE leaves SET status = ?, decided_by = ? WHERE id = ?').run('Rejected', req.user.sub, leave.id);
-      return res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
-    }
-
-    const above = req.user.role === 'super_admin' ? null : roleAbove(actorRole.sort_order);
-    if (!above) {
-      const col = BALANCE_COL[leave.type];
-      const bal = ensureBalance(leave.employee_id);
-      if (bal[col] < leave.days) return res.status(400).json({ error: 'Employee no longer has enough balance' });
-      const newBal = bal[col] - leave.days;
-      db.prepare(`UPDATE leave_balances SET ${col} = ? WHERE employee_id = ?`).run(newBal, leave.employee_id);
-      logBalanceHistory(leave.employee_id, leave.type, -leave.days, newBal, `Leave approved (${leave.from_date} to ${leave.to_date})`, req.user.sub);
-      db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL WHERE id = ?').run('Approved', req.user.sub, leave.id);
     } else {
-      db.prepare('UPDATE leaves SET current_stage_role_id = ? WHERE id = ?').run(above.id, leave.id);
+      db.prepare('UPDATE leaves SET current_stage_role_id = ? WHERE id = ?').run(result.stageRoleId, leave.id);
     }
     res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
   };

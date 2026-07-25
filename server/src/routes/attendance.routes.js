@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -47,7 +48,9 @@ router.get('/overview', (req, res) => {
     if (r.check_out_time) methods[m].out++;
   });
 
-  const regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' ORDER BY (status='Pending') DESC, created_at DESC LIMIT 10").all();
+  const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
+  const regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' ORDER BY (status='Pending') DESC, created_at DESC LIMIT 10")
+    .all().map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
 
   res.json({
     date,
@@ -59,7 +62,8 @@ router.get('/overview', (req, res) => {
       { label: 'Missing Punch-in', value: missingPunch, color: 'gold' }
     ],
     biometric: { checkedIn, checkedOut, methods: Object.values(methods) },
-    regularizations
+    regularizations,
+    chainLabel: approvalChainLabel()
   });
 });
 
@@ -216,8 +220,9 @@ router.post('/regularize', (req, res) => {
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const { date, reason } = req.body || {};
   if (!date || !reason) return res.status(400).json({ error: 'date and reason are required' });
-  db.prepare('INSERT INTO approvals (type, requester, detail) VALUES (?, ?, ?)')
-    .run('Regularization', me.name, `${date}: ${reason}`);
+  const stage = bottomRole();
+  db.prepare('INSERT INTO approvals (type, requester, detail, current_stage_role_id) VALUES (?, ?, ?, ?)')
+    .run('Regularization', me.name, `${date}: ${reason}`, stage ? stage.id : null);
   res.status(201).json({ ok: true });
 });
 

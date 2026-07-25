@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import ChainStepper from '../components/ChainStepper.jsx';
 
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const tag = (s) => s === 'Present' ? 'present' : s === 'Leave' ? 'info' : s === 'Absent' ? 'absent' : 'locked';
@@ -192,14 +193,17 @@ function HRAttendance() {
                 <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Regularization Requests</div>
                 {ov.regularizations.length === 0 && <div className="empty">No regularization requests.</div>}
                 {ov.regularizations.map((r) => (
-                  <div key={r.id} className="rec-row">
-                    <span>{r.requester}<div className="feature-meta">{r.detail}</div></span>
-                    {r.status === 'Pending' ? (
-                      <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-                        <button className="btn-approve" onClick={() => decide(r.id, 'approve')}>Approve</button>
-                        <button className="btn-reject" onClick={() => decide(r.id, 'reject')}>Reject</button>
-                      </span>
-                    ) : <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : 'absent')}>{r.status}</span>}
+                  <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                      <span>{r.requester}<div className="feature-meta">{r.detail}</div></span>
+                      {r.status === 'Pending' ? (
+                        <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                          <button className="btn-approve" onClick={() => decide(r.id, 'approve')}>Approve</button>
+                          <button className="btn-reject" onClick={() => decide(r.id, 'reject')}>Reject</button>
+                        </span>
+                      ) : <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : 'absent')}>{r.status}</span>}
+                    </div>
+                    {r.status === 'Pending' && <ChainStepper chainLabel={ov.chainLabel} currentStageName={r.current_stage_name} status={r.status} />}
                   </div>
                 ))}
               </div>

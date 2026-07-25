@@ -555,6 +555,13 @@ function migrate() {
   const lt = db.prepare('PRAGMA table_info(leave_types)').all().map((c) => c.name);
   if (!lt.includes('active')) db.exec('ALTER TABLE leave_types ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
 
+  const apr = db.prepare('PRAGMA table_info(approvals)').all().map((c) => c.name);
+  if (!apr.includes('current_stage_role_id')) {
+    db.exec('ALTER TABLE approvals ADD COLUMN current_stage_role_id INTEGER REFERENCES roles(id)');
+    const bottom = db.prepare("SELECT id FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get();
+    if (bottom) db.prepare("UPDATE approvals SET current_stage_role_id = ? WHERE status = 'Pending' AND current_stage_role_id IS NULL").run(bottom.id);
+  }
+
   const lv = db.prepare('PRAGMA table_info(leaves)').all().map((c) => c.name);
   if (!lv.includes('current_stage_role_id')) db.exec('ALTER TABLE leaves ADD COLUMN current_stage_role_id INTEGER REFERENCES roles(id)');
   if (!lv.includes('cancel_requested')) db.exec('ALTER TABLE leaves ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
@@ -596,7 +603,62 @@ function migrate() {
       amount INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (employee_id, component_id)
     );
+
+    CREATE TABLE IF NOT EXISTS employee_leave_balances (
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      leave_type_id INTEGER NOT NULL REFERENCES leave_types(id) ON DELETE CASCADE,
+      balance INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (employee_id, leave_type_id)
+    );
   `);
+
+  migrateLeavesTable();
+}
+
+// One-time rebuild: the original `leaves` table restricted `type` to a fixed CHECK
+// (Casual/Sick/Earned), which blocks applying for any other leave type. Rebuild it with a
+// leave_type_id FK and no such restriction, preserving every existing row's id (so
+// leave_cancellations.leave_id keeps pointing at the right record) and mapping old type
+// strings to their matching leave_types row where possible.
+function migrateLeavesTable() {
+  const cols = db.prepare('PRAGMA table_info(leaves)').all().map((c) => c.name);
+  if (cols.includes('leave_type_id')) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE leaves_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        leave_type_id INTEGER REFERENCES leave_types(id),
+        type TEXT NOT NULL,
+        from_date TEXT NOT NULL,
+        to_date TEXT NOT NULL,
+        days INTEGER NOT NULL,
+        reason TEXT,
+        status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+        decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        current_stage_role_id INTEGER REFERENCES roles(id),
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        cancelled INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    const codeOfOldType = { Casual: 'CL', Sick: 'SL', Earned: 'EL' };
+    const insert = db.prepare(`
+      INSERT INTO leaves_new (id, employee_id, leave_type_id, type, from_date, to_date, days, reason, status, decided_by, created_at, current_stage_role_id, cancel_requested, cancelled)
+      VALUES (@id, @employee_id, @leave_type_id, @type, @from_date, @to_date, @days, @reason, @status, @decided_by, @created_at, @current_stage_role_id, @cancel_requested, @cancelled)
+    `);
+    db.prepare('SELECT * FROM leaves').all().forEach((r) => {
+      const code = codeOfOldType[r.type];
+      const lt = code ? db.prepare('SELECT id FROM leave_types WHERE code = ?').get(code) : null;
+      insert.run({ ...r, leave_type_id: lt ? lt.id : null });
+    });
+    db.exec('DROP TABLE leaves');
+    db.exec('ALTER TABLE leaves_new RENAME TO leaves');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
 }
 
 // Idempotent seed for the Leave/Payroll modules — fills defaults for existing employees
@@ -619,6 +681,23 @@ function seedModuleData() {
     ins.run('Maternity', 'ML', 182, 0);
     ins.run('Paternity', 'PL', 15, 0);
     ins.run('Loss of Pay', 'LWP', 0, 1);
+  }
+
+  // Per-type balances, migrated from the old fixed casual/sick/earned columns so every
+  // existing employee keeps their real (possibly already-decremented) balance.
+  if (db.prepare('SELECT COUNT(*) AS c FROM employee_leave_balances').get().c === 0) {
+    const types = db.prepare('SELECT * FROM leave_types').all();
+    const oldBalances = db.prepare('SELECT * FROM leave_balances').all();
+    const oldMap = {}; oldBalances.forEach((b) => { oldMap[b.employee_id] = b; });
+    const codeCol = { CL: 'casual', SL: 'sick', EL: 'earned' };
+    const ins = db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?)');
+    employees.forEach((e) => {
+      types.forEach((t) => {
+        const col = codeCol[t.code];
+        const bal = (col && oldMap[e.id]) ? oldMap[e.id][col] : t.annual_quota;
+        ins.run(e.id, t.id, bal);
+      });
+    });
   }
 
   // Salary components catalog + per-employee lines, migrated from the old fixed
