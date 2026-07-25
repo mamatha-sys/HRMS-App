@@ -1146,6 +1146,20 @@ function seedModuleData() {
       insQ.run(safetyCourse.id, 'How often should workstation ergonomics be reviewed?', 'Never', 'Only when injured', 'Periodically / when discomfort starts', 'Once at joining only', 'C', 3);
     }
   }
+  // Scoped to this specific course's own question count (not the global course_questions
+  // count above) — otherwise, once the Workplace Safety seed above ever ran once, this would
+  // silently never backfill Advanced Excel's bank on a live DB. This course has a pass_mark
+  // but had zero questions, so employees could never actually take/pass/get certified for it.
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions WHERE course_id = (SELECT id FROM courses WHERE title = ?)').get('Advanced Excel for Reporting').c === 0) {
+    const excelCourse = db.prepare("SELECT id FROM courses WHERE title = 'Advanced Excel for Reporting'").get();
+    if (excelCourse) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(excelCourse.id, 'Which Excel feature summarizes large datasets into a compact table with grouping and aggregation?', 'Conditional Formatting', 'Pivot Table', 'Data Validation', 'Sparklines', 'B', 0);
+      insQ.run(excelCourse.id, 'Which function looks up a value in a table and returns a value from a specified column in the same row?', 'SUM', 'IF', 'VLOOKUP', 'CONCAT', 'C', 1);
+      insQ.run(excelCourse.id, 'How do you lock a specific cell reference so it does not change when a formula is copied across cells?', 'Use $ signs (absolute reference)', 'Press Ctrl+L', 'Rename the cell', 'Add a comment', 'A', 2);
+      insQ.run(excelCourse.id, 'Which chart type is best suited for showing a trend over time?', 'Pie Chart', 'Line Chart', 'Scatter Plot', 'Doughnut Chart', 'B', 3);
+    }
+  }
 
   // Independent of the courses-seed block (which only runs once, ever) so this backfills
   // demo Skill Development & Competency Mapping / Progress-Attendance-Feedback data even on
