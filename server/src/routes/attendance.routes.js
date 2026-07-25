@@ -171,7 +171,10 @@ router.get('/', (req, res) => {
   if (!me) return res.json({ rows: [], me: null });
   const rows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? ORDER BY date DESC LIMIT 30').all(me.id);
   const todays = rows.find((r) => r.date === today()) || null;
-  res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code } });
+  const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
+  const regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' AND requester = ? ORDER BY created_at DESC").all(me.name)
+    .map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
+  res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel() });
 });
 
 function upsertToday(employeeId, patch) {

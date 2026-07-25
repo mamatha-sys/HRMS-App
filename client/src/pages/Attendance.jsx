@@ -54,7 +54,7 @@ function MyAttendance() {
   }
   async function submitReg(e) {
     e.preventDefault(); setError(''); setInfo('');
-    try { await api.post('/attendance/regularize', reg); setInfo('Regularization request sent to HR.'); setReg({ date: '', reason: '' }); setShowReg(false); }
+    try { await api.post('/attendance/regularize', reg); setInfo('Regularization request sent to HR.'); setReg({ date: '', reason: '' }); setShowReg(false); load(); }
     catch (err) { setError(err.response?.data?.error || 'Request failed.'); }
   }
 
@@ -89,6 +89,20 @@ function MyAttendance() {
             <button className="primary" type="submit">Send request</button>
           </form>
         )}
+      </div>
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>My Regularization Requests</div>
+        {(!data || data.regularizations?.length === 0) && <div className="empty">No regularization requests yet.</div>}
+        {data?.regularizations?.map((r) => (
+          <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+              <span className="feature-meta">{r.detail}</span>
+              {r.status !== 'Pending' && <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : 'absent')}>{r.status}</span>}
+            </div>
+            {r.status === 'Pending' && <ChainStepper chainLabel={data.chainLabel} currentStageName={r.current_stage_name} status={r.status} />}
+          </div>
+        ))}
       </div>
 
       <div className="card">

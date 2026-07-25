@@ -33,11 +33,44 @@ function MyPerformance() {
     catch (err) { setError(err.response?.data?.error || 'Could not add feedback.'); }
   }
 
+  const ratedReviews = reviews.filter((r) => r.rating != null);
+  const avgRating = ratedReviews.length ? Math.round((ratedReviews.reduce((t, r) => t + r.rating, 0) / ratedReviews.length) * 10) / 10 : null;
+  const completedCount = reviews.filter((r) => r.status === 'Completed').length;
+
   return (
     <div>
       <h1>Performance Management</h1>
       <div className="subtitle">Your goals, self-appraisal and review status.</div>
       {error && <div className="banner error">{error}</div>}
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>My Goals</div>
+        {reviews.length === 0 && <div className="empty">No goals assigned yet.</div>}
+        {reviews.length > 0 && (
+          <table>
+            <thead><tr><th>Goal</th><th>Due</th><th>Progress</th></tr></thead>
+            <tbody>{reviews.map((r) => (
+              <tr key={r.id}>
+                <td>{r.goal_text}</td>
+                <td>{r.due_date || '—'}</td>
+                <td>
+                  <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
+                    <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
+                  </div>
+                  <span className="feature-meta">{r.progress_pct}%</span>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="kpi-row">
+        <div className="kpi-card blue"><div className="kpi-label">My Goals</div><div className="kpi-value">{reviews.length}</div></div>
+        <div className="kpi-card green"><div className="kpi-label">Completed Reviews</div><div className="kpi-value">{completedCount}</div></div>
+        <div className="kpi-card gold"><div className="kpi-label">My Avg Rating</div><div className="kpi-value">{avgRating ?? '—'}</div></div>
+      </div>
+
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>My Reviews</div>
         {reviews.length === 0 && <div className="empty">No performance review has been created for you yet.</div>}
@@ -48,8 +81,12 @@ function MyPerformance() {
               <span className={'status-tag ' + (r.status === 'Completed' ? 'present' : 'pending')}>{r.status}</span>
             </div>
             {r.kpi_text && <div className="feature-meta">KPI: {r.kpi_text}</div>}
-            {r.due_date && <div className="feature-meta">Due: {r.due_date} · Progress: {r.progress_pct}%</div>}
             <div className="feature-meta">Self-Assessment: {r.self_assessment_status} · Manager Assessment: {r.manager_assessment_status}{r.rating ? ` · Rating: ${r.rating}/5` : ''}</div>
+            {(r.achievements_text || r.development_areas) && (
+              <div className="feature-meta">
+                {r.achievements_text ? `Achievements: ${r.achievements_text}` : ''}{r.achievements_text && r.development_areas ? ' · ' : ''}{r.development_areas ? `Development: ${r.development_areas}` : ''}
+              </div>
+            )}
             {r.self_assessment_status === 'Pending' && <button style={{ marginTop: 6 }} onClick={() => submitSelfAssessment(r.id)}>Submit Self-Assessment</button>}
             <div style={{ marginTop: 8 }}>
               <div className="feature-meta">360° Feedback ({r.feedback.length})</div>
