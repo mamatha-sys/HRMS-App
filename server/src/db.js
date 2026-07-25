@@ -848,6 +848,36 @@ function migrate() {
     );
   `);
 
+  // --- Learning "Skill Development & Competency Mapping" and "Progress, Attendance &
+  // Feedback" Key Features, plus "Training Delivery & Scheduling" session booking.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_skills (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      skill_name TEXT NOT NULL,
+      current_level INTEGER NOT NULL,
+      required_level INTEGER NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS learning_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      author_type TEXT NOT NULL DEFAULT 'Other' CHECK (author_type IN ('Manager','Peer','Self','Other')),
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS training_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      mode TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   migrateLeavesTable();
 }
 
@@ -1114,6 +1144,29 @@ function seedModuleData() {
       insQ.run(safetyCourse.id, 'Where is the nearest fire extinguisher usually located?', 'In the parking lot', 'Near exits and hallways', 'In the CEO\'s office', 'It is not required', 'B', 1);
       insQ.run(safetyCourse.id, 'Who should workplace safety incidents be reported to?', 'No one, handle it yourself', 'HR/Safety Officer', 'The nearest customer', 'Social media', 'B', 2);
       insQ.run(safetyCourse.id, 'How often should workstation ergonomics be reviewed?', 'Never', 'Only when injured', 'Periodically / when discomfort starts', 'Once at joining only', 'C', 3);
+    }
+  }
+
+  // Independent of the courses-seed block (which only runs once, ever) so this backfills
+  // demo Skill Development & Competency Mapping / Progress-Attendance-Feedback data even on
+  // a DB where courses already existed. Matches the "Skill Development & Competency Mapping —
+  // Ragini" and "Progress, Attendance & Feedback — Ragini" prototype screens.
+  if (db.prepare('SELECT COUNT(*) AS c FROM employee_skills').get().c === 0) {
+    const ragini = db.prepare("SELECT id FROM employees WHERE name = 'Ragini'").get();
+    if (ragini) {
+      const insSkill = db.prepare('INSERT INTO employee_skills (employee_id, skill_name, current_level, required_level) VALUES (?, ?, ?, ?)');
+      insSkill.run(ragini.id, 'System Design', 3, 4);
+      insSkill.run(ragini.id, 'Cloud Architecture', 2, 4);
+      insSkill.run(ragini.id, 'Mentoring', 3, 3);
+    }
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM learning_feedback').get().c === 0) {
+    const ragini = db.prepare("SELECT id FROM employees WHERE name = 'Ragini'").get();
+    if (ragini) {
+      const insLf = db.prepare('INSERT INTO learning_feedback (employee_id, author_name, author_type, note, created_at) VALUES (?, ?, ?, ?, ?)');
+      insLf.run(ragini.id, 'Keerthana', 'Manager', 'Strong technical delivery this quarter, great ownership on the reporting module.', '2026-07-02 10:00:00');
+      insLf.run(ragini.id, 'Usha', 'Peer', 'Very responsive in cross-team requests, always helpful.', '2026-06-28 10:00:00');
+      insLf.run(ragini.id, 'Ragini', 'Self', 'Feel confident about delivery pace, want more exposure to architecture decisions.', '2026-06-25 10:00:00');
     }
   }
 

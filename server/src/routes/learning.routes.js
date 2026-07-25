@@ -17,13 +17,13 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  { key: 'courses', label: 'Course & Program Management', screen: 'newCourse' },
-  { key: 'enrollment', label: 'Course Enrollment', screen: 'dashboard' },
-  { key: 'delivery', label: 'Training Delivery & Scheduling', screen: 'dashboard' },
-  { key: 'assessments', label: 'Assessments & Assignments', screen: 'dashboard' },
+  { key: 'courses', label: 'Course & Program Management', screen: 'courses' },
+  { key: 'enrollment', label: 'Course Enrollment', screen: 'enrollment' },
+  { key: 'delivery', label: 'Training Delivery & Scheduling', screen: 'delivery' },
+  { key: 'assessments', label: 'Assessments & Assignments', screen: 'assessmentsList' },
   { key: 'certifications', label: 'Certifications', screen: 'certifications' },
-  { key: 'competency', label: 'Skill Development & Competency Mapping', screen: 'dashboard' },
-  { key: 'progress', label: 'Progress, Attendance & Feedback', screen: 'dashboard' },
+  { key: 'competency', label: 'Skill Development & Competency Mapping', screen: 'competency' },
+  { key: 'progress', label: 'Progress, Attendance & Feedback', screen: 'progress' },
   { key: 'reports', label: 'Training Reports & Analytics', screen: 'reports' }
 ];
 const FIELD_ACCESS = [
@@ -293,6 +293,111 @@ router.get('/reports', (req, res) => {
     byCourse: courses.map((c) => ({ title: c.title, enrolled: c.enrolled, completed: c.completed, certified: c.certified, completionPct: c.completionPct })),
     totals: { totalEnrolled, totalCompleted, totalCertified, overallCompletionPct: totalEnrolled > 0 ? Math.round((totalCompleted / totalEnrolled) * 100) : 0 }
   });
+});
+
+// Active employees, for the picker dropdowns on Enrollment/Competency/Progress screens.
+router.get('/employees', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ employees: db.prepare("SELECT id, name, employee_code FROM employees WHERE status = 'Active' ORDER BY name").all() });
+});
+
+// "Course Enrollment — who has access to what": every enrollment across every course.
+router.get('/enrollments', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT ce.id, ce.completed, ce.score, ce.certificate_issued, e.name AS employee_name, e.id AS employee_id, c.title AS course_title
+    FROM course_enrollments ce JOIN employees e ON e.id = ce.employee_id JOIN courses c ON c.id = ce.course_id
+    ORDER BY ce.created_at DESC
+  `).all();
+  const status = (r) => (r.certificate_issued ? 'Certified' : (r.completed ? 'Assessed' : 'In Progress'));
+  res.json({ enrollments: rows.map((r) => ({ ...r, status: status(r) })), courses: db.prepare('SELECT id, title FROM courses ORDER BY title').all() });
+});
+
+router.post('/enrollments', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { employee_id, course_id } = req.body || {};
+  const emp = employee_id ? db.prepare('SELECT id FROM employees WHERE id = ?').get(employee_id) : null;
+  const course = course_id ? db.prepare('SELECT id FROM courses WHERE id = ?').get(course_id) : null;
+  if (!emp || !course) return res.status(400).json({ error: 'A valid employee and course are required' });
+  try {
+    db.prepare('INSERT INTO course_enrollments (course_id, employee_id) VALUES (?, ?)').run(course.id, emp.id);
+    res.status(201).json({ ok: true });
+  } catch {
+    res.status(409).json({ error: 'That employee is already enrolled in that course.' });
+  }
+});
+
+// "Assessments & Assignments": every course's final assessment / completion criterion.
+router.get('/assessments', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const courses = db.prepare('SELECT * FROM courses ORDER BY created_at').all();
+  const assessments = courses.map((c) => ({
+    course_id: c.id,
+    course_title: c.title,
+    pass_mark: c.pass_mark,
+    questionCount: db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(c.id).c
+  }));
+  res.json({ assessments });
+});
+
+// "Training Delivery & Scheduling": booked training sessions per course.
+router.get('/sessions', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT ts.*, c.title AS course_title FROM training_sessions ts JOIN courses c ON c.id = ts.course_id ORDER BY ts.created_at DESC
+  `).all();
+  res.json({ sessions: rows, courses: db.prepare('SELECT id, title FROM courses ORDER BY title').all() });
+});
+
+router.post('/sessions', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { course_id, mode, scheduled_at } = req.body || {};
+  const course = course_id ? db.prepare('SELECT id FROM courses WHERE id = ?').get(course_id) : null;
+  if (!course || !mode?.trim() || !scheduled_at?.trim()) return res.status(400).json({ error: 'Course, mode and date & time are all required' });
+  db.prepare('INSERT INTO training_sessions (course_id, mode, scheduled_at) VALUES (?, ?, ?)').run(course.id, mode.trim(), scheduled_at.trim());
+  res.status(201).json({ ok: true });
+});
+
+// "Skill Development & Competency Mapping — <Name>": per-employee skill/current/required/gap.
+router.get('/employees/:id/skills', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const employee = db.prepare('SELECT id, name, employee_code FROM employees WHERE id = ?').get(req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  const skills = db.prepare('SELECT * FROM employee_skills WHERE employee_id = ? ORDER BY created_at').all(employee.id)
+    .map((s) => ({ ...s, gap: Math.max(0, s.required_level - s.current_level) }));
+  res.json({ employee, skills });
+});
+
+router.post('/employees/:id/skills', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const employee = db.prepare('SELECT id FROM employees WHERE id = ?').get(req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  const { skill_name, current_level, required_level } = req.body || {};
+  if (!skill_name?.trim()) return res.status(400).json({ error: 'Skill name is required' });
+  const cur = Math.max(0, Math.min(5, parseInt(current_level, 10) || 0));
+  const req_ = Math.max(0, Math.min(5, parseInt(required_level, 10) || 0));
+  db.prepare('INSERT INTO employee_skills (employee_id, skill_name, current_level, required_level) VALUES (?, ?, ?, ?)').run(employee.id, skill_name.trim(), cur, req_);
+  res.status(201).json({ ok: true });
+});
+
+// "Progress, Attendance & Feedback — <Name>": a Manager/Peer/Self feedback thread per employee.
+router.get('/employees/:id/feedback', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const employee = db.prepare('SELECT id, name, employee_code FROM employees WHERE id = ?').get(req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  const feedback = db.prepare('SELECT * FROM learning_feedback WHERE employee_id = ? ORDER BY created_at DESC').all(employee.id);
+  res.json({ employee, feedback });
+});
+
+router.post('/employees/:id/feedback', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const employee = db.prepare('SELECT id FROM employees WHERE id = ?').get(req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  const { note, author_type } = req.body || {};
+  if (!note?.trim()) return res.status(400).json({ error: 'Feedback note is required' });
+  const type = ['Manager', 'Peer', 'Self', 'Other'].includes(author_type) ? author_type : 'Other';
+  db.prepare('INSERT INTO learning_feedback (employee_id, author_name, author_type, note) VALUES (?, ?, ?, ?)').run(employee.id, req.user.name || 'Anonymous', type, note.trim());
+  res.status(201).json({ ok: true });
 });
 
 export default router;

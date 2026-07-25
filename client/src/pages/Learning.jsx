@@ -187,6 +187,13 @@ function HRLearning() {
 
   if (screen === 'newCourse') return <NewCourseScreen onDone={() => { load(); goto('dashboard'); }} onCancel={() => goto('dashboard')} setGlobalError={setError} />;
   if (screen === 'assessment') return <AssessmentScreen courseId={activeCourseId} onBack={() => { load(); goto('dashboard'); }} />;
+  if (screen === 'courses') return <CoursesScreen onBack={() => goto('dashboard')} onAdd={() => goto('newCourse')} />;
+  if (screen === 'enrollment') return <EnrollmentScreen onBack={() => goto('dashboard')} />;
+  if (screen === 'assessmentsList') return <AssessmentsListScreen onBack={() => goto('dashboard')} />;
+  if (screen === 'delivery') return <DeliveryScreen onBack={() => goto('dashboard')} onSchedule={() => goto('scheduleSession')} />;
+  if (screen === 'scheduleSession') return <ScheduleSessionScreen onDone={() => goto('delivery')} onBack={() => goto('delivery')} />;
+  if (screen === 'competency') return <CompetencyMappingScreen onBack={() => goto('dashboard')} />;
+  if (screen === 'progress') return <ProgressFeedbackScreen onBack={() => goto('dashboard')} />;
 
   return (
     <div>
@@ -517,6 +524,297 @@ function AssessmentScreen({ courseId, onBack }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Course & Program Management" screen. ---
+function CoursesScreen({ onBack, onAdd }) {
+  const [ov, setOv] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/learning/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load courses.')); }, []);
+
+  return (
+    <div>
+      <h1>Course & Program Management</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card">
+        {!ov && <div className="empty">Loading…</div>}
+        {ov && (
+          <table>
+            <thead><tr><th>Course</th><th>Enrolled</th><th>Mandatory</th><th>Assessment</th><th>Materials</th></tr></thead>
+            <tbody>{ov.courses.map((c) => (
+              <tr key={c.id}>
+                <td>{c.title}</td>
+                <td>{c.enrolled}</td>
+                <td>{c.mandatory ? 'Yes' : 'No'}</td>
+                <td>{c.pass_mark != null ? `Pass ${c.pass_mark}%` : 'None'}</td>
+                <td>{c.materials.length} file(s)</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+        <button className="primary" style={{ marginTop: 10 }} onClick={onAdd}>+ Add Course</button>
+      </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Course Enrollment — who has access to what" screen. ---
+function EnrollmentScreen({ onBack }) {
+  const [data, setData] = useState(null);
+  const [employees, setEmployees] = useState([]);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [employeeId, setEmployeeId] = useState('');
+  const [courseId, setCourseId] = useState('');
+
+  function load() { api.get('/learning/enrollments').then((r) => setData(r.data)).catch(() => setError('Could not load enrollments.')); }
+  useEffect(() => { load(); api.get('/learning/employees').then((r) => setEmployees(r.data.employees)).catch(() => {}); }, []);
+
+  async function enroll(e) {
+    e.preventDefault(); setError('');
+    try { await api.post('/learning/enrollments', { employee_id: employeeId, course_id: courseId }); setEmployeeId(''); setCourseId(''); setShowForm(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
+  }
+
+  const statusClass = (s) => (s === 'Certified' ? 'present' : (s === 'Assessed' ? 'pending' : 'info'));
+
+  return (
+    <div>
+      <h1>Course Enrollment — who has access to what</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card">
+        {!data && <div className="empty">Loading…</div>}
+        {data && data.enrollments.length === 0 && <div className="empty">No enrollments yet.</div>}
+        {data && data.enrollments.length > 0 && (
+          <table>
+            <thead><tr><th>Employee</th><th>Course</th><th>Status</th></tr></thead>
+            <tbody>{data.enrollments.map((e) => (
+              <tr key={e.id}><td>{e.employee_name}</td><td>{e.course_title}</td><td><span className={'status-tag ' + statusClass(e.status)}>{e.status}</span></td></tr>
+            ))}</tbody>
+          </table>
+        )}
+        {showForm ? (
+          <form onSubmit={enroll} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
+            <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} required style={{ flex: '1 1 160px' }}>
+              <option value="">Select employee…</option>
+              {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+            </select>
+            <select value={courseId} onChange={(e) => setCourseId(e.target.value)} required style={{ flex: '1 1 160px' }}>
+              <option value="">Select course…</option>
+              {data?.courses.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+            </select>
+            <button className="primary" type="submit">Enroll</button>
+            <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+          </form>
+        ) : (
+          <button className="primary" style={{ marginTop: 10 }} onClick={() => setShowForm(true)}>+ Enroll Employee</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Assessments & Assignments" screen. ---
+function AssessmentsListScreen({ onBack }) {
+  const [assessments, setAssessments] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/learning/assessments').then((r) => setAssessments(r.data.assessments)).catch(() => setError('Could not load assessments.')); }, []);
+
+  return (
+    <div>
+      <h1>Assessments & Assignments</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card">
+        {!assessments && <div className="empty">Loading…</div>}
+        {assessments && assessments.map((a) => (
+          <div key={a.course_id} className="row" style={{ justifyContent: 'space-between', borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+            <span>{a.course_title} — Final Assessment</span>
+            <span className="feature-meta">{a.pass_mark != null ? `Pass mark ${a.pass_mark}%` : 'No assessment defined'}</span>
+          </div>
+        ))}
+        <div className="feature-meta" style={{ marginTop: 10, color: '#8A6D00' }}>
+          A course cannot be published without at least one assessment or completion criterion defined.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Training Delivery & Scheduling" screen. ---
+function DeliveryScreen({ onBack, onSchedule }) {
+  const [sessions, setSessions] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/learning/sessions').then((r) => setSessions(r.data.sessions)).catch(() => setError('Could not load sessions.')); }, []);
+
+  return (
+    <div>
+      <h1>Training Delivery & Scheduling</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card">
+        {!sessions && <div className="empty">Loading…</div>}
+        {sessions && sessions.length === 0 && <div className="empty">No training sessions scheduled yet.</div>}
+        {sessions && sessions.map((s) => (
+          <div key={s.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+            <strong>{s.course_title}</strong>
+            <div className="feature-meta">{s.mode} · {s.scheduled_at}</div>
+          </div>
+        ))}
+        <button className="primary" style={{ marginTop: 10 }} onClick={onSchedule}>+ Schedule Session</button>
+      </div>
+    </div>
+  );
+}
+
+// --- Dedicated "Schedule Training Session" screen. ---
+function ScheduleSessionScreen({ onDone, onBack }) {
+  const [courses, setCourses] = useState([]);
+  const [courseId, setCourseId] = useState('');
+  const [mode, setMode] = useState('');
+  const [scheduledAt, setScheduledAt] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { api.get('/learning/sessions').then((r) => setCourses(r.data.courses)).catch(() => {}); }, []);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!courseId || !mode.trim() || !scheduledAt.trim()) { setError('Course, mode and date & time are all required.'); return; }
+    setSaving(true);
+    try { await api.post('/learning/sessions', { course_id: courseId, mode, scheduled_at: scheduledAt }); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not schedule session.'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div>
+      <h1>Schedule Training Session</h1>
+      <div className="subtitle">Appears immediately in Training Delivery &amp; Scheduling.</div>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back</button>
+      <form onSubmit={submit} className="card" style={{ maxWidth: 480 }}>
+        <label className="field-label">Course *</label>
+        <select value={courseId} onChange={(e) => setCourseId(e.target.value)} required style={{ marginBottom: 14 }}>
+          <option value="">Select…</option>
+          {courses.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
+        </select>
+        <label className="field-label">Mode *</label>
+        <input value={mode} onChange={(e) => setMode(e.target.value)} placeholder="e.g. Classroom — Head Office, or Online — Live Session" required style={{ marginBottom: 14 }} />
+        <label className="field-label">Date &amp; Time *</label>
+        <input value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} placeholder="e.g. 28 Jul, 11:00 AM" required style={{ marginBottom: 14 }} />
+        <button className="primary" type="submit" disabled={saving}>Schedule Session</button>
+      </form>
+    </div>
+  );
+}
+
+// --- Dedicated "Skill Development & Competency Mapping — <Name>" screen. ---
+function CompetencyMappingScreen({ onBack }) {
+  const [employees, setEmployees] = useState([]);
+  const [employeeId, setEmployeeId] = useState('');
+  const [data, setData] = useState(null);
+  const [form, setForm] = useState({ skill_name: '', current_level: 3, required_level: 4 });
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/learning/employees').then((r) => setEmployees(r.data.employees)).catch(() => {}); }, []);
+  useEffect(() => { if (employeeId) api.get(`/learning/employees/${employeeId}/skills`).then((r) => setData(r.data)).catch(() => setError('Could not load skills.')); else setData(null); }, [employeeId]);
+
+  async function addSkill(e) {
+    e.preventDefault(); setError('');
+    try { await api.post(`/learning/employees/${employeeId}/skills`, form); setForm({ skill_name: '', current_level: 3, required_level: 4 }); const r = await api.get(`/learning/employees/${employeeId}/skills`); setData(r.data); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add skill.'); }
+  }
+
+  return (
+    <div>
+      <h1>Skill Development &amp; Competency Mapping{data ? ` — ${data.employee.name}` : ''}</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <label className="field-label">Employee</label>
+        <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+          <option value="">Select employee…</option>
+          {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+        </select>
+      </div>
+      {employeeId && (
+        <div className="card">
+          {!data && <div className="empty">Loading…</div>}
+          {data && data.skills.length === 0 && <div className="empty">No skills mapped yet.</div>}
+          {data && data.skills.length > 0 && (
+            <table>
+              <thead><tr><th>Skill</th><th>Current</th><th>Required</th><th>Gap</th></tr></thead>
+              <tbody>{data.skills.map((s) => (
+                <tr key={s.id}>
+                  <td>{s.skill_name}</td><td>{s.current_level}/5</td><td>{s.required_level}/5</td>
+                  <td style={{ color: s.gap > 0 ? '#B3401E' : '#1E8E5A' }}>{s.gap > 0 ? s.gap : 'None'}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+          <form onSubmit={addSkill} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
+            <input placeholder="Skill name" value={form.skill_name} onChange={(e) => setForm({ ...form, skill_name: e.target.value })} required style={{ flex: '2 1 160px' }} />
+            <input type="number" min="0" max="5" placeholder="Current" value={form.current_level} onChange={(e) => setForm({ ...form, current_level: e.target.value })} style={{ width: 80 }} />
+            <input type="number" min="0" max="5" placeholder="Required" value={form.required_level} onChange={(e) => setForm({ ...form, required_level: e.target.value })} style={{ width: 80 }} />
+            <button className="primary" type="submit">+ Add Skill</button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Dedicated "Progress, Attendance & Feedback — <Name>" screen. ---
+function ProgressFeedbackScreen({ onBack }) {
+  const [employees, setEmployees] = useState([]);
+  const [employeeId, setEmployeeId] = useState('');
+  const [data, setData] = useState(null);
+  const [note, setNote] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/learning/employees').then((r) => setEmployees(r.data.employees)).catch(() => {}); }, []);
+  useEffect(() => { if (employeeId) api.get(`/learning/employees/${employeeId}/feedback`).then((r) => setData(r.data)).catch(() => setError('Could not load feedback.')); else setData(null); }, [employeeId]);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!note.trim()) return;
+    try { await api.post(`/learning/employees/${employeeId}/feedback`, { note, author_type: 'Manager' }); setNote(''); const r = await api.get(`/learning/employees/${employeeId}/feedback`); setData(r.data); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add feedback.'); }
+  }
+
+  return (
+    <div>
+      <h1>Progress, Attendance &amp; Feedback{data ? ` — ${data.employee.name}` : ''}</h1>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <label className="field-label">Employee</label>
+        <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)}>
+          <option value="">Select employee…</option>
+          {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+        </select>
+      </div>
+      {employeeId && (
+        <div className="card" style={{ maxWidth: 560 }}>
+          {!data && <div className="empty">Loading…</div>}
+          {data && data.feedback.length === 0 && <div className="empty">No feedback yet.</div>}
+          {data && data.feedback.map((f) => (
+            <div key={f.id} style={{ borderTop: '1px solid #EEF0F3', padding: '8px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <strong>{f.author_name} ({f.author_type})</strong>
+                <span className="feature-meta">{f.created_at.slice(0, 10)}</span>
+              </div>
+              <div className="feature-meta">{f.note}</div>
+            </div>
+          ))}
+          <form onSubmit={submit} style={{ marginTop: 10 }}>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add feedback..." rows={3} style={{ width: '100%', marginBottom: 8 }} />
+            <button className="primary" type="submit">Submit Feedback</button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
