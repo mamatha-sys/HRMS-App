@@ -82,9 +82,48 @@ router.get('/my-courses', (req, res) => {
   const enrollments = rows.map((r) => ({
     ...r,
     materials: db.prepare('SELECT id, title, file_type, created_at, data_url FROM course_materials WHERE course_id = ? ORDER BY created_at').all(r.course_id),
-    hasAssessment: db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(r.course_id).c > 0
+    hasAssessment: db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(r.course_id).c > 0,
+    accessRequestStatus: db.prepare('SELECT status FROM course_access_requests WHERE course_id = ? AND employee_id = ? ORDER BY created_at DESC LIMIT 1').get(r.course_id, me.id)?.status || null
   }));
   res.json({ enrollments });
+});
+
+// Employee requests download/copy access for a view-only course; Super Admin reviews and,
+// if approved, flips that course's existing allow_download switch (there's no per-employee
+// override — approving just grants the whole course what Super Admin could already toggle).
+router.post('/my-courses/:courseId/request-access', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.status(400).json({ error: 'No employee profile is linked to this account.' });
+  const enrollment = db.prepare('SELECT * FROM course_enrollments WHERE course_id = ? AND employee_id = ?').get(req.params.courseId, me.id);
+  if (!enrollment) return res.status(403).json({ error: 'You are not enrolled in this course.' });
+  const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.courseId);
+  if (course.allow_download) return res.status(400).json({ error: 'This course already allows download/copy.' });
+  const pending = db.prepare("SELECT id FROM course_access_requests WHERE course_id = ? AND employee_id = ? AND status = 'Pending'").get(req.params.courseId, me.id);
+  if (pending) return res.status(409).json({ error: 'You already have a pending request for this course.' });
+  db.prepare('INSERT INTO course_access_requests (course_id, employee_id) VALUES (?, ?)').run(req.params.courseId, me.id);
+  res.status(201).json({ ok: true });
+});
+
+// Super Admin: review/decide download-access requests.
+router.get('/access-requests', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only Super Admin can review access requests.' });
+  const rows = db.prepare(`
+    SELECT r.id, r.status, r.created_at, r.decided_at, c.id AS course_id, c.title AS course_title, e.name AS employee_name, e.employee_code
+    FROM course_access_requests r JOIN courses c ON c.id = r.course_id JOIN employees e ON e.id = r.employee_id
+    ORDER BY (r.status = 'Pending') DESC, r.created_at DESC
+  `).all();
+  res.json({ requests: rows });
+});
+
+router.put('/access-requests/:id', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only Super Admin can decide access requests.' });
+  const request = db.prepare('SELECT * FROM course_access_requests WHERE id = ?').get(req.params.id);
+  if (!request) return res.status(404).json({ error: 'Request not found.' });
+  const status = req.body?.status === 'Approved' ? 'Approved' : (req.body?.status === 'Rejected' ? 'Rejected' : null);
+  if (!status) return res.status(400).json({ error: 'status must be Approved or Rejected.' });
+  db.prepare('UPDATE course_access_requests SET status = ?, decided_at = datetime(\'now\') WHERE id = ?').run(status, request.id);
+  if (status === 'Approved') db.prepare('UPDATE courses SET allow_download = 1 WHERE id = ?').run(request.course_id);
+  res.json({ ok: true });
 });
 
 // Employee-facing course catalog for the self-service "Training Courses" browse list:

@@ -110,6 +110,7 @@ function MyLearning() {
 function MyCourseDetailScreen({ course, enrollment, onEnrolled, onBack }) {
   const [error, setError] = useState('');
   const [enrolling, setEnrolling] = useState(false);
+  const [requesting, setRequesting] = useState(false);
   const [taking, setTaking] = useState(false);
   const [quiz, setQuiz] = useState(null);
   const [answers, setAnswers] = useState({});
@@ -120,6 +121,12 @@ function MyCourseDetailScreen({ course, enrollment, onEnrolled, onBack }) {
     try { await api.post('/learning/my-enroll', { course_id: course.id }); onEnrolled(); }
     catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
     finally { setEnrolling(false); }
+  }
+  async function requestAccess() {
+    setError(''); setRequesting(true);
+    try { await api.post(`/learning/my-courses/${course.id}/request-access`); onEnrolled(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not send request.'); }
+    finally { setRequesting(false); }
   }
   async function startAssessment() {
     setError(''); setResult(null); setAnswers({});
@@ -195,6 +202,16 @@ function MyCourseDetailScreen({ course, enrollment, onEnrolled, onBack }) {
           </div>
           {enrollment.materials.length === 0 && <div className="empty">No materials uploaded yet.</div>}
           {enrollment.materials.map((m) => <ProtectedMaterial key={m.id} material={m} allowDownload={!!enrollment.allow_download} />)}
+          {!enrollment.allow_download && enrollment.materials.length > 0 && (
+            enrollment.accessRequestStatus === 'Pending' ? (
+              <div className="status-tag pending" style={{ marginTop: 6, display: 'inline-block' }}>Download access requested — awaiting Super Admin</div>
+            ) : (
+              <div style={{ marginTop: 6 }}>
+                {enrollment.accessRequestStatus === 'Rejected' && <div className="feature-meta" style={{ marginBottom: 4 }}>Your last request was rejected.</div>}
+                <button disabled={requesting} onClick={requestAccess}>Request Download Access</button>
+              </div>
+            )
+          )}
           {enrollment.hasAssessment && !enrollment.certificate_issued && <button style={{ marginTop: 6 }} onClick={startAssessment}>Take Assessment</button>}
           {enrollment.certificate_issued && <div className="status-tag present" style={{ marginTop: 6, display: 'inline-block' }}>🎓 Certificate earned — score {enrollment.score}%</div>}
         </div>
@@ -258,7 +275,7 @@ function HRLearning() {
 
   function goto(target) { setScreen(target); }
 
-  if (screen === 'newCourse') return <NewCourseScreen onDone={() => { load(); goto('dashboard'); }} onCancel={() => goto('dashboard')} setGlobalError={setError} />;
+  if (screen === 'newCourse') return <NewCourseScreen onDone={(newCourseId) => { load(); setActiveCourseId(newCourseId); goto('assessment'); }} onCancel={() => goto('dashboard')} setGlobalError={setError} />;
   if (screen === 'assessment') return <AssessmentScreen courseId={activeCourseId} onBack={() => { load(); goto('dashboard'); }} />;
   if (screen === 'courseDetail') return <CourseDetailScreen courseId={activeCourseId} isSuperAdmin={user?.role === 'super_admin'} onManageAssessment={() => goto('assessment')} onBack={() => { load(); goto('dashboard'); }} />;
   if (screen === 'courses') return <CoursesScreen onBack={() => goto('dashboard')} onAdd={() => goto('newCourse')} />;
@@ -406,8 +423,8 @@ function NewCourseScreen({ onDone, onCancel, setGlobalError }) {
         const data_url = await readFileAsDataUrl(m.file);
         materialPayload.push({ title: m.title || m.file.name, file_type: m.kind, data_url });
       }
-      await api.post('/learning/courses', { title: name, mandatory: mandatory === 'Yes', has_assessment: hasAssessment === 'Yes', pass_mark: passMark, materials: materialPayload });
-      onDone();
+      const res = await api.post('/learning/courses', { title: name, mandatory: mandatory === 'Yes', has_assessment: hasAssessment === 'Yes', pass_mark: passMark, materials: materialPayload });
+      onDone(res.data.course.id);
     } catch (err) {
       const msg = err.response?.data?.error || 'Could not create course.';
       setError(msg); setGlobalError?.(msg);
@@ -563,14 +580,25 @@ function CourseDetailScreen({ courseId, isSuperAdmin, onManageAssessment, onBack
   const [materialTitle, setMaterialTitle] = useState('');
   const [uploading, setUploading] = useState(false);
   const [scoreDrafts, setScoreDrafts] = useState({});
+  const [accessRequests, setAccessRequests] = useState([]);
 
   function load() { api.get(`/learning/courses/${courseId}/enrollments`).then((r) => setData(r.data)).catch(() => setError('Could not load course.')); }
+  function loadRequests() {
+    if (!isSuperAdmin) return;
+    api.get('/learning/access-requests').then((r) => setAccessRequests(r.data.requests.filter((req) => req.course_id === Number(courseId) && req.status === 'Pending'))).catch(() => {});
+  }
   useEffect(load, [courseId]);
+  useEffect(loadRequests, [courseId]);
 
   async function toggleAllowDownload() {
     setError('');
     try { await api.put(`/learning/courses/${courseId}`, { allow_download: !data.course.allow_download }); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
+  async function decideAccessRequest(id, status) {
+    setError('');
+    try { await api.put(`/learning/access-requests/${id}`, { status }); loadRequests(); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update request.'); }
   }
   async function enroll(e) {
     e.preventDefault();
@@ -614,6 +642,9 @@ function CourseDetailScreen({ courseId, isSuperAdmin, onManageAssessment, onBack
         </div>
       )}
       {error && <div className="banner error">{error}</div>}
+      {course && course.pass_mark != null && course.questionCount === 0 && (
+        <div className="banner error">This course has a pass mark ({course.pass_mark}%) but no questions yet — employees will not see a Take Assessment button until you add at least one via Manage Assessment.</div>
+      )}
       <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
 
       {!data ? <div className="empty">Loading…</div> : (
@@ -626,6 +657,20 @@ function CourseDetailScreen({ courseId, isSuperAdmin, onManageAssessment, onBack
                 <button onClick={onManageAssessment}>Manage Assessment ({course.questionCount})</button>
               </div>
             </div>
+            {isSuperAdmin && !course.allow_download && accessRequests.length > 0 && (
+              <div style={{ marginBottom: 10, background: '#F7F8FA', borderRadius: 8, padding: 8 }}>
+                <div className="feature-meta" style={{ marginBottom: 4 }}>Download Access Requests ({accessRequests.length})</div>
+                {accessRequests.map((r) => (
+                  <div key={r.id} className="rec-row">
+                    <span>{r.employee_name} ({r.employee_code})</span>
+                    <span className="row" style={{ gap: 6 }}>
+                      <button className="primary" onClick={() => decideAccessRequest(r.id, 'Approved')}>Approve</button>
+                      <button onClick={() => decideAccessRequest(r.id, 'Rejected')}>Reject</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             {course.materials.length === 0 && <div className="empty">No materials uploaded yet.</div>}
             {course.materials.map((m) => (
               <div key={m.id} className="rec-row">
