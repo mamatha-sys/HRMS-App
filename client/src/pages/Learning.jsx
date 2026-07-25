@@ -3,7 +3,7 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const MATERIAL_MAX_BYTES = 8 * 1024 * 1024;
+const MATERIAL_MAX_BYTES = 100 * 1024 * 1024;
 
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -141,6 +141,7 @@ function MyCourseDetailScreen({ course, enrollment, onEnrolled, onBack }) {
         <h1>Assessment — {course.title}</h1>
         <div className="subtitle">Questions are shuffled for you. {course.pass_mark != null ? `Pass mark: ${course.pass_mark}%.` : ''}</div>
         {error && <div className="banner error">{error}</div>}
+        {!result && <button onClick={() => { setTaking(false); setQuiz(null); }} style={{ marginBottom: 14 }}>← Back to Course</button>}
         {result ? (
           <div className="card">
             <div className="feature-name" style={{ marginBottom: 8 }}>Result</div>
@@ -396,7 +397,7 @@ function NewCourseScreen({ onDone, onCancel, setGlobalError }) {
     if (hasAssessment !== 'Yes') { setError('Selecting "No" is rejected — every course needs at least one assessment or completion criterion.'); return; }
     if (!name.trim()) { setError('Course Name is required'); return; }
     const oversized = materials.find((m) => m.file && m.file.size > MATERIAL_MAX_BYTES);
-    if (oversized) { setError(`"${oversized.file.name}" is too large (max 8 MB). Create the course first, then add it afterward via "Manage Enrollments" → Materials, or use a smaller file.`); return; }
+    if (oversized) { setError(`"${oversized.file.name}" is too large (max 100 MB). Create the course first, then add it afterward via the course's detail screen, or use a smaller file.`); return; }
     setSaving(true);
     try {
       const materialPayload = [];
@@ -584,7 +585,7 @@ function CourseDetailScreen({ courseId, isSuperAdmin, onManageAssessment, onBack
     catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
   }
   async function uploadMaterial(file) {
-    if (file.size > MATERIAL_MAX_BYTES) { setError(`"${file.name}" is too large (max 8 MB).`); return; }
+    if (file.size > MATERIAL_MAX_BYTES) { setError(`"${file.name}" is too large (max 100 MB).`); return; }
     if (!materialTitle.trim()) { setError('Give the material a title first.'); return; }
     setUploading(true); setError('');
     try {

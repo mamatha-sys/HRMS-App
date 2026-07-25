@@ -36,6 +36,7 @@ button.primary:hover { background: #254A96; }
 
 .row { display: flex; gap: 8px; margin-bottom: 14px; align-items: center; }
 .row input, .row select { flex: 1; }
+.row input[type="radio"], .row input[type="checkbox"] { flex: none; width: 16px; height: 16px; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 table { width: 100%; border-collapse: collapse; margin-top: 10px; }
