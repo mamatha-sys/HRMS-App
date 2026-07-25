@@ -63,13 +63,74 @@ router.get('/overview', (req, res) => {
   });
 });
 
+// HR: per-employee biometric/device attendance list — last check-in method/time/location
+// plus this month's present & late counts, so HR can see who's on which device.
+router.get('/biometric-list', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const monthPrefix = db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+
+  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const rows = employees.map((e) => {
+    const last = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND check_in_time IS NOT NULL ORDER BY date DESC LIMIT 1').get(e.id);
+    const monthRows = db.prepare("SELECT status, check_in_time FROM attendance WHERE employee_id = ? AND date LIKE ?").all(e.id, monthPrefix + '%');
+    const presentDays = monthRows.filter((r) => r.status === 'Present').length;
+    const lateDays = monthRows.filter((r) => r.check_in_time && r.check_in_time > LATE_AFTER).length;
+    return {
+      employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department,
+      last_method: last?.method || null, last_check_in: last ? `${last.date} ${last.check_in_time}` : null,
+      last_location: last?.latitude != null ? { lat: last.latitude, lng: last.longitude } : null,
+      present_days_month: presentDays, late_days_month: lateDays
+    };
+  });
+  res.json({ month: monthPrefix, rows });
+});
+
+// HR monthly attendance report — present/absent/leave/late counts + attendance % per employee.
+router.get('/monthly-report', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+  const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(?  || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
+
+  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const rows = employees.map((e) => {
+    const marks = db.prepare('SELECT status, check_in_time FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    const present = marks.filter((m) => m.status === 'Present').length;
+    const absent = marks.filter((m) => m.status === 'Absent').length;
+    const leave = marks.filter((m) => m.status === 'Leave').length;
+    const late = marks.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length;
+    const attendancePct = daysInMonth > 0 ? Math.round((present / daysInMonth) * 100) : 0;
+    return { ...e, present, absent, leave, late, attendancePct };
+  });
+  res.json({ month, daysInMonth, rows });
+});
+
+router.get('/monthly-report/export', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const rows = employees.map((e) => {
+    const marks = db.prepare('SELECT status, check_in_time FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    return {
+      ...e,
+      present: marks.filter((m) => m.status === 'Present').length,
+      absent: marks.filter((m) => m.status === 'Absent').length,
+      leave: marks.filter((m) => m.status === 'Leave').length,
+      late: marks.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length
+    };
+  });
+  const csv = ['code,name,department,present,absent,leave,late', ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.present},${r.absent},${r.leave},${r.late}`)].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="attendance-monthly-${month}.csv"`);
+  res.send(csv);
+});
+
 // HR: everyone's attendance for a date. Employee: own recent history.
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
     const date = req.query.date || today();
     const rows = db.prepare(`
       SELECT e.id AS employee_id, e.employee_code, e.name, e.department,
-             a.status, a.check_in_time, a.check_out_time
+             a.status, a.check_in_time, a.check_out_time, a.method, a.latitude, a.longitude
       FROM employees e
       LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ?
       ORDER BY e.id
@@ -90,15 +151,17 @@ function upsertToday(employeeId, patch) {
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, today());
   if (existing) {
     const merged = { ...existing, ...patch };
-    db.prepare('UPDATE attendance SET status = @status, check_in_time = @check_in_time, check_out_time = @check_out_time, method = @method WHERE id = @id').run(merged);
+    db.prepare('UPDATE attendance SET status = @status, check_in_time = @check_in_time, check_out_time = @check_out_time, method = @method, latitude = @latitude, longitude = @longitude WHERE id = @id').run(merged);
     return db.prepare('SELECT * FROM attendance WHERE id = ?').get(existing.id);
   }
-  const row = { employee_id: employeeId, date: today(), status: 'Present', check_in_time: null, check_out_time: null, method: 'Web Check-in', ...patch };
-  const info = db.prepare('INSERT INTO attendance (employee_id, date, status, check_in_time, check_out_time, method) VALUES (@employee_id, @date, @status, @check_in_time, @check_out_time, @method)').run(row);
+  const row = { employee_id: employeeId, date: today(), status: 'Present', check_in_time: null, check_out_time: null, method: 'Web Check-in', latitude: null, longitude: null, ...patch };
+  const info = db.prepare('INSERT INTO attendance (employee_id, date, status, check_in_time, check_out_time, method, latitude, longitude) VALUES (@employee_id, @date, @status, @check_in_time, @check_out_time, @method, @latitude, @longitude)').run(row);
   return db.prepare('SELECT * FROM attendance WHERE id = ?').get(info.lastInsertRowid);
 }
 
 const METHODS = ['Web Check-in', 'Mobile App', 'Biometric (Fingerprint)', 'Face Recognition'];
+
+function validCoord(v) { return typeof v === 'number' && Number.isFinite(v); }
 
 router.post('/check-in', (req, res) => {
   const me = myEmployee(req.user.sub);
@@ -106,7 +169,9 @@ router.post('/check-in', (req, res) => {
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, today());
   if (existing?.check_in_time) return res.status(400).json({ error: 'Already checked in today at ' + existing.check_in_time });
   const method = METHODS.includes(req.body?.method) ? req.body.method : 'Web Check-in';
-  res.json({ attendance: upsertToday(me.id, { status: 'Present', check_in_time: nowTime(), method }) });
+  const latitude = validCoord(req.body?.latitude) ? req.body.latitude : null;
+  const longitude = validCoord(req.body?.longitude) ? req.body.longitude : null;
+  res.json({ attendance: upsertToday(me.id, { status: 'Present', check_in_time: nowTime(), method, latitude, longitude }) });
 });
 
 router.post('/check-out', (req, res) => {

@@ -531,6 +531,8 @@ function migrate() {
   if (!att.includes('check_in_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_in_time TEXT');
   if (!att.includes('check_out_time')) db.exec('ALTER TABLE attendance ADD COLUMN check_out_time TEXT');
   if (!att.includes('method')) db.exec("ALTER TABLE attendance ADD COLUMN method TEXT NOT NULL DEFAULT 'Web Check-in'");
+  if (!att.includes('latitude')) db.exec('ALTER TABLE attendance ADD COLUMN latitude REAL');
+  if (!att.includes('longitude')) db.exec('ALTER TABLE attendance ADD COLUMN longitude REAL');
 
   // Detailed salary components (earnings + statutory deductions) — added with sensible defaults
   // so existing rows get a realistic structure without a reset.
@@ -548,6 +550,51 @@ function migrate() {
       code TEXT NOT NULL UNIQUE,
       annual_quota INTEGER NOT NULL DEFAULT 0,
       unpaid INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  const lt = db.prepare('PRAGMA table_info(leave_types)').all().map((c) => c.name);
+  if (!lt.includes('active')) db.exec('ALTER TABLE leave_types ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+
+  const lv = db.prepare('PRAGMA table_info(leaves)').all().map((c) => c.name);
+  if (!lv.includes('current_stage_role_id')) db.exec('ALTER TABLE leaves ADD COLUMN current_stage_role_id INTEGER REFERENCES roles(id)');
+  if (!lv.includes('cancel_requested')) db.exec('ALTER TABLE leaves ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
+  if (!lv.includes('cancelled')) db.exec('ALTER TABLE leaves ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS leave_cancellations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      leave_id INTEGER NOT NULL REFERENCES leaves(id) ON DELETE CASCADE,
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS leave_balance_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      leave_type TEXT NOT NULL,
+      change INTEGER NOT NULL,
+      balance_after INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS salary_components (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type IN ('earning','deduction')),
+      active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS employee_salary_lines (
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      component_id INTEGER NOT NULL REFERENCES salary_components(id) ON DELETE CASCADE,
+      amount INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (employee_id, component_id)
     );
   `);
 }
@@ -572,6 +619,33 @@ function seedModuleData() {
     ins.run('Maternity', 'ML', 182, 0);
     ins.run('Paternity', 'PL', 15, 0);
     ins.run('Loss of Pay', 'LWP', 0, 1);
+  }
+
+  // Salary components catalog + per-employee lines, migrated from the old fixed
+  // salary_structures columns so every existing employee keeps their current pay.
+  if (db.prepare('SELECT COUNT(*) AS c FROM salary_components').get().c === 0) {
+    const insC = db.prepare('INSERT INTO salary_components (key, label, type, sort_order) VALUES (?, ?, ?, ?)');
+    insC.run('basic', 'Basic', 'earning', 0);
+    insC.run('hra', 'HRA', 'earning', 1);
+    insC.run('conveyance', 'Conveyance Allowance', 'earning', 2);
+    insC.run('special_allowance', 'Special Allowance', 'earning', 3);
+    insC.run('pf', 'PF (Provident Fund)', 'deduction', 4);
+    insC.run('pt', 'PT (Professional Tax)', 'deduction', 5);
+    insC.run('tds', 'TDS (Income Tax)', 'deduction', 6);
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM employee_salary_lines').get().c === 0) {
+    const components = db.prepare('SELECT id, key FROM salary_components').all();
+    const insLine = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, ?)');
+    db.prepare('SELECT * FROM salary_structures').all().forEach((s) => {
+      components.forEach((c) => insLine.run(s.employee_id, c.id, s[c.key] || 0));
+    });
+  }
+
+  // Any Pending leave without a chain stage yet (older rows, or first run after this migration)
+  // starts at the bottom-most active, non-employee role.
+  const bottomRole = db.prepare("SELECT id FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get();
+  if (bottomRole) {
+    db.prepare("UPDATE leaves SET current_stage_role_id = ? WHERE status = 'Pending' AND current_stage_role_id IS NULL").run(bottomRole.id);
   }
 }
 
