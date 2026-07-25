@@ -17,19 +17,28 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  { key: 'courses', label: 'Course & Program Management' },
-  { key: 'enrollment', label: 'Course Enrollment' },
-  { key: 'delivery', label: 'Training Delivery & Scheduling' },
-  { key: 'assessments', label: 'Assessments & Assignments' },
-  { key: 'certifications', label: 'Certifications' },
-  { key: 'competency', label: 'Skill Development & Competency Mapping' },
-  { key: 'progress', label: 'Progress, Attendance & Feedback' },
-  { key: 'reports', label: 'Training Reports & Analytics' }
+  { key: 'courses', label: 'Course & Program Management', screen: 'newCourse' },
+  { key: 'enrollment', label: 'Course Enrollment', screen: 'dashboard' },
+  { key: 'delivery', label: 'Training Delivery & Scheduling', screen: 'dashboard' },
+  { key: 'assessments', label: 'Assessments & Assignments', screen: 'dashboard' },
+  { key: 'certifications', label: 'Certifications', screen: 'certifications' },
+  { key: 'competency', label: 'Skill Development & Competency Mapping', screen: 'dashboard' },
+  { key: 'progress', label: 'Progress, Attendance & Feedback', screen: 'dashboard' },
+  { key: 'reports', label: 'Training Reports & Analytics', screen: 'reports' }
 ];
 const FIELD_ACCESS = [
   { field: 'Record Owner / Assigned-To', access: 'Editable' },
   { field: 'Internal Notes / Remarks', access: 'Editable' }
 ];
+
+function shuffled(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function courseSummary() {
   const courses = db.prepare('SELECT * FROM courses ORDER BY created_at').all();
@@ -38,7 +47,8 @@ function courseSummary() {
     const completed = db.prepare('SELECT COUNT(*) c FROM course_enrollments WHERE course_id = ? AND completed = 1').get(c.id).c;
     const certified = db.prepare('SELECT COUNT(*) c FROM course_enrollments WHERE course_id = ? AND certificate_issued = 1').get(c.id).c;
     const materials = db.prepare('SELECT id, title, file_type, created_at FROM course_materials WHERE course_id = ? ORDER BY created_at').all(c.id);
-    return { ...c, enrolled, completed, certified, completionPct: enrolled > 0 ? Math.round((completed / enrolled) * 100) : 0, materials };
+    const questionCount = db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(c.id).c;
+    return { ...c, enrolled, completed, certified, completionPct: enrolled > 0 ? Math.round((completed / enrolled) * 100) : 0, materials, questionCount };
   });
 }
 
@@ -71,18 +81,36 @@ router.get('/my-courses', (req, res) => {
   `).all(me.id);
   const enrollments = rows.map((r) => ({
     ...r,
-    materials: db.prepare('SELECT id, title, file_type, created_at, data_url FROM course_materials WHERE course_id = ? ORDER BY created_at').all(r.course_id)
+    materials: db.prepare('SELECT id, title, file_type, created_at, data_url FROM course_materials WHERE course_id = ? ORDER BY created_at').all(r.course_id),
+    hasAssessment: db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(r.course_id).c > 0
   }));
   res.json({ enrollments });
 });
 
+// Every course needs a completion criterion — this form requires a real assessment (a
+// question bank with a pass mark), matching the "Has Assessment / Completion Criterion?"
+// rule shown on the Create Course screen. Materials (PDF/video) can be attached at creation.
 router.post('/courses', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { title, mandatory, pass_mark } = req.body || {};
-  if (!title) return res.status(400).json({ error: 'title is required' });
-  const mark = pass_mark === '' || pass_mark == null ? null : Math.max(0, Math.min(100, parseInt(pass_mark, 10) || 0));
+  const { title, mandatory, has_assessment, pass_mark, materials } = req.body || {};
+  if (!title || !title.trim()) return res.status(400).json({ error: 'Course Name is required' });
+  if (has_assessment !== true && has_assessment !== 'Yes') {
+    return res.status(400).json({ error: 'Selecting "No" is rejected — every course needs at least one assessment or completion criterion.' });
+  }
+  const mark = pass_mark === '' || pass_mark == null ? 70 : Math.max(0, Math.min(100, parseInt(pass_mark, 10) || 0));
+
   const info = db.prepare('INSERT INTO courses (title, mandatory, pass_mark) VALUES (?, ?, ?)').run(title.trim(), mandatory ? 1 : 0, mark);
-  res.status(201).json({ course: db.prepare('SELECT * FROM courses WHERE id = ?').get(info.lastInsertRowid) });
+  const courseId = info.lastInsertRowid;
+
+  if (Array.isArray(materials)) {
+    const insMat = db.prepare('INSERT INTO course_materials (course_id, title, file_type, data_url) VALUES (?, ?, ?, ?)');
+    materials.forEach((m) => {
+      if (!m?.data_url) return;
+      const type = ['pdf', 'video', 'other'].includes(m.file_type) ? m.file_type : 'other';
+      insMat.run(courseId, (m.title || 'Untitled').trim(), type, m.data_url);
+    });
+  }
+  res.status(201).json({ course: db.prepare('SELECT * FROM courses WHERE id = ?').get(courseId) });
 });
 
 router.put('/courses/:id', (req, res) => {
@@ -119,6 +147,81 @@ router.delete('/materials/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Assessments & Assignments: HR manages a real MCQ question bank per course. ---
+router.get('/courses/:id/questions', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+  const questions = db.prepare('SELECT * FROM course_questions WHERE course_id = ? ORDER BY sort_order').all(req.params.id);
+  res.json({ course, questions });
+});
+
+router.post('/courses/:id/questions', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.id);
+  if (!course) return res.status(404).json({ error: 'Course not found' });
+  const { question_text, option_a, option_b, option_c, option_d, correct_option } = req.body || {};
+  if (![question_text, option_a, option_b, option_c, option_d].every((v) => v && v.trim())) {
+    return res.status(400).json({ error: 'The question and all four options are required' });
+  }
+  if (!['A', 'B', 'C', 'D'].includes(correct_option)) return res.status(400).json({ error: 'correct_option must be A, B, C or D' });
+  const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM course_questions WHERE course_id = ?').get(req.params.id).m;
+  const info = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(course.id, question_text.trim(), option_a.trim(), option_b.trim(), option_c.trim(), option_d.trim(), correct_option, maxOrder + 1);
+  res.status(201).json({ question: db.prepare('SELECT * FROM course_questions WHERE id = ?').get(info.lastInsertRowid) });
+});
+
+router.put('/questions/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const question = db.prepare('SELECT * FROM course_questions WHERE id = ?').get(req.params.id);
+  if (!question) return res.status(404).json({ error: 'Question not found' });
+  const { question_text, option_a, option_b, option_c, option_d, correct_option } = req.body || {};
+  if (correct_option !== undefined && !['A', 'B', 'C', 'D'].includes(correct_option)) return res.status(400).json({ error: 'correct_option must be A, B, C or D' });
+  db.prepare(`UPDATE course_questions SET
+    question_text = COALESCE(?, question_text), option_a = COALESCE(?, option_a), option_b = COALESCE(?, option_b),
+    option_c = COALESCE(?, option_c), option_d = COALESCE(?, option_d), correct_option = COALESCE(?, correct_option)
+    WHERE id = ?`)
+    .run(question_text?.trim() || null, option_a?.trim() || null, option_b?.trim() || null, option_c?.trim() || null, option_d?.trim() || null, correct_option || null, req.params.id);
+  res.json({ question: db.prepare('SELECT * FROM course_questions WHERE id = ?').get(req.params.id) });
+});
+
+router.delete('/questions/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  db.prepare('DELETE FROM course_questions WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// --- Employee-facing assessment: questions are shuffled per fetch and the correct answer is
+// never sent to the client; grading always happens server-side. ---
+router.get('/my-courses/:courseId/assessment', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  const enrollment = me ? db.prepare('SELECT * FROM course_enrollments WHERE course_id = ? AND employee_id = ?').get(req.params.courseId, me.id) : null;
+  if (!enrollment) return res.status(403).json({ error: 'You are not enrolled in this course.' });
+  const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.courseId);
+  const questions = db.prepare('SELECT id, question_text, option_a, option_b, option_c, option_d FROM course_questions WHERE course_id = ?').all(req.params.courseId);
+  if (questions.length === 0) return res.status(400).json({ error: 'This course has no assessment questions yet.' });
+  res.json({ course: { id: course.id, title: course.title, pass_mark: course.pass_mark }, questions: shuffled(questions) });
+});
+
+router.post('/my-courses/:courseId/assessment', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  const enrollment = me ? db.prepare('SELECT * FROM course_enrollments WHERE course_id = ? AND employee_id = ?').get(req.params.courseId, me.id) : null;
+  if (!enrollment) return res.status(403).json({ error: 'You are not enrolled in this course.' });
+  const course = db.prepare('SELECT * FROM courses WHERE id = ?').get(req.params.courseId);
+  const questions = db.prepare('SELECT * FROM course_questions WHERE course_id = ?').all(req.params.courseId);
+  if (questions.length === 0) return res.status(400).json({ error: 'This course has no assessment questions yet.' });
+
+  const answers = Array.isArray(req.body?.answers) ? req.body.answers : [];
+  const answerMap = {}; answers.forEach((a) => { answerMap[a.question_id] = a.selected_option; });
+  const correctCount = questions.filter((q) => answerMap[q.id] === q.correct_option).length;
+  const score = Math.round((correctCount / questions.length) * 100);
+  const passed = course.pass_mark == null || score >= course.pass_mark;
+  const certificateIssued = passed ? 1 : 0;
+
+  db.prepare('UPDATE course_enrollments SET completed = 1, score = ?, certificate_issued = ? WHERE id = ?').run(score, certificateIssued, enrollment.id);
+  res.json({ score, correctCount, total: questions.length, passed, certificateIssued: !!certificateIssued, passMark: course.pass_mark });
+});
+
 // Employees enrolled in a course, with completion/score/certificate state — used by "Manage Enrollments".
 router.get('/courses/:id/enrollments', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
@@ -150,8 +253,9 @@ router.post('/courses/:id/enrollments', (req, res) => {
   }
 });
 
-// Assessments & Certifications: completion + an optional score. Company rule: a certificate
-// is only issued once completed AND (no pass mark required, or score >= pass mark).
+// Assessments & Certifications: completion + an optional score, for HR to record manually
+// (e.g. for an offline/instructor-led assessment). Company rule: a certificate is only issued
+// once completed AND (no pass mark required, or score >= pass mark).
 router.put('/enrollments/:id', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const enrollment = db.prepare('SELECT * FROM course_enrollments WHERE id = ?').get(req.params.id);
@@ -165,6 +269,17 @@ router.put('/enrollments/:id', (req, res) => {
 
   db.prepare('UPDATE course_enrollments SET completed = ?, score = ?, certificate_issued = ? WHERE id = ?').run(completed, score, certificateIssued, req.params.id);
   res.json({ ok: true, certificateIssued: !!certificateIssued });
+});
+
+// Certifications: every certified employee across every course.
+router.get('/certifications', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT ce.id, ce.score, ce.created_at, c.title AS course_title, c.pass_mark, e.name, e.employee_code, e.department
+    FROM course_enrollments ce JOIN courses c ON c.id = ce.course_id JOIN employees e ON e.id = ce.employee_id
+    WHERE ce.certificate_issued = 1 ORDER BY ce.created_at DESC
+  `).all();
+  res.json({ certifications: rows });
 });
 
 // Training Reports & Analytics.

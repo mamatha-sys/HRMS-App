@@ -811,6 +811,33 @@ function migrate() {
       detail TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS asset_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      type TEXT NOT NULL CHECK (type IN ('Return','Damage','Regularization')),
+      detail TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_at TEXT
+    );
+  `);
+
+  // --- Learning "Assessments & Assignments": a real MCQ question bank per course, so
+  // employees get a scored quiz (shuffled per attempt) instead of a manually-entered score.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS course_questions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      question_text TEXT NOT NULL,
+      option_a TEXT NOT NULL,
+      option_b TEXT NOT NULL,
+      option_c TEXT NOT NULL,
+      option_d TEXT NOT NULL,
+      correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
   `);
 
   migrateLeavesTable();
@@ -1050,6 +1077,18 @@ function seedModuleData() {
       enroll(c1, Math.min(emps.length, 9), Math.min(emps.length, 7));
       enroll(c2, Math.min(emps.length, 6), Math.min(emps.length, 3));
       enroll(c3, Math.min(emps.length, 4), Math.min(emps.length, 4));
+    }
+  }
+  // Independent of the courses-seed block above (which only runs once, ever) so this still
+  // backfills a demo question bank even on a DB where courses already existed.
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions').get().c === 0) {
+    const safetyCourse = db.prepare("SELECT id FROM courses WHERE title = 'Workplace Safety & Compliance'").get();
+    if (safetyCourse) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(safetyCourse.id, 'What should you do first in case of a fire alarm?', 'Finish your current task', 'Evacuate via the nearest marked exit', 'Call a colleague', 'Take the elevator', 'B', 0);
+      insQ.run(safetyCourse.id, 'Where is the nearest fire extinguisher usually located?', 'In the parking lot', 'Near exits and hallways', 'In the CEO\'s office', 'It is not required', 'B', 1);
+      insQ.run(safetyCourse.id, 'Who should workplace safety incidents be reported to?', 'No one, handle it yourself', 'HR/Safety Officer', 'The nearest customer', 'Social media', 'B', 2);
+      insQ.run(safetyCourse.id, 'How often should workstation ergonomics be reviewed?', 'Never', 'Only when injured', 'Periodically / when discomfort starts', 'Once at joining only', 'C', 3);
     }
   }
 

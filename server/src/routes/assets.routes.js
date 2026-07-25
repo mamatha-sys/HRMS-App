@@ -19,15 +19,15 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  { key: 'inventory', label: 'Asset Inventory & Allocation' },
-  { key: 'transfer', label: 'Asset Transfer & Return' },
-  { key: 'maintenance', label: 'Asset Maintenance & Repair' },
-  { key: 'warranty', label: 'Warranty Management' },
-  { key: 'disposal', label: 'Asset Disposal & History' },
-  { key: 'tracking', label: 'Barcode / QR Code Tracking' },
-  { key: 'approval', label: 'Asset Approval' },
-  { key: 'reports', label: 'Asset Reports & Analytics' },
-  { key: 'audit', label: 'Asset Audit' }
+  { key: 'inventory', label: 'Asset Inventory & Allocation', screen: 'dashboard' },
+  { key: 'transfer', label: 'Asset Transfer & Return', screen: 'dashboard' },
+  { key: 'maintenance', label: 'Asset Maintenance & Repair', screen: 'dashboard' },
+  { key: 'warranty', label: 'Warranty Management', screen: 'newAsset' },
+  { key: 'disposal', label: 'Asset Disposal & History', screen: 'dashboard' },
+  { key: 'tracking', label: 'Barcode / QR Code Tracking', screen: 'dashboard' },
+  { key: 'approval', label: 'Asset Approval', screen: 'requests' },
+  { key: 'reports', label: 'Asset Reports & Analytics', screen: 'reports' },
+  { key: 'audit', label: 'Asset Audit', screen: 'dashboard' }
 ];
 const FIELD_ACCESS = [
   { field: 'Asset Cost / Purchase Value', access: 'Editable' },
@@ -42,6 +42,7 @@ function withEmployee(a) {
 function logHistory(assetId, action, detail) {
   db.prepare('INSERT INTO asset_history (asset_id, action, detail) VALUES (?, ?, ?)').run(assetId, action, detail || null);
 }
+const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
@@ -61,6 +62,68 @@ router.get('/overview', (req, res) => {
     keyFeatures: KEY_FEATURES,
     fieldAccess: FIELD_ACCESS
   });
+});
+
+// Self-service: assets currently assigned to me, plus my own request history.
+router.get('/my-assets', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.json({ assets: [], requests: [] });
+  const assets = db.prepare("SELECT * FROM assets WHERE assigned_employee_id = ? AND status != 'Disposed'").all(me.id);
+  const requests = db.prepare(`
+    SELECT r.*, a.name AS asset_name, a.asset_tag
+    FROM asset_requests r JOIN assets a ON a.id = r.asset_id
+    WHERE r.employee_id = ? ORDER BY r.created_at DESC
+  `).all(me.id);
+  res.json({ assets, requests });
+});
+
+// Employee raises a Return / Damage / Regularization request against one of their own assets.
+router.post('/requests', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
+  const { asset_id, type, detail } = req.body || {};
+  if (!['Return', 'Damage', 'Regularization'].includes(type)) return res.status(400).json({ error: 'A valid request type is required' });
+  const asset = db.prepare('SELECT * FROM assets WHERE id = ? AND assigned_employee_id = ?').get(asset_id, me.id);
+  if (!asset) return res.status(400).json({ error: 'That asset is not currently assigned to you.' });
+  const info = db.prepare('INSERT INTO asset_requests (asset_id, employee_id, type, detail) VALUES (?, ?, ?, ?)').run(asset.id, me.id, type, detail || null);
+  logHistory(asset.id, `${type} requested`, `By ${me.name}${detail ? `: ${detail}` : ''}`);
+  res.status(201).json({ request: db.prepare('SELECT * FROM asset_requests WHERE id = ?').get(info.lastInsertRowid) });
+});
+
+// HR: pending (and recently decided) requests queue.
+router.get('/requests', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const requests = db.prepare(`
+    SELECT r.*, a.name AS asset_name, a.asset_tag, e.name AS employee_name, e.employee_code
+    FROM asset_requests r JOIN assets a ON a.id = r.asset_id JOIN employees e ON e.id = r.employee_id
+    ORDER BY (r.status = 'Pending') DESC, r.created_at DESC
+  `).all();
+  res.json({ requests });
+});
+
+router.put('/requests/:id/decide', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const request = db.prepare('SELECT * FROM asset_requests WHERE id = ?').get(req.params.id);
+  if (!request) return res.status(404).json({ error: 'Request not found' });
+  if (request.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided.' });
+  const approve = req.body?.decision === 'approve';
+  db.prepare("UPDATE asset_requests SET status = ?, decided_at = datetime('now') WHERE id = ?").run(approve ? 'Approved' : 'Rejected', req.params.id);
+
+  if (approve) {
+    const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(request.asset_id);
+    if (request.type === 'Return') {
+      db.prepare("UPDATE assets SET assigned_employee_id = NULL, status = 'In Store' WHERE id = ?").run(asset.id);
+      logHistory(asset.id, 'Returned', `Return request approved by ${req.user.name}`);
+    } else if (request.type === 'Damage') {
+      db.prepare("UPDATE assets SET status = 'Under Repair', assigned_employee_id = NULL WHERE id = ?").run(asset.id);
+      logHistory(asset.id, 'Sent for Repair', `Damage report approved by ${req.user.name}`);
+    } else {
+      logHistory(asset.id, 'Regularization approved', `By ${req.user.name}`);
+    }
+  } else {
+    logHistory(request.asset_id, `${request.type} request rejected`, `By ${req.user.name}`);
+  }
+  res.json({ request: db.prepare('SELECT * FROM asset_requests WHERE id = ?').get(req.params.id) });
 });
 
 // Asset Approval: assets added by Manager/Assistant Manager start Pending Approval and

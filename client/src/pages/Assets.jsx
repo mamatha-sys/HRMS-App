@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -7,57 +6,105 @@ const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const APPROVAL_AUTHORITY = ['super_admin', 'hr_admin'];
 const STATUS_CLASS = { Assigned: 'present', 'In Store': 'info', 'Under Repair': 'pending', Disposed: 'absent' };
 
-function scrollToSection(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  el.style.transition = 'box-shadow 0.2s';
-  el.style.boxShadow = '0 0 0 3px #2E5CB8';
-  setTimeout(() => { el.style.boxShadow = ''; }, 1200);
-}
-
 export default function Assets() {
   const { user } = useAuth();
-  if (!HR_ROLES.includes(user?.role)) {
-    return (
-      <div>
-        <h1>Asset Management</h1>
-        <div className="subtitle">This module is managed by HR.</div>
-      </div>
-    );
+  return HR_ROLES.includes(user?.role) ? <HRAssets /> : <MyAssets />;
+}
+
+// Employee self-service: assets currently assigned to me, with Return / Damage / Regularization
+// requests that route to HR for approval.
+function MyAssets() {
+  const [assets, setAssets] = useState([]);
+  const [requests, setRequests] = useState([]);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const [requestFor, setRequestFor] = useState(null);
+  const [requestType, setRequestType] = useState('Return');
+  const [detail, setDetail] = useState('');
+
+  function load() { api.get('/assets/my-assets').then((r) => { setAssets(r.data.assets); setRequests(r.data.requests); }).catch(() => {}); }
+  useEffect(load, []);
+
+  async function submitRequest(assetId) {
+    setError(''); setInfo('');
+    try {
+      await api.post('/assets/requests', { asset_id: assetId, type: requestType, detail });
+      setRequestFor(null); setDetail(''); setInfo('Request submitted to HR.'); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not submit request.'); }
   }
-  return <HRAssets />;
+
+  return (
+    <div>
+      <h1>Asset Management</h1>
+      <div className="subtitle">Assets assigned to you.</div>
+      {error && <div className="banner error">{error}</div>}
+      {info && <div className="banner info">{info}</div>}
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>My Assets</div>
+        {assets.length === 0 && <div className="empty">No assets are currently assigned to you.</div>}
+        {assets.map((a) => (
+          <div key={a.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+            <div className="row" style={{ justifyContent: 'space-between' }}>
+              <strong>{a.name}{a.category ? ` (${a.category})` : ''} <span className="feature-meta">{a.asset_tag}</span></strong>
+              <span className={'status-tag ' + (STATUS_CLASS[a.status] || 'info')}>{a.status}</span>
+            </div>
+            {a.warranty_expiry && <div className="feature-meta">Warranty until {a.warranty_expiry}</div>}
+            {requestFor === a.id ? (
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 6 }}>
+                <select value={requestType} onChange={(e) => setRequestType(e.target.value)} style={{ flex: '1 1 140px' }}>
+                  <option value="Return">Request Return</option>
+                  <option value="Damage">Report Damage</option>
+                  <option value="Regularization">Raise Regularization</option>
+                </select>
+                <input placeholder="Reason / details" value={detail} onChange={(e) => setDetail(e.target.value)} style={{ flex: '2 1 200px' }} />
+                <button className="primary" onClick={() => submitRequest(a.id)}>Submit</button>
+                <button onClick={() => setRequestFor(null)}>Cancel</button>
+              </div>
+            ) : (
+              <button style={{ marginTop: 6 }} onClick={() => { setRequestFor(a.id); setRequestType('Return'); setDetail(''); }}>Raise a request</button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>My Requests</div>
+        {requests.length === 0 && <div className="empty">No requests yet.</div>}
+        {requests.map((r) => (
+          <div key={r.id} className="rec-row">
+            <span>{r.type} — {r.asset_name} ({r.asset_tag}){r.detail ? `: ${r.detail}` : ''}</span>
+            <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : (r.status === 'Rejected' ? 'absent' : 'pending'))}>{r.status}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function HRAssets() {
   const { user } = useAuth();
-  const [tab, setTab] = useState('dashboard');
+  const [screen, setScreen] = useState('dashboard');
+  const [activeAsset, setActiveAsset] = useState(null);
   const [ov, setOv] = useState(null);
   const [reports, setReports] = useState(null);
+  const [requests, setRequests] = useState(null);
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: '', category: '', cost: '', warranty_expiry: '' });
   const [editing, setEditing] = useState(null);
   const [editDraft, setEditDraft] = useState({ name: '', category: '', cost: '', warranty_expiry: '' });
-  const [assigning, setAssigning] = useState(null);
-  const [assignTo, setAssignTo] = useState('');
   const [transferring, setTransferring] = useState(null);
   const [transferTo, setTransferTo] = useState('');
   const [expanded, setExpanded] = useState(null);
 
-  function load() {
-    api.get('/assets/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load asset overview.'));
-  }
+  function load() { api.get('/assets/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load asset overview.')); }
   useEffect(load, []);
   useEffect(() => { api.get('/employees').then((r) => setEmployees(r.data.employees.filter((e) => e.status === 'Active'))).catch(() => {}); }, []);
-  useEffect(() => { if (tab === 'reports') api.get('/assets/reports').then((r) => setReports(r.data)).catch(() => {}); }, [tab]);
+  useEffect(() => { if (screen === 'reports') api.get('/assets/reports').then((r) => setReports(r.data)).catch(() => {}); }, [screen]);
+  useEffect(() => { if (screen === 'requests') api.get('/assets/requests').then((r) => setRequests(r.data.requests)).catch(() => {}); }, [screen]);
 
-  async function addAsset(e) {
-    e.preventDefault(); setError('');
-    try { await api.post('/assets', form); setForm({ name: '', category: '', cost: '', warranty_expiry: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not add asset.'); }
-  }
+  function goto(target) { setScreen(target); }
+
   async function decide(id, decision) {
     setError('');
     try { await api.put(`/assets/${id}/decide`, { decision }); load(); }
@@ -72,12 +119,6 @@ function HRAssets() {
     setError('');
     try { await api.put(`/assets/${a.id}/pause`, { paused: !!a.active }); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not update asset.'); }
-  }
-  async function assign(id) {
-    if (!assignTo) return;
-    setError('');
-    try { await api.put(`/assets/${id}/assign`, { employee_id: assignTo }); setAssigning(null); setAssignTo(''); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not assign asset.'); }
   }
   async function transfer(id) {
     if (!transferTo) return;
@@ -106,6 +147,14 @@ function HRAssets() {
     try { await api.post(`/assets/${id}/audit`, {}); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not log audit.'); }
   }
+  async function decideRequest(id, decision) {
+    setError('');
+    try { await api.put(`/assets/requests/${id}/decide`, { decision }); api.get('/assets/requests').then((r) => setRequests(r.data.requests)); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not decide request.'); }
+  }
+
+  if (screen === 'newAsset') return <NewAssetScreen onDone={() => { load(); goto('dashboard'); }} onCancel={() => goto('dashboard')} />;
+  if (screen === 'assign' && activeAsset) return <AssignAssetScreen asset={activeAsset} employees={employees} onDone={() => { load(); goto('dashboard'); }} onCancel={() => goto('dashboard')} />;
 
   return (
     <div>
@@ -115,11 +164,33 @@ function HRAssets() {
       {error && <div className="banner error">{error}</div>}
 
       <div className="row" style={{ marginBottom: 14 }}>
-        <button className={tab === 'dashboard' ? 'primary' : ''} onClick={() => setTab('dashboard')}>Dashboard</button>
-        <button className={tab === 'reports' ? 'primary' : ''} onClick={() => setTab('reports')}>Reports</button>
+        <button className={screen === 'dashboard' ? 'primary' : ''} onClick={() => goto('dashboard')}>Dashboard</button>
+        <button className={screen === 'requests' ? 'primary' : ''} onClick={() => goto('requests')}>Asset Requests</button>
+        <button className={screen === 'reports' ? 'primary' : ''} onClick={() => goto('reports')}>Reports</button>
       </div>
 
-      {tab === 'reports' ? (
+      {screen === 'requests' ? (
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}>Asset Requests — Return / Damage / Regularization</div>
+          {!requests && <div className="empty">Loading…</div>}
+          {requests && requests.length === 0 && <div className="empty">No requests yet.</div>}
+          {requests && requests.map((r) => (
+            <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <span><strong>{r.type}</strong> — {r.asset_name} ({r.asset_tag}) · {r.employee_name} ({r.employee_code})</span>
+                <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : (r.status === 'Rejected' ? 'absent' : 'pending'))}>{r.status}</span>
+              </div>
+              {r.detail && <div className="feature-meta">{r.detail}</div>}
+              {r.status === 'Pending' && (
+                <div style={{ marginTop: 6 }}>
+                  <button className="btn-approve" onClick={() => decideRequest(r.id, 'approve')}>Approve</button>
+                  <button className="btn-reject" style={{ marginLeft: 6 }} onClick={() => decideRequest(r.id, 'reject')}>Reject</button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : screen === 'reports' ? (
         <>
           {reports && (
             <div className="kpi-row">
@@ -167,16 +238,8 @@ function HRAssets() {
             <div className="card" id="section-inventory">
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                 <div className="feature-name"><span className="widget-badge">1</span>Asset Inventory</div>
+                <button className="primary" onClick={() => goto('newAsset')}>+ Add Asset</button>
               </div>
-              {showForm && (
-                <form onSubmit={addAsset} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-                  <input placeholder="Asset name (e.g. Dell Latitude 5440)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required style={{ flex: '2 1 180px' }} />
-                  <input placeholder="Category (e.g. Laptop)" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={{ flex: '1 1 120px' }} />
-                  <input type="number" min="0" placeholder="Cost" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} style={{ flex: '1 1 100px' }} />
-                  <input type="date" placeholder="Warranty expiry" value={form.warranty_expiry} onChange={(e) => setForm({ ...form, warranty_expiry: e.target.value })} style={{ flex: '1 1 140px' }} />
-                  <button className="primary" type="submit">Add</button>
-                </form>
-              )}
               {!APPROVAL_AUTHORITY.includes(user?.role) && <div className="feature-meta" style={{ marginBottom: 8 }}>Assets you add require Super Admin/HR Admin approval before they can be assigned.</div>}
               {ov?.assets.length === 0 && <div className="empty">No assets yet.</div>}
               {ov?.assets.map((a) => (
@@ -230,18 +293,7 @@ function HRAssets() {
                               </span>
                             ) : <button onClick={() => setTransferring(a.id)}>Transfer</button>
                           )}
-                          {a.status === 'In Store' && a.active && (
-                            assigning === a.id ? (
-                              <span className="row" style={{ display: 'inline-flex' }}>
-                                <select value={assignTo} onChange={(e) => setAssignTo(e.target.value)} style={{ width: 'auto' }}>
-                                  <option value="">Select employee</option>
-                                  {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
-                                </select>
-                                <button className="primary" onClick={() => assign(a.id)}>Assign</button>
-                                <button onClick={() => setAssigning(null)}>Cancel</button>
-                              </span>
-                            ) : <button onClick={() => setAssigning(a.id)}>Assign</button>
-                          )}
+                          {a.status === 'In Store' && a.active && <button onClick={() => { setActiveAsset(a); goto('assign'); }}>Assign</button>}
                           {a.status !== 'Under Repair' && <button onClick={() => toggleRepair(a.id, true)}>Send for Repair</button>}
                           {a.status === 'Under Repair' && <button onClick={() => toggleRepair(a.id, false)}>Back In Store</button>}
                           {a.status !== 'Assigned' && <button onClick={() => dispose(a.id)}>Dispose</button>}
@@ -264,17 +316,9 @@ function HRAssets() {
 
             <div className="card">
               <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">2</span>Key Features</div>
-              <div className="feature-meta" style={{ marginBottom: 8 }}>Click a feature to jump to it.</div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>Each feature opens its own screen.</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Inventory &amp; Allocation</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Transfer &amp; Return</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Maintenance &amp; Repair</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Warranty Management</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Disposal &amp; History</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Barcode / QR Code Tracking</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Approval</button>
-                <button className="pill" onClick={() => setTab('reports')}>Asset Reports &amp; Analytics</button>
-                <button className="pill" onClick={() => scrollToSection('section-inventory')}>Asset Audit</button>
+                {ov?.keyFeatures.map((f) => <button key={f.key} className="pill" onClick={() => goto(f.screen)}>{f.label}</button>)}
               </div>
             </div>
 
@@ -285,14 +329,81 @@ function HRAssets() {
               ))}
             </div>
           </div>
-
-          <div className="card">
-            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">4</span>Quick Actions</div>
-            <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => { setShowForm((v) => !v); scrollToSection('section-inventory'); }}>{showForm ? '− Hide add asset form' : '+ Add Asset'}</button>
-            {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
-          </div>
         </>
       )}
+    </div>
+  );
+}
+
+// --- Dedicated "Add Asset" screen. ---
+function NewAssetScreen({ onDone, onCancel }) {
+  const [form, setForm] = useState({ name: '', category: '', cost: '', warranty_expiry: '' });
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!form.name.trim()) { setError('Asset name is required'); return; }
+    setSaving(true);
+    try { await api.post('/assets', form); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add asset.'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div>
+      <h1>Add Asset</h1>
+      <div className="subtitle">Register a new asset into the inventory.</div>
+      {error && <div className="banner error">{error}</div>}
+      <form onSubmit={submit} className="card" style={{ maxWidth: 480 }}>
+        <label className="field-label">Asset Name *</label>
+        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Dell Latitude 5440" required style={{ marginBottom: 14 }} />
+        <label className="field-label">Category</label>
+        <input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. Laptop" style={{ marginBottom: 14 }} />
+        <label className="field-label">Cost</label>
+        <input type="number" min="0" value={form.cost} onChange={(e) => setForm({ ...form, cost: e.target.value })} style={{ marginBottom: 14 }} />
+        <label className="field-label">Warranty Expiry</label>
+        <input type="date" value={form.warranty_expiry} onChange={(e) => setForm({ ...form, warranty_expiry: e.target.value })} style={{ marginBottom: 14 }} />
+        <div className="row">
+          <button type="submit" className="primary" disabled={saving} style={{ flex: 1 }}>Add Asset</button>
+          <button type="button" onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// --- Dedicated "Assign Asset" screen. ---
+function AssignAssetScreen({ asset, employees, onDone, onCancel }) {
+  const [employeeId, setEmployeeId] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!employeeId) { setError('Select an employee'); return; }
+    setSaving(true);
+    try { await api.put(`/assets/${asset.id}/assign`, { employee_id: employeeId }); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not assign asset.'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div>
+      <h1>Assign Asset</h1>
+      <div className="subtitle">{asset.name}{asset.category ? ` (${asset.category})` : ''} · {asset.asset_tag}</div>
+      {error && <div className="banner error">{error}</div>}
+      <form onSubmit={submit} className="card" style={{ maxWidth: 480 }}>
+        <label className="field-label">Assign to *</label>
+        <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} required style={{ marginBottom: 14 }}>
+          <option value="">Select an active employee…</option>
+          {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code}) · {e.department}</option>)}
+        </select>
+        <div className="row">
+          <button type="submit" className="primary" disabled={saving} style={{ flex: 1 }}>Assign</button>
+          <button type="button" onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
     </div>
   );
 }
