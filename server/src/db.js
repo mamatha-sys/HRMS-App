@@ -716,7 +716,178 @@ function migrate() {
     );
   `);
 
+  // --- Recruitment: dynamic Interview Rounds catalog (add/edit/pause, like leave_types /
+  // salary_components) replaces the fixed 5-stage CHECK on candidates.stage. Seeded here
+  // (inside migrate(), not seedModuleData()) so migrateCandidatesTable() below can map old
+  // stage strings to the new rows in the same upgrade pass.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS interview_rounds (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 0,
+      is_final INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  if (db.prepare('SELECT COUNT(*) AS c FROM interview_rounds').get().c === 0) {
+    const insRound = db.prepare('INSERT INTO interview_rounds (name, sort_order, is_final) VALUES (?, ?, ?)');
+    insRound.run('Resume Screening', 0, 0);
+    insRound.run('Technical Interview', 1, 0);
+    insRound.run('HR Interview', 2, 0);
+    insRound.run('Offer', 3, 0);
+    insRound.run('Hired', 4, 1);
+  }
+  migrateCandidatesTable();
+
+  // --- Onboarding / offboarding checklists: named responsibilities per new hire / exit,
+  // each independently checkable, driving the overall onboarding_pct / clearance counts.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS onboarding_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      new_hire_id INTEGER NOT NULL REFERENCES new_hires(id) ON DELETE CASCADE,
+      task_name TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS offboarding_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      exit_id INTEGER NOT NULL REFERENCES exits(id) ON DELETE CASCADE,
+      task_name TEXT NOT NULL,
+      completed INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+
+  // --- Performance Management Key Features: link reviews to a real employee for
+  // self-service, plus 360 feedback / competency notes / promotion-or-PIP flag.
+  const perCols = db.prepare('PRAGMA table_info(performance_reviews)').all().map((c) => c.name);
+  if (!perCols.includes('employee_id')) db.exec('ALTER TABLE performance_reviews ADD COLUMN employee_id INTEGER REFERENCES employees(id)');
+  if (!perCols.includes('competency_notes')) db.exec('ALTER TABLE performance_reviews ADD COLUMN competency_notes TEXT');
+  if (!perCols.includes('plan_type')) db.exec("ALTER TABLE performance_reviews ADD COLUMN plan_type TEXT NOT NULL DEFAULT 'None' CHECK (plan_type IN ('None','Promotion','PIP'))");
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS performance_feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      review_id INTEGER NOT NULL REFERENCES performance_reviews(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Learning Management Key Features: uploaded course materials (PDF/video, stored as
+  // base64 like employee documents), a Super-Admin-only download/copy toggle per course, and
+  // a per-enrollment score so "certificate issued" can enforce the assessment-passed rule.
+  const courseCols = db.prepare('PRAGMA table_info(courses)').all().map((c) => c.name);
+  if (!courseCols.includes('allow_download')) db.exec('ALTER TABLE courses ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0');
+
+  const enrCols = db.prepare('PRAGMA table_info(course_enrollments)').all().map((c) => c.name);
+  if (!enrCols.includes('score')) db.exec('ALTER TABLE course_enrollments ADD COLUMN score INTEGER');
+  if (!enrCols.includes('certificate_issued')) db.exec('ALTER TABLE course_enrollments ADD COLUMN certificate_issued INTEGER NOT NULL DEFAULT 0');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS course_materials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      file_type TEXT NOT NULL CHECK (file_type IN ('pdf','video','other')),
+      data_url TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Asset Management Key Features: pause/resume (retire without deleting), warranty,
+  // a barcode-style tracking tag, a full action history log, a Disposed status, and a
+  // Pending-Approval gate for assets added by non-final-authority roles.
+  migrateAssetsTable();
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS asset_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   migrateLeavesTable();
+}
+
+// One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a
+// round_id FK into the new interview_rounds catalog so HR can add custom rounds, preserving
+// every existing row's id and mapping its old stage string to the matching round.
+function migrateCandidatesTable() {
+  const cols = db.prepare('PRAGMA table_info(candidates)').all().map((c) => c.name);
+  if (cols.includes('round_id')) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE candidates_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        position_id INTEGER REFERENCES positions(id) ON DELETE SET NULL,
+        panel TEXT,
+        feedback_status TEXT NOT NULL DEFAULT 'No feedback yet' CHECK (feedback_status IN ('No feedback yet','Feedback submitted')),
+        round_id INTEGER REFERENCES interview_rounds(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO candidates_new (id, name, position_id, panel, feedback_status, round_id, created_at)
+      VALUES (@id, @name, @position_id, @panel, @feedback_status, @round_id, @created_at)
+    `);
+    db.prepare('SELECT * FROM candidates').all().forEach((r) => {
+      const round = db.prepare('SELECT id FROM interview_rounds WHERE name = ?').get(r.stage);
+      insert.run({ ...r, round_id: round ? round.id : null });
+    });
+    db.exec('DROP TABLE candidates');
+    db.exec('ALTER TABLE candidates_new RENAME TO candidates');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// One-time rebuild: widen assets.status to include 'Disposed' (SQLite can't ALTER a CHECK)
+// and add the pause/warranty/tag/approval columns needed for the Asset Management key
+// features, preserving every existing row's id and data.
+function migrateAssetsTable() {
+  const cols = db.prepare('PRAGMA table_info(assets)').all().map((c) => c.name);
+  if (cols.includes('asset_tag')) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE assets_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        category TEXT,
+        assigned_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'In Store' CHECK (status IN ('Assigned','In Store','Under Repair','Disposed')),
+        cost INTEGER,
+        active INTEGER NOT NULL DEFAULT 1,
+        warranty_expiry TEXT,
+        asset_tag TEXT,
+        approval_status TEXT NOT NULL DEFAULT 'Approved' CHECK (approval_status IN ('Pending Approval','Approved','Rejected')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO assets_new (id, name, category, assigned_employee_id, status, cost, created_at)
+      VALUES (@id, @name, @category, @assigned_employee_id, @status, @cost, @created_at)
+    `);
+    db.prepare('SELECT * FROM assets').all().forEach((r) => insert.run(r));
+    db.exec('DROP TABLE assets');
+    db.exec('ALTER TABLE assets_new RENAME TO assets');
+    db.prepare('SELECT id FROM assets ORDER BY id').all().forEach((r) => {
+      db.prepare('UPDATE assets SET asset_tag = ? WHERE id = ?').run('AST-' + String(r.id).padStart(4, '0'), r.id);
+    });
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
 }
 
 // One-time rebuild: the original `leaves` table restricted `type` to a fixed CHECK
@@ -891,7 +1062,27 @@ function seedModuleData() {
     insAsset.run('HP LaserJet Pro', 'Printer', null, 'In Store', 22000);
     insAsset.run('Dell Latitude 5440', 'Laptop', null, 'Under Repair', 78000);
   }
+
+  // Backfill the onboarding/offboarding checklist for any new_hire/exit row that doesn't
+  // have one yet (first run after this migration, or a row created before it).
+  const insOnTask = db.prepare('INSERT INTO onboarding_tasks (new_hire_id, task_name, sort_order) VALUES (?, ?, ?)');
+  db.prepare('SELECT id FROM new_hires').all().forEach((h) => {
+    if (db.prepare('SELECT COUNT(*) c FROM onboarding_tasks WHERE new_hire_id = ?').get(h.id).c > 0) return;
+    ONBOARDING_TASK_DEFAULTS.forEach((t, i) => insOnTask.run(h.id, t, i));
+  });
+  const insOffTask = db.prepare('INSERT INTO offboarding_tasks (exit_id, task_name, sort_order) VALUES (?, ?, ?)');
+  db.prepare('SELECT id FROM exits').all().forEach((x) => {
+    if (db.prepare('SELECT COUNT(*) c FROM offboarding_tasks WHERE exit_id = ?').get(x.id).c > 0) return;
+    OFFBOARDING_TASK_DEFAULTS.forEach((t, i) => insOffTask.run(x.id, t, i));
+  });
 }
+
+export const ONBOARDING_TASK_DEFAULTS = [
+  'Offer letter signed', 'IT & workstation setup', 'Orientation session completed', 'Documents submitted', 'Meet reporting manager'
+];
+export const OFFBOARDING_TASK_DEFAULTS = [
+  'Return IT assets', 'Knowledge transfer completed', 'Finance clearance (dues/loans)', 'HR exit interview'
+];
 
 migrate();
 seedModuleData();

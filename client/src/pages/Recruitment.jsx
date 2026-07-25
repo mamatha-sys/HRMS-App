@@ -5,9 +5,13 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 
-export default function Recruitment() {
-  const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRRecruitment /> : <BasicRecruitment />;
+function scrollToSection(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  el.style.transition = 'box-shadow 0.2s';
+  el.style.boxShadow = '0 0 0 3px #2E5CB8';
+  setTimeout(() => { el.style.boxShadow = ''; }, 1200);
 }
 
 // Non-HR roles (TL/STL/Employee) get a read-only vacancies view — recruitment itself is HR-run.
@@ -40,6 +44,11 @@ function BasicRecruitment() {
   );
 }
 
+export default function Recruitment() {
+  const { user } = useAuth();
+  return HR_ROLES.includes(user?.role) ? <HRRecruitment /> : <BasicRecruitment />;
+}
+
 function HRRecruitment() {
   const { user } = useAuth();
   const [ov, setOv] = useState(null);
@@ -52,14 +61,25 @@ function HRRecruitment() {
   const [candForm, setCandForm] = useState({ name: '', position_id: '', panel: '' });
   const [showHireForm, setShowHireForm] = useState(false);
   const [hireForm, setHireForm] = useState({ name: '', designation: '', department: '', start_date: '' });
+  const [showExitForm, setShowExitForm] = useState(false);
+  const [exitForm, setExitForm] = useState({ employee_id: '', last_working_day: '' });
+  const [activeEmployees, setActiveEmployees] = useState([]);
   const [postingFor, setPostingFor] = useState(null);
   const [postingBoards, setPostingBoards] = useState('');
+  const [expandedHire, setExpandedHire] = useState(null);
+  const [expandedExit, setExpandedExit] = useState(null);
+
+  const [showRoundForm, setShowRoundForm] = useState(false);
+  const [newRoundName, setNewRoundName] = useState('');
+  const [editingRound, setEditingRound] = useState(null);
+  const [editRoundName, setEditRoundName] = useState('');
 
   function load() {
     api.get('/recruitment/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load recruitment overview.'));
   }
   useEffect(load, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
+  useEffect(() => { api.get('/employees').then((r) => setActiveEmployees(r.data.employees.filter((e) => e.status === 'Active'))).catch(() => {}); }, []);
 
   async function submitRequisition(e) {
     e.preventDefault(); setError('');
@@ -91,10 +111,35 @@ function HRRecruitment() {
     try { await api.post('/recruitment/new-hires', hireForm); setHireForm({ name: '', designation: '', department: '', start_date: '' }); setShowHireForm(false); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not add new hire.'); }
   }
-  async function bumpClearance(id) {
+  async function toggleOnboardingTask(hireId, taskId, completed) {
     setError('');
-    try { await api.put(`/recruitment/exits/${id}/clearance`); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not update clearance.'); }
+    try { await api.put(`/recruitment/new-hires/${hireId}/tasks/${taskId}`, { completed }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update task.'); }
+  }
+  async function submitExit(e) {
+    e.preventDefault(); setError('');
+    try { await api.post('/recruitment/exits', exitForm); setExitForm({ employee_id: '', last_working_day: '' }); setShowExitForm(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add exit.'); }
+  }
+  async function toggleOffboardingTask(exitId, taskId, completed) {
+    setError('');
+    try { await api.put(`/recruitment/exits/${exitId}/tasks/${taskId}`, { completed }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update task.'); }
+  }
+  async function addRound(e) {
+    e.preventDefault(); setError('');
+    try { await api.post('/recruitment/interview-rounds', { name: newRoundName }); setNewRoundName(''); setShowRoundForm(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add round.'); }
+  }
+  async function saveRound(id) {
+    setError('');
+    try { await api.put(`/recruitment/interview-rounds/${id}`, { name: editRoundName }); setEditingRound(null); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save round.'); }
+  }
+  async function pauseRound(round) {
+    setError('');
+    try { await api.put(`/recruitment/interview-rounds/${round.id}/pause`, { paused: !round.paused }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update round.'); }
   }
 
   return (
@@ -118,7 +163,7 @@ function HRRecruitment() {
       )}
 
       <div className="dashboard-grid">
-        <div className="card">
+        <div className="card" id="section-requisitions">
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
             <div className="feature-name"><span className="widget-badge">1</span>Job Requisitions</div>
             <button onClick={() => setShowReqForm((v) => !v)}>{showReqForm ? 'Cancel' : '+ Add Requisition'}</button>
@@ -165,7 +210,7 @@ function HRRecruitment() {
           ))}
         </div>
 
-        <div className="card">
+        <div className="card" id="section-pipeline">
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
             <div className="feature-name"><span className="widget-badge">2</span>Candidate Pipeline</div>
             <button onClick={() => setShowCandForm((v) => !v)}>{showCandForm ? 'Cancel' : '+ Add Candidate'}</button>
@@ -186,7 +231,7 @@ function HRRecruitment() {
             <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
                 <strong>{c.name}</strong>
-                <span className="status-tag info">{c.stage}</span>
+                <span className="status-tag info">{c.stage || '—'}</span>
               </div>
               <div className="feature-meta">Applying for: {c.position_title || '—'} · Panel: {c.panel || '—'} · {c.feedback_status}</div>
               {c.next_stage && <button style={{ marginTop: 6 }} onClick={() => advanceCandidate(c.id)}>Move to {c.next_stage}</button>}
@@ -194,9 +239,44 @@ function HRRecruitment() {
           ))}
         </div>
 
-        <div className="card">
+        <div className="card" id="section-rounds">
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div className="feature-name" style={{ color: '#1E8E5A' }}><span className="widget-badge" style={{ background: '#1E8E5A' }}>3</span>Onboarding — New Hires</div>
+            <div className="feature-name"><span className="widget-badge">3</span>Interview Rounds</div>
+            <button onClick={() => setShowRoundForm((v) => !v)}>{showRoundForm ? 'Cancel' : '+ Add Round'}</button>
+          </div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>The candidate pipeline advances through these rounds, in order. Pause a round to skip it without losing history.</div>
+          {showRoundForm && (
+            <form onSubmit={addRound} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
+              <input placeholder="Round name (e.g. Culture Fit)" value={newRoundName} onChange={(e) => setNewRoundName(e.target.value)} required style={{ flex: '1 1 160px' }} />
+              <button className="primary" type="submit">Add</button>
+            </form>
+          )}
+          {ov?.interviewRounds.map((r) => (
+            <div key={r.id} className="rec-row" style={{ opacity: r.paused ? 0.55 : 1 }}>
+              {editingRound === r.id ? (
+                <span className="row" style={{ flex: 1, flexWrap: 'wrap' }}>
+                  <input value={editRoundName} onChange={(e) => setEditRoundName(e.target.value)} style={{ flex: '1 1 140px' }} autoFocus />
+                  <button className="primary" onClick={() => saveRound(r.id)}>Save</button>
+                  <button onClick={() => setEditingRound(null)}>Cancel</button>
+                </span>
+              ) : (
+                <>
+                  <span>{r.name}{r.is_final ? <span className="status-tag present" style={{ marginLeft: 6 }}>Final</span> : null}{r.paused ? <span className="status-tag pending" style={{ marginLeft: 6 }}>Paused</span> : null}</span>
+                  <span style={{ display: 'flex', gap: 6 }}>
+                    <button onClick={() => { setEditingRound(r.id); setEditRoundName(r.name); }}>Edit</button>
+                    <button onClick={() => pauseRound(r)}>{r.paused ? 'Resume' : 'Pause'}</button>
+                  </span>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="dashboard-grid">
+        <div className="card" id="section-onboarding">
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div className="feature-name" style={{ color: '#1E8E5A' }}><span className="widget-badge" style={{ background: '#1E8E5A' }}>4</span>Onboarding — New Hires</div>
             <button onClick={() => setShowHireForm((v) => !v)}>{showHireForm ? 'Cancel' : '+ Add New Hire'}</button>
           </div>
           {showHireForm && (
@@ -213,31 +293,71 @@ function HRRecruitment() {
           )}
           {ov?.newHires.length === 0 && <div className="empty">No new hires onboarding.</div>}
           {ov?.newHires.map((h) => (
-            <div key={h.id} className="rec-row">
-              <span>{h.name}<div className="feature-meta">{h.designation} · {h.department} · Starts {h.start_date}</div></span>
-              <span>{h.onboarding_pct}% complete</span>
+            <div key={h.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <a href="#" onClick={(e) => { e.preventDefault(); setExpandedHire(expandedHire === h.id ? null : h.id); }}>
+                  {h.name}<div className="feature-meta">{h.designation} · {h.department} · Starts {h.start_date}</div>
+                </a>
+                <span>{h.onboarding_pct}% complete</span>
+              </div>
+              {expandedHire === h.id && (
+                <div style={{ marginTop: 8, paddingLeft: 8 }}>
+                  <div className="feature-meta" style={{ marginBottom: 4 }}>Onboarding responsibilities:</div>
+                  {h.tasks.map((t) => (
+                    <label key={t.id} className="row" style={{ alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <input type="checkbox" checked={!!t.completed} onChange={(e) => toggleOnboardingTask(h.id, t.id, e.target.checked)} style={{ width: 16, height: 16 }} />
+                      <span style={{ textDecoration: t.completed ? 'line-through' : 'none', color: t.completed ? '#8A93A3' : 'inherit' }}>{t.task_name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div className="card" id="section-offboarding" style={{ borderLeft: '4px solid #B3401E' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div className="feature-name" style={{ color: '#B3401E' }}><span className="widget-badge">5</span>Offboarding — Exiting Employees</div>
+            <button onClick={() => setShowExitForm((v) => !v)}>{showExitForm ? 'Cancel' : '+ Add Exit'}</button>
+          </div>
+          {showExitForm && (
+            <form onSubmit={submitExit} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
+              <select value={exitForm.employee_id} onChange={(e) => setExitForm({ ...exitForm, employee_id: e.target.value })} required style={{ flex: '1 1 160px' }}>
+                <option value="">Select employee</option>
+                {activeEmployees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+              </select>
+              <input type="date" value={exitForm.last_working_day} onChange={(e) => setExitForm({ ...exitForm, last_working_day: e.target.value })} required style={{ flex: '1 1 140px' }} />
+              <button className="primary" type="submit">Add</button>
+            </form>
+          )}
+          {ov?.exits.length === 0 && <div className="empty">No employees currently exiting.</div>}
+          {ov?.exits.map((x) => (
+            <div key={x.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <a href="#" onClick={(e) => { e.preventDefault(); setExpandedExit(expandedExit === x.id ? null : x.id); }}>
+                  {x.name}<div className="feature-meta">{x.department} · Last working day: {x.last_working_day} · Clearance: {x.clearance_current}/{x.clearance_total}</div>
+                </a>
+                <span className="status-tag pending">{x.status}</span>
+              </div>
+              {expandedExit === x.id && (
+                <div style={{ marginTop: 8, paddingLeft: 8 }}>
+                  <div className="feature-meta" style={{ marginBottom: 4 }}>Offboarding responsibilities:</div>
+                  {x.tasks.map((t) => (
+                    <label key={t.id} className="row" style={{ alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <input type="checkbox" checked={!!t.completed} onChange={(e) => toggleOffboardingTask(x.id, t.id, e.target.checked)} style={{ width: 16, height: 16 }} />
+                      <span style={{ textDecoration: t.completed ? 'line-through' : 'none', color: t.completed ? '#8A93A3' : 'inherit' }}>{t.task_name}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>
       </div>
 
       <div className="dashboard-grid">
-        <div className="card" style={{ borderLeft: '4px solid #B3401E' }}>
-          <div className="feature-name" style={{ marginBottom: 8, color: '#B3401E' }}><span className="widget-badge">4</span>Offboarding — Exiting Employees</div>
-          {ov?.exits.length === 0 && <div className="empty">No employees currently exiting.</div>}
-          {ov?.exits.map((x) => (
-            <div key={x.id} className="rec-row">
-              <span>{x.name}<div className="feature-meta">{x.department} · Last working day: {x.last_working_day} · Clearance: {x.clearance_current}/{x.clearance_total}</div></span>
-              <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <span className="status-tag pending">{x.status}</span>
-                <button onClick={() => bumpClearance(x.id)}>+1 clearance</button>
-              </span>
-            </div>
-          ))}
-        </div>
-
-        <div className="card">
-          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">5</span>Department-wise Vacancies</div>
+        <div className="card" id="section-vacancies">
+          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">6</span>Department-wise Vacancies</div>
           {ov?.vacancies.length === 0 && <div className="empty">No headcount data yet.</div>}
           {ov?.vacancies.length > 0 && (
             <table>
@@ -258,9 +378,22 @@ function HRRecruitment() {
         </div>
 
         <div className="card">
-          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">6</span>Quick Actions</div>
-          <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowReqForm(true)}>+ Add Requisition</button>
-          <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowCandForm(true)}>+ Interview Rounds</button>
+          <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">7</span>Key Features</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>Click a feature to jump to it.</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <button className="pill" onClick={() => scrollToSection('section-requisitions')}>Job Requisition Management</button>
+            <button className="pill" onClick={() => scrollToSection('section-pipeline')}>Candidate Pipeline &amp; Scheduling</button>
+            <button className="pill" onClick={() => scrollToSection('section-rounds')}>Interview Rounds Configuration</button>
+            <button className="pill" onClick={() => scrollToSection('section-onboarding')}>Onboarding Checklist</button>
+            <button className="pill" onClick={() => scrollToSection('section-offboarding')}>Offboarding &amp; Clearance</button>
+            <button className="pill" onClick={() => scrollToSection('section-vacancies')}>Department-wise Vacancies</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">8</span>Quick Actions</div>
+          <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => { setShowReqForm(true); scrollToSection('section-requisitions'); }}>+ Add Requisition</button>
+          <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => { setShowRoundForm(true); scrollToSection('section-rounds'); }}>+ Interview Rounds</button>
           {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
         </div>
       </div>

@@ -7,6 +7,7 @@ router.use(requireAuth);
 
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const isHR = (role) => HR_ROLES.includes(role);
+const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const SCOPE_BANNER = {
   super_admin: 'Full Access — configure performance cycles, KPIs/KRAs/OKRs, appraisal templates, rating scales; approve final ratings. Rule: a review cannot be marked complete until both self- and manager-assessment are submitted.',
@@ -16,18 +17,29 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  'Goal Assignment & Tracking', 'KPI / KRA / OKR Management', 'Performance Reviews & Appraisals', 'Self-Appraisal',
-  '360° & Continuous Feedback', 'Competency & Skill Gap Assessment', 'Promotion & Improvement Plans (PIP)', 'Performance Reports & Analytics'
+  { key: 'goals', label: 'Goal Assignment & Tracking' },
+  { key: 'kpi', label: 'KPI / KRA / OKR Management' },
+  { key: 'reviews', label: 'Performance Reviews & Appraisals' },
+  { key: 'self', label: 'Self-Appraisal' },
+  { key: 'feedback', label: '360° & Continuous Feedback' },
+  { key: 'competency', label: 'Competency & Skill Gap Assessment' },
+  { key: 'plan', label: 'Promotion & Improvement Plans (PIP)' },
+  { key: 'reports', label: 'Performance Reports & Analytics' }
 ];
 const FIELD_ACCESS = [
   { field: 'Record Owner / Assigned-To', access: 'Editable' },
   { field: 'Internal Notes / Remarks', access: 'Editable' }
 ];
 
+function withFeedback(review) {
+  const feedback = db.prepare('SELECT * FROM performance_feedback WHERE review_id = ? ORDER BY created_at DESC').all(review.id);
+  return { ...review, feedback };
+}
+
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
-  const reviews = db.prepare("SELECT * FROM performance_reviews ORDER BY (status = 'Completed'), created_at DESC").all();
+  const reviews = db.prepare("SELECT * FROM performance_reviews ORDER BY (status = 'Completed'), created_at DESC").all().map(withFeedback);
   const inProgress = reviews.filter((r) => r.status === 'In Progress').length;
   const rated = reviews.filter((r) => r.rating != null);
   const avgRating = rated.length ? Math.round((rated.reduce((t, r) => t + r.rating, 0) / rated.length) * 10) / 10 : 0;
@@ -44,20 +56,43 @@ router.get('/overview', (req, res) => {
   });
 });
 
+// Self-service: an employee's own reviews (for the Self-Appraisal feature).
+router.get('/my-reviews', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.json({ reviews: [] });
+  const reviews = db.prepare('SELECT * FROM performance_reviews WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map(withFeedback);
+  res.json({ reviews });
+});
+
 router.post('/reviews', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { employee_name, team, goal_text, kpi_text } = req.body || {};
+  const { employee_id, employee_name, team, goal_text, kpi_text } = req.body || {};
   if (!employee_name || !goal_text) return res.status(400).json({ error: 'employee_name and goal_text are required' });
-  const info = db.prepare('INSERT INTO performance_reviews (employee_name, team, goal_text, kpi_text) VALUES (?, ?, ?, ?)')
-    .run(employee_name.trim(), team || null, goal_text.trim(), kpi_text || null);
+  const emp = employee_id ? db.prepare('SELECT id FROM employees WHERE id = ?').get(employee_id) : null;
+  const info = db.prepare('INSERT INTO performance_reviews (employee_id, employee_name, team, goal_text, kpi_text) VALUES (?, ?, ?, ?, ?)')
+    .run(emp ? emp.id : null, employee_name.trim(), team || null, goal_text.trim(), kpi_text || null);
   res.status(201).json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(info.lastInsertRowid) });
 });
 
+// Goal Assignment & Tracking / KPI-KRA-OKR Management: edit the goal + KPI text on a review.
+router.put('/reviews/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  const { goal_text, kpi_text, team } = req.body || {};
+  db.prepare('UPDATE performance_reviews SET goal_text = COALESCE(?, goal_text), kpi_text = COALESCE(?, kpi_text), team = COALESCE(?, team) WHERE id = ?')
+    .run(goal_text?.trim() || null, kpi_text ?? null, team ?? null, req.params.id);
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// Self-Appraisal: HR/manager, or the employee whose review this is, can submit it.
 router.put('/reviews/:id/self-assessment', (req, res) => {
   const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
   if (!review) return res.status(404).json({ error: 'Review not found' });
+  const me = myEmployee(req.user.sub);
+  if (!isHR(req.user.role) && (!me || me.id !== review.employee_id)) return res.status(403).json({ error: 'Insufficient permissions' });
   db.prepare("UPDATE performance_reviews SET self_assessment_status = 'Submitted' WHERE id = ?").run(req.params.id);
-  res.json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id) });
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
 router.put('/reviews/:id/manager-assessment', (req, res) => {
@@ -66,7 +101,36 @@ router.put('/reviews/:id/manager-assessment', (req, res) => {
   if (!review) return res.status(404).json({ error: 'Review not found' });
   const rating = req.body?.rating != null ? Math.max(1, Math.min(5, parseInt(req.body.rating, 10) || 1)) : review.rating;
   db.prepare("UPDATE performance_reviews SET manager_assessment_status = 'Submitted', rating = ? WHERE id = ?").run(rating, req.params.id);
-  res.json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id) });
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// 360° & Continuous Feedback: an append-only note thread on a review.
+router.post('/reviews/:id/feedback', (req, res) => {
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  const note = req.body?.note?.trim();
+  if (!note) return res.status(400).json({ error: 'note is required' });
+  db.prepare('INSERT INTO performance_feedback (review_id, author_name, note) VALUES (?, ?, ?)').run(review.id, req.user.name || 'Anonymous', note);
+  res.status(201).json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// Competency & Skill Gap Assessment: free-text notes on a review.
+router.put('/reviews/:id/competency', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  db.prepare('UPDATE performance_reviews SET competency_notes = ? WHERE id = ?').run(req.body?.notes?.trim() || null, req.params.id);
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// Promotion & Improvement Plans (PIP): flag a review as leading to a promotion or a PIP.
+router.put('/reviews/:id/plan', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  const planType = ['None', 'Promotion', 'PIP'].includes(req.body?.plan_type) ? req.body.plan_type : 'None';
+  db.prepare('UPDATE performance_reviews SET plan_type = ? WHERE id = ?').run(planType, req.params.id);
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
 // Company rule: a review cannot be marked complete until both self- and manager-assessment
@@ -79,7 +143,30 @@ router.put('/reviews/:id/complete', (req, res) => {
     return res.status(400).json({ error: 'Both self- and manager-assessment must be submitted before this review can be marked complete.' });
   }
   db.prepare("UPDATE performance_reviews SET status = 'Completed' WHERE id = ?").run(req.params.id);
-  res.json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id) });
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// Performance Reports & Analytics: by-team averages, status split, rating distribution.
+router.get('/reports', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const reviews = db.prepare('SELECT * FROM performance_reviews').all();
+
+  const byTeam = {};
+  reviews.forEach((r) => {
+    const key = r.team || 'Unassigned';
+    byTeam[key] = byTeam[key] || { team: key, count: 0, ratingSum: 0, ratingCount: 0 };
+    byTeam[key].count++;
+    if (r.rating != null) { byTeam[key].ratingSum += r.rating; byTeam[key].ratingCount++; }
+  });
+  const teamStats = Object.values(byTeam).map((t) => ({
+    team: t.team, count: t.count, avgRating: t.ratingCount ? Math.round((t.ratingSum / t.ratingCount) * 10) / 10 : null
+  }));
+
+  const distribution = [1, 2, 3, 4, 5].map((n) => ({ rating: n, count: reviews.filter((r) => r.rating === n).length }));
+  const planCounts = { Promotion: reviews.filter((r) => r.plan_type === 'Promotion').length, PIP: reviews.filter((r) => r.plan_type === 'PIP').length };
+  const statusCounts = { 'In Progress': reviews.filter((r) => r.status === 'In Progress').length, Completed: reviews.filter((r) => r.status === 'Completed').length };
+
+  res.json({ teamStats, distribution, planCounts, statusCounts });
 });
 
 export default router;
