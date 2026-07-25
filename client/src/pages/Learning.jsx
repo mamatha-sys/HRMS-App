@@ -39,45 +39,116 @@ export default function Learning() {
   return HR_ROLES.includes(user?.role) ? <HRLearning /> : <MyLearning />;
 }
 
-// Employee self-service: enrolled courses, protected material viewer, and a real shuffled
-// MCQ assessment (server-graded, server-shuffled — the correct answer is never sent down).
+// Employee self-service: a Training-Courses-catalog dashboard (own KPIs + browse every
+// course + self-enroll), each course opening its own detail screen with the protected
+// material viewer and a real shuffled MCQ assessment (server-graded, server-shuffled — the
+// correct answer is never sent down).
 function MyLearning() {
+  const [screen, setScreen] = useState('dashboard');
+  const [activeCourseId, setActiveCourseId] = useState(null);
   const [enrollments, setEnrollments] = useState([]);
+  const [catalog, setCatalog] = useState([]);
   const [error, setError] = useState('');
-  const [quizFor, setQuizFor] = useState(null);
+
+  function load() {
+    api.get('/learning/my-courses').then((r) => setEnrollments(r.data.enrollments)).catch(() => {});
+    api.get('/learning/catalog').then((r) => setCatalog(r.data.courses)).catch(() => setError('Could not load courses.'));
+  }
+  useEffect(load, []);
+
+  function goto(target) { setScreen(target); }
+
+  if (screen === 'courseDetail') {
+    const course = catalog.find((c) => c.id === activeCourseId);
+    const enrollment = enrollments.find((e) => e.course_id === activeCourseId);
+    return <MyCourseDetailScreen course={course} enrollment={enrollment} onEnrolled={load} onBack={() => { load(); goto('dashboard'); }} />;
+  }
+  if (screen === 'selfEnroll') return <SelfEnrollScreen catalog={catalog} enrollments={enrollments} onDone={() => { load(); goto('dashboard'); }} onBack={() => goto('dashboard')} />;
+
+  const certifiedCount = enrollments.filter((e) => e.certificate_issued).length;
+
+  return (
+    <div>
+      <h1>Learning Management</h1>
+      <div className="subtitle">Signed in as: Employee (Self-Service)</div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="kpi-row">
+        <div className="kpi-card blue"><div className="kpi-label">My Enrolled Courses</div><div className="kpi-value">{enrollments.length}</div></div>
+        <div className="kpi-card blue"><div className="kpi-label">Certificates Earned</div><div className="kpi-value">{certifiedCount}</div></div>
+      </div>
+
+      <div className="dashboard-grid">
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">1</span>Training Courses</div>
+          {catalog.length === 0 && <div className="empty">No courses available yet.</div>}
+          {catalog.map((c) => (
+            <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
+                <strong>{c.title}</strong>
+                {!!c.mandatory && <span className="status-tag pending">Mandatory</span>}
+              </div>
+              <div className="feature-meta">
+                {c.completed} / {c.enrolled} completed ({c.completionPct}%) · {c.pass_mark != null ? `Pass mark: ${c.pass_mark}%` : 'No assessment'}
+              </div>
+              <button style={{ marginTop: 6 }} onClick={() => { setActiveCourseId(c.id); goto('courseDetail'); }}>{c.enrolledByMe ? 'View Course' : 'View & Enroll'}</button>
+            </div>
+          ))}
+        </div>
+
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Quick Actions</div>
+          <button className="pill" style={{ width: '100%', textAlign: 'left' }} onClick={() => goto('selfEnroll')}>Enroll in Course</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Employee's own "Course Detail" screen: materials, Take Assessment (shuffled, own
+// score/certificate result), or a self-enroll prompt if not yet enrolled. ---
+function MyCourseDetailScreen({ course, enrollment, onEnrolled, onBack }) {
+  const [error, setError] = useState('');
+  const [enrolling, setEnrolling] = useState(false);
+  const [taking, setTaking] = useState(false);
   const [quiz, setQuiz] = useState(null);
   const [answers, setAnswers] = useState({});
   const [result, setResult] = useState(null);
 
-  function load() { api.get('/learning/my-courses').then((r) => setEnrollments(r.data.enrollments)).catch(() => {}); }
-  useEffect(load, []);
-
-  async function startAssessment(courseId) {
+  async function selfEnroll() {
+    setError(''); setEnrolling(true);
+    try { await api.post('/learning/my-enroll', { course_id: course.id }); onEnrolled(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
+    finally { setEnrolling(false); }
+  }
+  async function startAssessment() {
     setError(''); setResult(null); setAnswers({});
-    try { const r = await api.get(`/learning/my-courses/${courseId}/assessment`); setQuiz(r.data); setQuizFor(courseId); }
+    try { const r = await api.get(`/learning/my-courses/${course.id}/assessment`); setQuiz(r.data); setTaking(true); }
     catch (err) { setError(err.response?.data?.error || 'Could not load assessment.'); }
   }
   async function submitAssessment() {
     setError('');
     const payload = { answers: Object.entries(answers).map(([question_id, selected_option]) => ({ question_id: Number(question_id), selected_option })) };
-    try { const r = await api.post(`/learning/my-courses/${quizFor}/assessment`, payload); setResult(r.data); load(); }
+    try { const r = await api.post(`/learning/my-courses/${course.id}/assessment`, payload); setResult(r.data); }
     catch (err) { setError(err.response?.data?.error || 'Could not submit assessment.'); }
   }
 
-  if (quizFor && quiz) {
+  if (!course) return <div className="empty">Loading…</div>;
+
+  if (taking) {
     return (
       <div>
-        <h1>Assessment — {quiz.course.title}</h1>
-        <div className="subtitle">Questions are shuffled for you. {quiz.course.pass_mark != null ? `Pass mark: ${quiz.course.pass_mark}%.` : ''}</div>
+        <h1>Assessment — {course.title}</h1>
+        <div className="subtitle">Questions are shuffled for you. {course.pass_mark != null ? `Pass mark: ${course.pass_mark}%.` : ''}</div>
         {error && <div className="banner error">{error}</div>}
         {result ? (
           <div className="card">
             <div className="feature-name" style={{ marginBottom: 8 }}>Result</div>
             <div className="feature-meta">Score: {result.score}% ({result.correctCount}/{result.total} correct)</div>
             <div className="feature-meta">{result.passed ? 'Passed' : 'Not passed'}{result.certificateIssued ? ' — Certificate issued!' : ''}</div>
-            <button style={{ marginTop: 10 }} onClick={() => { setQuizFor(null); setQuiz(null); setResult(null); }}>Back to My Courses</button>
+            <button style={{ marginTop: 10 }} onClick={() => { setTaking(false); setQuiz(null); setResult(null); onEnrolled(); }}>Back to Course</button>
           </div>
-        ) : (
+        ) : !quiz ? <div className="empty">Loading…</div> : (
           <div className="card">
             {quiz.questions.map((q, i) => (
               <div key={q.id} style={{ marginBottom: 16 }}>
@@ -91,7 +162,7 @@ function MyLearning() {
               </div>
             ))}
             <button className="primary" onClick={submitAssessment} disabled={Object.keys(answers).length < quiz.questions.length}>Submit Assessment</button>
-            <button style={{ marginLeft: 6 }} onClick={() => { setQuizFor(null); setQuiz(null); }}>Cancel</button>
+            <button style={{ marginLeft: 6 }} onClick={() => { setTaking(false); setQuiz(null); }}>Cancel</button>
           </div>
         )}
       </div>
@@ -100,25 +171,72 @@ function MyLearning() {
 
   return (
     <div>
-      <h1>Learning Management</h1>
-      <div className="subtitle">Your assigned courses.</div>
+      <h1>{course.title}</h1>
+      <div className="subtitle">
+        {course.mandatory ? 'Mandatory training' : 'Optional training'}
+        {course.pass_mark != null ? ` — Pass mark: ${course.pass_mark}%. A certificate is only issued after the assessment is passed.` : ' — No assessment defined.'}
+      </div>
       {error && <div className="banner error">{error}</div>}
-      {enrollments.length === 0 && <div className="card"><div className="empty">You aren't enrolled in any courses yet.</div></div>}
-      {enrollments.map((e) => (
-        <div key={e.id} className="card">
-          <div className="row" style={{ justifyContent: 'space-between' }}>
-            <div className="feature-name">{e.title}{!!e.mandatory && <span className="status-tag pending" style={{ marginLeft: 8 }}>Mandatory</span>}</div>
-            <span className={'status-tag ' + (e.certificate_issued ? 'present' : (e.completed ? 'pending' : 'info'))}>
-              {e.certificate_issued ? 'Certified' : (e.completed ? 'Completed — did not pass' : 'In Progress')}
-            </span>
-          </div>
-          {e.pass_mark != null && <div className="feature-meta" style={{ marginBottom: 8 }}>Pass mark: {e.pass_mark}%{e.score != null ? ` · Your last score: ${e.score}%` : ''}</div>}
-          {e.materials.length === 0 && <div className="empty">No materials uploaded yet.</div>}
-          {e.materials.map((m) => <ProtectedMaterial key={m.id} material={m} allowDownload={!!e.allow_download} />)}
-          {e.hasAssessment && !e.certificate_issued && <button style={{ marginTop: 6 }} onClick={() => startAssessment(e.course_id)}>Take Assessment</button>}
-          {e.certificate_issued && <div className="status-tag present" style={{ marginTop: 6, display: 'inline-block' }}>🎓 Certificate earned — score {e.score}%</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
+
+      {!enrollment ? (
+        <div className="card">
+          <div className="empty">You are not enrolled in this course yet.</div>
+          <button className="primary" style={{ marginTop: 8 }} disabled={enrolling} onClick={selfEnroll}>Enroll in this Course</button>
         </div>
-      ))}
+      ) : (
+        <div className="card">
+          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+            <span className={'status-tag ' + (enrollment.certificate_issued ? 'present' : (enrollment.completed ? 'pending' : 'info'))}>
+              {enrollment.certificate_issued ? 'Certified' : (enrollment.completed ? 'Completed — did not pass' : 'In Progress')}
+            </span>
+            {enrollment.score != null && <span className="feature-meta">Your last score: {enrollment.score}%</span>}
+          </div>
+          {enrollment.materials.length === 0 && <div className="empty">No materials uploaded yet.</div>}
+          {enrollment.materials.map((m) => <ProtectedMaterial key={m.id} material={m} allowDownload={!!enrollment.allow_download} />)}
+          {enrollment.hasAssessment && !enrollment.certificate_issued && <button style={{ marginTop: 6 }} onClick={startAssessment}>Take Assessment</button>}
+          {enrollment.certificate_issued && <div className="status-tag present" style={{ marginTop: 6, display: 'inline-block' }}>🎓 Certificate earned — score {enrollment.score}%</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Employee's "Enroll in Course" Quick Action screen. ---
+function SelfEnrollScreen({ catalog, enrollments, onDone, onBack }) {
+  const [courseId, setCourseId] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const enrolledIds = new Set(enrollments.map((e) => e.course_id));
+  const available = catalog.filter((c) => !enrolledIds.has(c.id));
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!courseId) return;
+    setSaving(true);
+    try { await api.post('/learning/my-enroll', { course_id: courseId }); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div>
+      <h1>Enroll in Course</h1>
+      <div className="subtitle">Choose a course to enroll yourself in.</div>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back</button>
+      {available.length === 0 ? (
+        <div className="card"><div className="empty">You're already enrolled in every available course.</div></div>
+      ) : (
+        <form onSubmit={submit} className="card" style={{ maxWidth: 480 }}>
+          <label className="field-label">Course *</label>
+          <select value={courseId} onChange={(e) => setCourseId(e.target.value)} required style={{ marginBottom: 14 }}>
+            <option value="">Select…</option>
+            {available.map((c) => <option key={c.id} value={c.id}>{c.title}{c.mandatory ? ' (Mandatory)' : ''}</option>)}
+          </select>
+          <button className="primary" type="submit" disabled={saving}>Enroll</button>
+        </form>
+      )}
     </div>
   );
 }

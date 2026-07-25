@@ -87,6 +87,40 @@ router.get('/my-courses', (req, res) => {
   res.json({ enrollments });
 });
 
+// Employee-facing course catalog for the self-service "Training Courses" browse list:
+// every course with company-wide completion stats, plus whether the current employee is
+// already enrolled (so the dashboard can offer "View Course" vs "View & Enroll").
+router.get('/catalog', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  const courses = db.prepare('SELECT * FROM courses ORDER BY created_at').all();
+  const result = courses.map((c) => {
+    const enrolled = db.prepare('SELECT COUNT(*) c FROM course_enrollments WHERE course_id = ?').get(c.id).c;
+    const completed = db.prepare('SELECT COUNT(*) c FROM course_enrollments WHERE course_id = ? AND completed = 1').get(c.id).c;
+    const mine = me ? db.prepare('SELECT id FROM course_enrollments WHERE course_id = ? AND employee_id = ?').get(c.id, me.id) : null;
+    return {
+      id: c.id, title: c.title, mandatory: c.mandatory, pass_mark: c.pass_mark,
+      enrolled, completed, completionPct: enrolled > 0 ? Math.round((completed / enrolled) * 100) : 0,
+      enrolledByMe: !!mine
+    };
+  });
+  res.json({ courses: result });
+});
+
+// Employee self-enrollment (Quick Action / course-detail "Enroll" button) — unlike HR's
+// POST /courses/:id/enrollments, this always enrolls the calling user's own employee record.
+router.post('/my-enroll', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.status(400).json({ error: 'No employee profile is linked to this account.' });
+  const course = db.prepare('SELECT id FROM courses WHERE id = ?').get(req.body?.course_id);
+  if (!course) return res.status(400).json({ error: 'A valid course is required.' });
+  try {
+    db.prepare('INSERT INTO course_enrollments (course_id, employee_id) VALUES (?, ?)').run(course.id, me.id);
+    res.status(201).json({ ok: true });
+  } catch {
+    res.status(409).json({ error: 'You are already enrolled in that course.' });
+  }
+});
+
 // Every course needs a completion criterion — this form requires a real assessment (a
 // question bank with a pass mark), matching the "Has Assessment / Completion Criterion?"
 // rule shown on the Create Course screen. Materials (PDF/video) can be attached at creation.
