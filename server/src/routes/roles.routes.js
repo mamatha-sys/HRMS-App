@@ -30,13 +30,16 @@ router.put('/reorder', (req, res) => {
   res.json({ ok: true });
 });
 
-// Rename / re-scope a role (Edit).
+// Rename / re-scope a role (Edit), and set its leave-approval day limit (e.g. Team Lead: 2 days).
 router.put('/:id', (req, res) => {
   const role = db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id);
   if (!role) return res.status(404).json({ error: 'Role not found' });
-  const { name, scope_description } = req.body || {};
-  db.prepare('UPDATE roles SET name = COALESCE(?, name), scope_description = COALESCE(?, scope_description) WHERE id = ?')
-    .run(name?.trim() || null, scope_description ?? null, req.params.id);
+  const { name, scope_description, max_leave_approval_days } = req.body || {};
+  const nextLimit = max_leave_approval_days === undefined
+    ? role.max_leave_approval_days
+    : (max_leave_approval_days === null || max_leave_approval_days === '' ? null : Math.max(0, parseInt(max_leave_approval_days, 10) || 0));
+  db.prepare('UPDATE roles SET name = COALESCE(?, name), scope_description = COALESCE(?, scope_description), max_leave_approval_days = ? WHERE id = ?')
+    .run(name?.trim() || null, scope_description ?? null, nextLimit, req.params.id);
   res.json({ role: db.prepare('SELECT * FROM roles WHERE id = ?').get(req.params.id) });
 });
 

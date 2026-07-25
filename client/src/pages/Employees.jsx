@@ -13,8 +13,11 @@ const EMPTY_FORM = {
   emergency_contact_name: '', emergency_contact_relation: '', emergency_contact_number: '',
   address_street: '', address_city: '', address_state: '', address_country: '', address_pincode: '',
   department: '', branch: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
+  shift: 'General (9:00 AM – 6:00 PM)',
   bank_name: '', bank_account_number: '', ifsc_code: '', education: '', experience: '', skills: '', documents: []
 };
+
+const SHIFT_OPTIONS = ['General (9:00 AM – 6:00 PM)'];
 
 const MAX_FILE_BYTES = 3 * 1024 * 1024;
 function readFileAsDataUrl(file) {
@@ -358,6 +361,12 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, handl
                 <option value="Exited">Exited</option>
               </select>
             </div>
+            <div>
+              <label className="field-label">Shift</label>
+              <select value={form.shift} onChange={(e) => setForm({ ...form, shift: e.target.value })}>
+                {SHIFT_OPTIONS.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
           </div>
         </>
       )}
@@ -402,6 +411,7 @@ function EmployeeDetail({ emp }) {
       <div className="grid2">
         <div>Employee ID: <strong>{emp.employee_code}</strong></div>
         <div>Branch: <strong>{emp.branch || '—'}</strong></div>
+        <div>Shift: <strong>{emp.shift || '—'}</strong></div>
         <div>Reporting manager: <strong>{emp.reporting_manager || '—'}</strong></div>
         <div>Phone: <strong>{emp.phone || '—'}</strong></div>
         <div>Date of birth: <strong>{emp.date_of_birth || '—'}</strong></div>

@@ -20,7 +20,7 @@ function MyPayroll() {
   }, []);
 
   function download(p) {
-    const lines = [`Payslip — ${p.period}`, `Basic: ${p.basic}`, `HRA: ${p.hra}`, `Allowances: ${p.allowances}`, `Deductions: ${p.deductions}`, `Net: ${p.net}`];
+    const lines = [`Payslip — ${p.period}`, `Basic: ${p.basic}`, `HRA: ${p.hra}`, `Allowances: ${p.allowances}`, `Deductions: ${p.deductions}`, `Late-arrival half-day cut: ${p.late_deduction || 0}`, `Net: ${p.net}`];
     const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = `payslip-${p.period}.txt`; a.click();
@@ -37,9 +37,9 @@ function MyPayroll() {
         {payslips.length === 0 && <div className="empty">No payslips generated yet.</div>}
         {payslips.length > 0 && (
           <table>
-            <thead><tr><th>Period</th><th>Basic</th><th>HRA</th><th>Allowances</th><th>Deductions</th><th>Net</th><th></th></tr></thead>
+            <thead><tr><th>Period</th><th>Basic</th><th>HRA</th><th>Allowances</th><th>Deductions</th><th>Late Cut</th><th>Net</th><th></th></tr></thead>
             <tbody>{payslips.map((p) => (
-              <tr key={p.id}><td>{p.period}</td><td>{inr(p.basic)}</td><td>{inr(p.hra)}</td><td>{inr(p.allowances)}</td><td>{inr(p.deductions)}</td><td><strong>{inr(p.net)}</strong></td><td><button onClick={() => download(p)}>Download</button></td></tr>
+              <tr key={p.id}><td>{p.period}</td><td>{inr(p.basic)}</td><td>{inr(p.hra)}</td><td>{inr(p.allowances)}</td><td>{inr(p.deductions)}</td><td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td><td><strong>{inr(p.net)}</strong></td><td><button onClick={() => download(p)}>Download</button></td></tr>
             ))}</tbody>
           </table>
         )}
@@ -74,7 +74,7 @@ function HRPayroll() {
   const [payslips, setPayslips] = useState([]);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
-  const [period, setPeriod] = useState('July 2026');
+  const [month, setMonth] = useState('2026-07');
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({});
   const [showTable, setShowTable] = useState(false);
@@ -103,7 +103,7 @@ function HRPayroll() {
   }
   async function runPayroll() {
     setError(''); setInfo('');
-    try { const r = await api.post('/payroll/run', { period }); setInfo(`Payroll for ${period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
+    try { const r = await api.post('/payroll/run', { month }); setInfo(`Payroll for ${r.data.period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Run failed.'); }
   }
   async function addComponent(e) {
@@ -159,9 +159,10 @@ function HRPayroll() {
             <div className="card">
               <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Quick Actions</div>
               <div className="row" style={{ flexWrap: 'wrap' }}>
-                <input value={period} onChange={(e) => setPeriod(e.target.value)} placeholder="e.g. July 2026" style={{ flex: '1 1 140px' }} />
+                <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={{ flex: '1 1 140px' }} />
                 <button className="primary" onClick={runPayroll}>Run Payroll</button>
               </div>
+              <div className="feature-meta" style={{ marginTop: 4 }}>Late arrivals beyond the free monthly allowance (see Configuration Policies) are auto-deducted as a half-day cut.</div>
               <button style={{ width: '100%', marginTop: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowTable((v) => !v)}>
                 {showTable ? '− Hide salary structures table' : '+ Configure salary structures'}
               </button>
@@ -231,9 +232,9 @@ function HRPayroll() {
             {payslips.length === 0 && <div className="empty">No payslips yet — run payroll for a period.</div>}
             {payslips.length > 0 && (
               <table>
-                <thead><tr><th>Period</th><th>Code</th><th>Name</th><th>Net</th></tr></thead>
+                <thead><tr><th>Period</th><th>Code</th><th>Name</th><th>Late Cut</th><th>Net</th></tr></thead>
                 <tbody>{payslips.map((p) => (
-                  <tr key={p.id}><td>{p.period}</td><td>{p.employee_code}</td><td>{p.employee_name}</td><td><strong>{inr(p.net)}</strong></td></tr>
+                  <tr key={p.id}><td>{p.period}</td><td>{p.employee_code}</td><td>{p.employee_name}</td><td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td><td><strong>{inr(p.net)}</strong></td></tr>
                 ))}</tbody>
               </table>
             )}
@@ -265,9 +266,9 @@ function PayrollReports() {
         {data && data.byPeriod.length === 0 && <div className="empty">No payroll runs yet.</div>}
         {data && data.byPeriod.length > 0 && (
           <table>
-            <thead><tr><th>Period</th><th>Employees</th><th>Gross</th><th>Deductions</th><th>Net Payout</th></tr></thead>
+            <thead><tr><th>Period</th><th>Employees</th><th>Gross</th><th>Deductions</th><th>Late Cuts</th><th>Net Payout</th></tr></thead>
             <tbody>{data.byPeriod.map((p) => (
-              <tr key={p.period}><td>{p.period}</td><td>{p.employees}</td><td>{inr(p.total_gross)}</td><td>{inr(p.total_deductions)}</td><td><strong>{inr(p.total_net)}</strong></td></tr>
+              <tr key={p.period}><td>{p.period}</td><td>{p.employees}</td><td>{inr(p.total_gross)}</td><td>{inr(p.total_deductions)}</td><td>{inr(p.total_late_deduction)}</td><td><strong>{inr(p.total_net)}</strong></td></tr>
             ))}</tbody>
           </table>
         )}

@@ -33,6 +33,16 @@ function logBalanceHistory(employeeId, leaveTypeName, change, balanceAfter, reas
     .run(employeeId, leaveTypeName, change, balanceAfter, reason, actorId || null);
 }
 
+// Days already taken this calendar year for one employee + leave type (Approved, not cancelled).
+// Shown for unpaid/unlimited types so "Unlimited" still means something concrete, not a blank.
+function daysTakenThisYear(employeeId, leaveTypeId) {
+  return db.prepare(`
+    SELECT COALESCE(SUM(days), 0) AS total FROM leaves
+    WHERE employee_id = ? AND leave_type_id = ? AND status = 'Approved' AND cancelled = 0
+      AND strftime('%Y', from_date) = strftime('%Y', 'now')
+  `).get(employeeId, leaveTypeId).total;
+}
+
 // All balances for an employee, active types only (paused types are hidden everywhere).
 function balancesFor(employeeId) {
   ensureBalances(employeeId);
@@ -40,7 +50,7 @@ function balancesFor(employeeId) {
     SELECT lt.id AS leave_type_id, lt.name, lt.code, lt.unpaid, elb.balance
     FROM leave_types lt LEFT JOIN employee_leave_balances elb ON elb.leave_type_id = lt.id AND elb.employee_id = ?
     WHERE lt.active = 1 ORDER BY lt.id
-  `).all(employeeId);
+  `).all(employeeId).map((b) => ({ ...b, days_taken_ytd: b.unpaid ? daysTakenThisYear(employeeId, b.leave_type_id) : null }));
 }
 
 function daysBetween(from, to) {
@@ -143,7 +153,7 @@ router.get('/reports', (req, res) => {
   const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
   const balances = employees.map((e) => {
     const values = {};
-    types.forEach((t) => { values[t.id] = balanceOf(e.id, t.id); });
+    types.forEach((t) => { values[t.id] = t.unpaid ? daysTakenThisYear(e.id, t.id) : balanceOf(e.id, t.id); });
     return { employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department, values };
   });
   const history = db.prepare(`
@@ -157,8 +167,8 @@ router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
   const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
-  const header = ['code', 'name', 'department', ...types.map((t) => t.code)];
-  const rows = employees.map((e) => [e.employee_code, e.name, e.department, ...types.map((t) => balanceOf(e.id, t.id))].join(','));
+  const header = ['code', 'name', 'department', ...types.map((t) => t.unpaid ? `${t.code} (days used)` : t.code)];
+  const rows = employees.map((e) => [e.employee_code, e.name, e.department, ...types.map((t) => t.unpaid ? daysTakenThisYear(e.id, t.id) : balanceOf(e.id, t.id))].join(','));
   const csv = [header.join(','), ...rows].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="leave-balances.csv"');
@@ -296,6 +306,14 @@ function decide(finalStatus) {
 
     const result = evaluateDecision(req.user.role, leave.current_stage_role_id, finalStatus === 'Rejected');
     if (result.error) return res.status(403).json({ error: result.error });
+
+    // Company rule: some roles (e.g. Team Lead) may only approve leave requests up to a
+    // configured number of days — longer requests must be escalated to a more senior role.
+    if (finalStatus === 'Approved' && result.actorRole.max_leave_approval_days != null && leave.days > result.actorRole.max_leave_approval_days) {
+      return res.status(403).json({
+        error: `${result.actorRole.name} can only approve leave requests up to ${result.actorRole.max_leave_approval_days} day(s). This request (${leave.days} days) must be escalated to a more senior approver.`
+      });
+    }
 
     if (result.finalized) {
       if (finalStatus === 'Approved') {

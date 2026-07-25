@@ -128,11 +128,27 @@ router.put('/structures/:employeeId', (req, res) => {
   res.json({ structure: { employee_id: emp.id, ...breakdownFor(emp.id) } });
 });
 
-// HR runs payroll for a period → one payslip per active employee (idempotent per period).
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// Half-day pay cut for late arrivals beyond the free monthly allowance (company rule — see
+// attendance.routes.js's half_day_flag, computed at check-in time from the "Free late arrivals
+// per month" policy). One half-day = gross / 30 / 2.
+function lateDeductionFor(employeeId, month, gross) {
+  const flaggedDays = db.prepare("SELECT COUNT(*) AS c FROM attendance WHERE employee_id = ? AND date LIKE ? AND half_day_flag = 1").get(employeeId, month + '%').c;
+  if (flaggedDays === 0) return { flaggedDays: 0, deduction: 0 };
+  const halfDayRate = Math.round(gross / 30 / 2);
+  return { flaggedDays, deduction: flaggedDays * halfDayRate };
+}
+
+// HR runs payroll for a calendar month → one payslip per active employee (idempotent per
+// period). Automatically deducts half a day's pay per late arrival beyond the free monthly
+// allowance (company rule), shown as its own line item on the payslip.
 router.post('/run', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { period } = req.body || {};
-  if (!period) return res.status(400).json({ error: 'period is required (e.g. "July 2026")' });
+  const { month } = req.body || {};
+  if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month is required in YYYY-MM format' });
+  const [y, m] = month.split('-');
+  const period = `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
 
   const employees = db.prepare("SELECT id FROM employees WHERE status = 'Active'").all();
   let generated = 0, skipped = 0;
@@ -145,8 +161,10 @@ router.post('/run', (req, res) => {
       const basic = basicLine?.amount || 0;
       const hra = hraLine?.amount || 0;
       const allowances = b.earnings.filter((l) => l.key !== 'basic' && l.key !== 'hra').reduce((t, l) => t + l.amount, 0);
-      db.prepare('INSERT INTO payslips (employee_id, period, basic, hra, allowances, deductions, net) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(e.id, period, basic, hra, allowances, b.totalDeductions, b.net);
+      const { deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
+      const net = b.net - lateDeduction;
+      db.prepare('INSERT INTO payslips (employee_id, period, basic, hra, allowances, deductions, late_deduction, net) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(e.id, period, basic, hra, allowances, b.totalDeductions, lateDeduction, net);
       generated++;
     });
     db.prepare("INSERT INTO payroll_runs (period, status) VALUES (?, 'Completed')").run(period);
@@ -173,7 +191,7 @@ router.get('/payslips', (req, res) => {
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const byPeriod = db.prepare(`
-    SELECT period, COUNT(*) AS employees, SUM(net) AS total_net, SUM(basic + hra + allowances) AS total_gross, SUM(deductions) AS total_deductions
+    SELECT period, COUNT(*) AS employees, SUM(net) AS total_net, SUM(basic + hra + allowances) AS total_gross, SUM(deductions) AS total_deductions, SUM(late_deduction) AS total_late_deduction
     FROM payslips GROUP BY period ORDER BY MAX(created_at) DESC
   `).all();
   const byDept = db.prepare(`
@@ -187,10 +205,10 @@ router.get('/reports', (req, res) => {
 router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const rows = db.prepare(`
-    SELECT p.period, e.employee_code, e.name, e.department, p.basic, p.hra, p.allowances, p.deductions, p.net
+    SELECT p.period, e.employee_code, e.name, e.department, p.basic, p.hra, p.allowances, p.deductions, p.late_deduction, p.net
     FROM payslips p JOIN employees e ON e.id = p.employee_id ORDER BY p.period, e.id
   `).all();
-  const csv = ['period,code,name,department,basic,hra,allowances,deductions,net', ...rows.map((r) => `${r.period},${r.employee_code},${r.name},${r.department},${r.basic},${r.hra},${r.allowances},${r.deductions},${r.net}`)].join('\n');
+  const csv = ['period,code,name,department,basic,hra,allowances,deductions,late_deduction,net', ...rows.map((r) => `${r.period},${r.employee_code},${r.name},${r.department},${r.basic},${r.hra},${r.allowances},${r.deductions},${r.late_deduction},${r.net}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="payroll-report.csv"');
   res.send(csv);

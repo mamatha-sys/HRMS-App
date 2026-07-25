@@ -227,7 +227,7 @@ function HRAttendance() {
                   <tr key={r.employee_id}>
                     <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
                     <td><span className={'status-tag ' + tag(r.status)}>{r.status || 'Not marked'}</span></td>
-                    <td>{r.check_in_time || '—'}</td>
+                    <td>{r.check_in_time || '—'}{!!r.half_day_flag && <span className="status-tag absent" style={{ marginLeft: 6 }} title="Late beyond the free monthly allowance — half-day pay cut">½-day cut</span>}</td>
                     <td>{r.latitude != null ? <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       <button className="btn-approve" onClick={() => mark(r.employee_id, 'Present')}>P</button>
@@ -260,13 +260,14 @@ function BiometricList() {
       {!data && !error && <div className="empty">Loading...</div>}
       {data && (
         <table>
-          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Last method</th><th>Last check-in</th><th>Location</th><th>Present (month)</th><th>Late (month)</th></tr></thead>
+          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Last method</th><th>Last check-in</th><th>Location</th><th>Present (month)</th><th>Late (month)</th><th>Half-day Cut (month)</th></tr></thead>
           <tbody>{data.rows.map((r) => (
             <tr key={r.employee_id}>
               <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
               <td>{r.last_method || '—'}</td><td>{r.last_check_in || '—'}</td>
               <td>{r.last_location ? <a className="crumb" href={mapLink(r.last_location.lat, r.last_location.lng)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
               <td>{r.present_days_month}</td><td>{r.late_days_month}</td>
+              <td>{r.half_day_cut_days_month > 0 ? <span className="status-tag absent">{r.half_day_cut_days_month}</span> : 0}</td>
             </tr>
           ))}</tbody>
         </table>
@@ -299,16 +300,20 @@ function MonthlyReports() {
       </div>
       {error && <div className="banner error">{error}</div>}
       {data && (
-        <table style={{ marginTop: 10 }}>
-          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Attendance %</th></tr></thead>
-          <tbody>{data.rows.map((r) => (
-            <tr key={r.id}>
-              <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
-              <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
-              <td><strong>{r.attendancePct}%</strong></td>
-            </tr>
-          ))}</tbody>
-        </table>
+        <>
+          <div className="note" style={{ marginTop: 8 }}>Grace time 9:15 AM · {data.freeLateAllowance} free late arrival(s)/month, then each late day is flagged with an automatic half-day pay cut.</div>
+          <table style={{ marginTop: 10 }}>
+            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th></tr></thead>
+            <tbody>{data.rows.map((r) => (
+              <tr key={r.id}>
+                <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
+                <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
+                <td>{r.halfDayCut > 0 ? <span className="status-tag absent">{r.halfDayCut}</span> : 0}</td>
+                <td><strong>{r.attendancePct}%</strong></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </>
       )}
     </div>
   );

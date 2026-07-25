@@ -32,13 +32,13 @@ export function evaluateDecision(actorRoleKey, currentStageRoleId, isReject) {
     let stage = currentStageRoleId ? db.prepare('SELECT * FROM roles WHERE id = ?').get(currentStageRoleId) : null;
     if (!stage) stage = bottomRole();
     if (actorRole.sort_order > stage.sort_order) {
-      return { error: `Waiting on ${stage.name} to act first.` };
+      return { error: `Waiting on ${stage.name} to act first.`, actorRole };
     }
   }
 
-  if (isReject) return { finalized: true };
+  if (isReject) return { finalized: true, actorRole };
 
   const above = actorRoleKey === 'super_admin' ? null : roleAbove(actorRole.sort_order);
-  if (!above) return { finalized: true };
-  return { finalized: false, stageRoleId: above.id };
+  if (!above) return { finalized: true, actorRole };
+  return { finalized: false, stageRoleId: above.id, actorRole };
 }

@@ -62,6 +62,7 @@ function MyLeave() {
             <div key={b.leave_type_id} className="kpi-card blue">
               <div className="kpi-label">{b.name}</div>
               <div className={'kpi-value' + (b.unpaid ? ' text' : '')}>{b.unpaid ? 'Unlimited' : b.balance}</div>
+              {b.unpaid && <div className="feature-meta">{b.days_taken_ytd || 0} day(s) taken this year</div>}
             </div>
           ))}
         </div>
@@ -360,11 +361,11 @@ function LeaveReports() {
         {data && (
           <div className="matrix-wrap">
             <table>
-              <thead><tr><th>Code</th><th>Name</th><th>Department</th>{data.leaveTypes.map((t) => <th key={t.id}>{t.code}</th>)}</tr></thead>
+              <thead><tr><th>Code</th><th>Name</th><th>Department</th>{data.leaveTypes.map((t) => <th key={t.id}>{t.code}{t.unpaid ? ' (used)' : ''}</th>)}</tr></thead>
               <tbody>{data.balances.map((b) => (
                 <tr key={b.employee_id}>
                   <td>{b.employee_code}</td><td>{b.name}</td><td>{b.department}</td>
-                  {data.leaveTypes.map((t) => <td key={t.id}>{t.unpaid ? '—' : b.values[t.id]}</td>)}
+                  {data.leaveTypes.map((t) => <td key={t.id}>{b.values[t.id]}</td>)}
                 </tr>
               ))}</tbody>
             </table>

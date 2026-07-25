@@ -20,7 +20,7 @@ const HR_EDITABLE_FIELDS = [
   'name', 'email', 'phone', 'photo', 'date_of_birth',
   'emergency_contact_name', 'emergency_contact_relation', 'emergency_contact_number',
   ...ADDRESS_FIELDS,
-  'department', 'branch', 'designation', 'date_of_joining', 'reporting_manager', 'status',
+  'department', 'branch', 'designation', 'date_of_joining', 'reporting_manager', 'status', 'shift',
   'bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number',
   'education', 'experience', 'skills', 'documents'
 ];

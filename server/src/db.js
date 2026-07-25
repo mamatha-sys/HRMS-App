@@ -562,6 +562,29 @@ function migrate() {
     if (bottom) db.prepare("UPDATE approvals SET current_stage_role_id = ? WHERE status = 'Pending' AND current_stage_role_id IS NULL").run(bottom.id);
   }
 
+  // Company rule: Team Lead can only approve leave requests up to 2 days — anything longer
+  // must be escalated to a more senior role. Editable per-role in Organization Structure.
+  const roleCols = db.prepare('PRAGMA table_info(roles)').all().map((c) => c.name);
+  if (!roleCols.includes('max_leave_approval_days')) {
+    db.exec('ALTER TABLE roles ADD COLUMN max_leave_approval_days INTEGER');
+    db.prepare("UPDATE roles SET max_leave_approval_days = 2 WHERE key = 'tl'").run();
+  }
+
+  const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
+  if (!empCols.includes('shift')) db.exec("ALTER TABLE employees ADD COLUMN shift TEXT NOT NULL DEFAULT 'General (9:00 AM – 6:00 PM)'");
+
+  // Half_day_flag marks a late check-in beyond the month's free-late allowance (company rule:
+  // 2 free late arrivals/month, configurable via the "Free late arrivals per month" policy).
+  const attCols = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
+  if (!attCols.includes('half_day_flag')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_flag INTEGER NOT NULL DEFAULT 0');
+
+  const payCols = db.prepare('PRAGMA table_info(payslips)').all().map((c) => c.name);
+  if (!payCols.includes('late_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN late_deduction INTEGER NOT NULL DEFAULT 0');
+
+  if (!db.prepare("SELECT 1 FROM policies WHERE name = 'Free late arrivals per month'").get()) {
+    db.prepare("INSERT INTO policies (category, name, value) VALUES ('rule', 'Free late arrivals per month', '2')").run();
+  }
+
   const lv = db.prepare('PRAGMA table_info(leaves)').all().map((c) => c.name);
   if (!lv.includes('current_stage_role_id')) db.exec('ALTER TABLE leaves ADD COLUMN current_stage_role_id INTEGER REFERENCES roles(id)');
   if (!lv.includes('cancel_requested')) db.exec('ALTER TABLE leaves ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
