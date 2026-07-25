@@ -17,14 +17,14 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  { key: 'goals', label: 'Goal Assignment & Tracking' },
-  { key: 'kpi', label: 'KPI / KRA / OKR Management' },
-  { key: 'reviews', label: 'Performance Reviews & Appraisals' },
-  { key: 'self', label: 'Self-Appraisal' },
-  { key: 'feedback', label: '360° & Continuous Feedback' },
-  { key: 'competency', label: 'Competency & Skill Gap Assessment' },
-  { key: 'plan', label: 'Promotion & Improvement Plans (PIP)' },
-  { key: 'reports', label: 'Performance Reports & Analytics' }
+  { key: 'goals', label: 'Goal Assignment & Tracking', screen: 'goals' },
+  { key: 'kpi', label: 'KPI / KRA / OKR Management', screen: 'goals' },
+  { key: 'reviews', label: 'Performance Reviews & Appraisals', screen: 'dashboard' },
+  { key: 'self', label: 'Self-Appraisal', screen: 'dashboard' },
+  { key: 'feedback', label: '360° & Continuous Feedback', screen: 'dashboard' },
+  { key: 'competency', label: 'Competency & Skill Gap Assessment', screen: 'dashboard' },
+  { key: 'plan', label: 'Promotion & Improvement Plans (PIP)', screen: 'dashboard' },
+  { key: 'reports', label: 'Performance Reports & Analytics', screen: 'reports' }
 ];
 const FIELD_ACCESS = [
   { field: 'Record Owner / Assigned-To', access: 'Editable' },
@@ -64,24 +64,43 @@ router.get('/my-reviews', (req, res) => {
   res.json({ reviews });
 });
 
+// Single-review detail, used by the dedicated Appraisal / 360° Feedback / Competency / Plan screens.
+router.get('/reviews/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  res.json({ review: withFeedback(review) });
+});
+
+// Goal Assignment & Tracking: create a new goal (employee, goal text, due date).
 router.post('/reviews', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { employee_id, employee_name, team, goal_text, kpi_text } = req.body || {};
+  const { employee_id, employee_name, team, goal_text, kpi_text, due_date } = req.body || {};
   if (!employee_name || !goal_text) return res.status(400).json({ error: 'employee_name and goal_text are required' });
   const emp = employee_id ? db.prepare('SELECT id FROM employees WHERE id = ?').get(employee_id) : null;
-  const info = db.prepare('INSERT INTO performance_reviews (employee_id, employee_name, team, goal_text, kpi_text) VALUES (?, ?, ?, ?, ?)')
-    .run(emp ? emp.id : null, employee_name.trim(), team || null, goal_text.trim(), kpi_text || null);
+  const info = db.prepare('INSERT INTO performance_reviews (employee_id, employee_name, team, goal_text, kpi_text, due_date) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(emp ? emp.id : null, employee_name.trim(), team || null, goal_text.trim(), kpi_text || null, due_date || null);
   res.status(201).json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(info.lastInsertRowid) });
 });
 
-// Goal Assignment & Tracking / KPI-KRA-OKR Management: edit the goal + KPI text on a review.
+// Goal Assignment & Tracking / KPI-KRA-OKR Management: edit the goal + KPI text + due date.
 router.put('/reviews/:id', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
   if (!review) return res.status(404).json({ error: 'Review not found' });
-  const { goal_text, kpi_text, team } = req.body || {};
-  db.prepare('UPDATE performance_reviews SET goal_text = COALESCE(?, goal_text), kpi_text = COALESCE(?, kpi_text), team = COALESCE(?, team) WHERE id = ?')
-    .run(goal_text?.trim() || null, kpi_text ?? null, team ?? null, req.params.id);
+  const { goal_text, kpi_text, team, due_date } = req.body || {};
+  db.prepare('UPDATE performance_reviews SET goal_text = COALESCE(?, goal_text), kpi_text = COALESCE(?, kpi_text), team = COALESCE(?, team), due_date = COALESCE(?, due_date) WHERE id = ?')
+    .run(goal_text?.trim() || null, kpi_text ?? null, team ?? null, due_date ?? null, req.params.id);
+  res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
+});
+
+// Goal Assignment & Tracking: update just the progress bar.
+router.put('/reviews/:id/progress', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
+  if (!review) return res.status(404).json({ error: 'Review not found' });
+  const pct = Math.max(0, Math.min(100, parseInt(req.body?.progress_pct, 10) || 0));
+  db.prepare('UPDATE performance_reviews SET progress_pct = ? WHERE id = ?').run(pct, req.params.id);
   res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
@@ -95,22 +114,29 @@ router.put('/reviews/:id/self-assessment', (req, res) => {
   res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
+// Performance Reviews & Appraisals: the manager's write-up (achievements this cycle, areas
+// for development) plus the 1-5 rating.
 router.put('/reviews/:id/manager-assessment', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
   if (!review) return res.status(404).json({ error: 'Review not found' });
   const rating = req.body?.rating != null ? Math.max(1, Math.min(5, parseInt(req.body.rating, 10) || 1)) : review.rating;
-  db.prepare("UPDATE performance_reviews SET manager_assessment_status = 'Submitted', rating = ? WHERE id = ?").run(rating, req.params.id);
+  const achievements = req.body?.achievements_text !== undefined ? (req.body.achievements_text?.trim() || null) : review.achievements_text;
+  const development = req.body?.development_areas !== undefined ? (req.body.development_areas?.trim() || null) : review.development_areas;
+  db.prepare("UPDATE performance_reviews SET manager_assessment_status = 'Submitted', rating = ?, achievements_text = ?, development_areas = ? WHERE id = ?")
+    .run(rating, achievements, development, req.params.id);
   res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
-// 360° & Continuous Feedback: an append-only note thread on a review.
+// 360° & Continuous Feedback: an append-only note thread on a review, labeled by relationship
+// to the reviewee (Manager / Peer / Self).
 router.post('/reviews/:id/feedback', (req, res) => {
   const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
   if (!review) return res.status(404).json({ error: 'Review not found' });
   const note = req.body?.note?.trim();
   if (!note) return res.status(400).json({ error: 'note is required' });
-  db.prepare('INSERT INTO performance_feedback (review_id, author_name, note) VALUES (?, ?, ?)').run(review.id, req.user.name || 'Anonymous', note);
+  const authorType = ['Manager', 'Peer', 'Self', 'Other'].includes(req.body?.author_type) ? req.body.author_type : 'Other';
+  db.prepare('INSERT INTO performance_feedback (review_id, author_name, author_type, note) VALUES (?, ?, ?, ?)').run(review.id, req.user.name || 'Anonymous', authorType, note);
   res.status(201).json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 

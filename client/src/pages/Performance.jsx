@@ -5,15 +5,6 @@ import { useAuth } from '../context/AuthContext.jsx';
 
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 
-function scrollToSection(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  el.style.transition = 'box-shadow 0.2s';
-  el.style.boxShadow = '0 0 0 3px #2E5CB8';
-  setTimeout(() => { el.style.boxShadow = ''; }, 1200);
-}
-
 export default function Performance() {
   const { user } = useAuth();
   return HR_ROLES.includes(user?.role) ? <HRPerformance /> : <MyPerformance />;
@@ -38,7 +29,7 @@ function MyPerformance() {
   async function addFeedback(id) {
     if (!note.trim()) return;
     setError('');
-    try { await api.post(`/performance/reviews/${id}/feedback`, { note }); setNote(''); setNoteFor(null); load(); }
+    try { await api.post(`/performance/reviews/${id}/feedback`, { note, author_type: 'Self' }); setNote(''); setNoteFor(null); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not add feedback.'); }
   }
 
@@ -57,11 +48,12 @@ function MyPerformance() {
               <span className={'status-tag ' + (r.status === 'Completed' ? 'present' : 'pending')}>{r.status}</span>
             </div>
             {r.kpi_text && <div className="feature-meta">KPI: {r.kpi_text}</div>}
+            {r.due_date && <div className="feature-meta">Due: {r.due_date} · Progress: {r.progress_pct}%</div>}
             <div className="feature-meta">Self-Assessment: {r.self_assessment_status} · Manager Assessment: {r.manager_assessment_status}{r.rating ? ` · Rating: ${r.rating}/5` : ''}</div>
             {r.self_assessment_status === 'Pending' && <button style={{ marginTop: 6 }} onClick={() => submitSelfAssessment(r.id)}>Submit Self-Assessment</button>}
             <div style={{ marginTop: 8 }}>
               <div className="feature-meta">360° Feedback ({r.feedback.length})</div>
-              {r.feedback.map((f) => <div key={f.id} className="feature-meta" style={{ paddingLeft: 8 }}>— {f.note} <em>({f.author_name})</em></div>)}
+              {r.feedback.map((f) => <div key={f.id} className="feature-meta" style={{ paddingLeft: 8 }}>— {f.note} <em>({f.author_name} · {f.author_type})</em></div>)}
               {noteFor === r.id ? (
                 <div className="row" style={{ marginTop: 4 }}>
                   <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add feedback note" style={{ flex: 1 }} />
@@ -77,23 +69,28 @@ function MyPerformance() {
   );
 }
 
+function useReview(reviewId) {
+  const [review, setReview] = useState(null);
+  const [error, setError] = useState('');
+  function load() {
+    if (!reviewId) return;
+    api.get(`/performance/reviews/${reviewId}`).then((r) => setReview(r.data.review)).catch(() => setError('Could not load review.'));
+  }
+  useEffect(load, [reviewId]);
+  return { review, error, reload: load };
+}
+
 function HRPerformance() {
   const { user } = useAuth();
-  const [tab, setTab] = useState('dashboard');
+  const [screen, setScreen] = useState('dashboard');
+  const [activeReviewId, setActiveReviewId] = useState(null);
+  const [tab, setTab] = useState('dashboard'); // dashboard | reports (kept separate from `screen`)
   const [ov, setOv] = useState(null);
   const [reports, setReports] = useState(null);
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '' });
-  const [ratingFor, setRatingFor] = useState(null);
-  const [rating, setRating] = useState(5);
-  const [editingGoal, setEditingGoal] = useState(null);
-  const [goalDraft, setGoalDraft] = useState({ goal_text: '', kpi_text: '' });
-  const [noteFor, setNoteFor] = useState(null);
-  const [note, setNote] = useState('');
-  const [competencyFor, setCompetencyFor] = useState(null);
-  const [competencyDraft, setCompetencyDraft] = useState('');
 
   function load() {
     api.get('/performance/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load performance overview.'));
@@ -102,42 +99,25 @@ function HRPerformance() {
   useEffect(() => { api.get('/employees').then((r) => setEmployees(r.data.employees.filter((e) => e.status === 'Active'))).catch(() => {}); }, []);
   useEffect(() => { if (tab === 'reports') api.get('/performance/reports').then((r) => setReports(r.data)).catch(() => {}); }, [tab]);
 
+  function goToReviewScreen(reviewId, target) { setActiveReviewId(reviewId); setScreen(target); }
+  function backToDashboard() { setScreen('dashboard'); setActiveReviewId(null); load(); }
+
   async function submitReview(e) {
     e.preventDefault(); setError('');
     try { await api.post('/performance/reviews', form); setForm({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '' }); setShowForm(false); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not create review.'); }
-  }
-  async function saveGoal(id) {
-    setError('');
-    try { await api.put(`/performance/reviews/${id}`, goalDraft); setEditingGoal(null); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
-  }
-  async function submitManagerAssessment(id) {
-    setError('');
-    try { await api.put(`/performance/reviews/${id}/manager-assessment`, { rating }); setRatingFor(null); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not submit assessment.'); }
   }
   async function markComplete(id) {
     setError('');
     try { await api.put(`/performance/reviews/${id}/complete`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not mark complete.'); }
   }
-  async function addFeedback(id) {
-    if (!note.trim()) return;
-    setError('');
-    try { await api.post(`/performance/reviews/${id}/feedback`, { note }); setNote(''); setNoteFor(null); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not add feedback.'); }
-  }
-  async function saveCompetency(id) {
-    setError('');
-    try { await api.put(`/performance/reviews/${id}/competency`, { notes: competencyDraft }); setCompetencyFor(null); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
-  }
-  async function setPlan(id, plan_type) {
-    setError('');
-    try { await api.put(`/performance/reviews/${id}/plan`, { plan_type }); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
-  }
+
+  if (screen === 'goals') return <GoalsScreen employees={employees} onBack={backToDashboard} />;
+  if (screen === 'appraisal') return <AppraisalScreen reviewId={activeReviewId} onDone={backToDashboard} onBack={backToDashboard} />;
+  if (screen === 'feedback') return <FeedbackScreen reviewId={activeReviewId} onBack={backToDashboard} />;
+  if (screen === 'competency') return <CompetencyScreen reviewId={activeReviewId} onDone={backToDashboard} onBack={backToDashboard} />;
+  if (screen === 'plan') return <PlanScreen reviewId={activeReviewId} onDone={backToDashboard} onBack={backToDashboard} />;
 
   return (
     <div>
@@ -226,71 +206,24 @@ function HRPerformance() {
                         {r.status === 'Completed' ? 'Completed' : (r.self_assessment_status === 'Pending' ? 'Self-Assessment Pending' : 'Manager Assessment Pending')}
                       </span>
                     </div>
-
-                    {editingGoal === r.id ? (
-                      <div className="row" style={{ flexWrap: 'wrap', marginBottom: 4 }}>
-                        <input value={goalDraft.goal_text} onChange={(e) => setGoalDraft({ ...goalDraft, goal_text: e.target.value })} placeholder="Goal" style={{ flex: '2 1 200px' }} />
-                        <input value={goalDraft.kpi_text} onChange={(e) => setGoalDraft({ ...goalDraft, kpi_text: e.target.value })} placeholder="KPI" style={{ flex: '1 1 160px' }} />
-                        <button className="primary" onClick={() => saveGoal(r.id)}>Save</button>
-                        <button onClick={() => setEditingGoal(null)}>Cancel</button>
-                      </div>
-                    ) : (
-                      <div className="feature-meta">
-                        {r.goal_text}{r.kpi_text ? ` · KPI: ${r.kpi_text}` : ''}
-                        <button style={{ marginLeft: 8 }} onClick={() => { setEditingGoal(r.id); setGoalDraft({ goal_text: r.goal_text, kpi_text: r.kpi_text || '' }); }}>Edit goal/KPI</button>
-                      </div>
-                    )}
-
+                    <div className="feature-meta">{r.goal_text}{r.kpi_text ? ` · KPI: ${r.kpi_text}` : ''}</div>
                     <div className="feature-meta">Self-Assessment: {r.self_assessment_status} · Manager Assessment: {r.manager_assessment_status}{r.rating ? ` · Rating: ${r.rating}/5` : ''}</div>
 
-                    {competencyFor === r.id ? (
-                      <div className="row" style={{ marginTop: 4 }}>
-                        <input value={competencyDraft} onChange={(e) => setCompetencyDraft(e.target.value)} placeholder="Competency / skill-gap notes" style={{ flex: 1 }} />
-                        <button className="primary" onClick={() => saveCompetency(r.id)}>Save</button>
-                        <button onClick={() => setCompetencyFor(null)}>Cancel</button>
-                      </div>
-                    ) : (
-                      <div className="feature-meta">Competency notes: {r.competency_notes || '—'} <button onClick={() => { setCompetencyFor(r.id); setCompetencyDraft(r.competency_notes || ''); }}>Edit</button></div>
-                    )}
-
-                    <div className="feature-meta" style={{ marginTop: 4 }}>
-                      Plan: <select value={r.plan_type} onChange={(e) => setPlan(r.id, e.target.value)} style={{ width: 'auto', display: 'inline-block' }}>
-                        <option value="None">None</option>
-                        <option value="Promotion">Promotion</option>
-                        <option value="PIP">PIP</option>
-                      </select>
-                    </div>
-
-                    <div style={{ marginTop: 6 }}>
-                      <div className="feature-meta">360° Feedback ({r.feedback.length})</div>
-                      {r.feedback.map((f) => <div key={f.id} className="feature-meta" style={{ paddingLeft: 8 }}>— {f.note} <em>({f.author_name})</em></div>)}
-                      {noteFor === r.id ? (
-                        <div className="row" style={{ marginTop: 4 }}>
-                          <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add feedback note" style={{ flex: 1 }} />
-                          <button className="primary" onClick={() => addFeedback(r.id)}>Post</button>
-                          <button onClick={() => setNoteFor(null)}>Cancel</button>
-                        </div>
-                      ) : <button style={{ marginTop: 4 }} onClick={() => setNoteFor(r.id)}>+ Add feedback</button>}
-                    </div>
-
                     {r.status !== 'Completed' && (
-                      <div style={{ marginTop: 8 }}>
-                        {ratingFor === r.id ? (
-                          <span className="row" style={{ display: 'inline-flex' }}>
-                            <select value={rating} onChange={(e) => setRating(e.target.value)} style={{ width: 'auto' }}>
-                              {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-                            </select>
-                            <button className="primary" onClick={() => submitManagerAssessment(r.id)}>Save</button>
-                            <button onClick={() => setRatingFor(null)}>Cancel</button>
-                          </span>
-                        ) : (
-                          <button onClick={() => { setRatingFor(r.id); setRating(r.rating || 5); }}>Submit Manager Assessment</button>
-                        )}
-                        <button style={{ marginLeft: 6 }} disabled={!bothSubmitted} onClick={() => markComplete(r.id)} title={!bothSubmitted ? 'Both self- and manager-assessment must be submitted first' : ''}>
+                      <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        <button onClick={() => goToReviewScreen(r.id, 'appraisal')}>Submit Manager Assessment</button>
+                        <button disabled={!bothSubmitted} onClick={() => markComplete(r.id)} title={!bothSubmitted ? 'Both self- and manager-assessment must be submitted first' : ''}>
                           Mark Review Complete
                         </button>
                       </div>
                     )}
+                    <div className="feature-meta" style={{ marginTop: 6 }}>
+                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'feedback'); }}>360° Feedback</a>
+                      {' · '}
+                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'competency'); }}>Competency</a>
+                      {' · '}
+                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'plan'); }}>Plan</a>
+                    </div>
                   </div>
                 );
               })}
@@ -298,16 +231,9 @@ function HRPerformance() {
 
             <div className="card">
               <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">2</span>Key Features</div>
-              <div className="feature-meta" style={{ marginBottom: 8 }}>Click a feature to jump to it.</div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>Each feature opens its own screen.</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>Goal Assignment &amp; Tracking</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>KPI / KRA / OKR Management</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>Performance Reviews &amp; Appraisals</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>Self-Appraisal</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>360° &amp; Continuous Feedback</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>Competency &amp; Skill Gap Assessment</button>
-                <button className="pill" onClick={() => scrollToSection('section-reviews')}>Promotion &amp; Improvement Plans (PIP)</button>
-                <button className="pill" onClick={() => setTab('reports')}>Performance Reports &amp; Analytics</button>
+                {ov?.keyFeatures.map((f) => <button key={f.key} className="pill" onClick={() => f.screen === 'reports' ? setTab('reports') : setScreen(f.screen)}>{f.label}</button>)}
               </div>
             </div>
 
@@ -324,6 +250,248 @@ function HRPerformance() {
             {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// --- Dedicated "Goal Assignment & Tracking" screen: Employee | Goal | Due | Progress. ---
+function GoalsScreen({ employees, onBack }) {
+  const [ov, setOv] = useState(null);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ employee_id: '', employee_name: '', goal_text: '', due_date: '' });
+  const [editingProgress, setEditingProgress] = useState(null);
+  const [progressDraft, setProgressDraft] = useState(0);
+
+  function load() { api.get('/performance/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load goals.')); }
+  useEffect(load, []);
+
+  async function assignGoal(e) {
+    e.preventDefault(); setError('');
+    try { await api.post('/performance/reviews', form); setForm({ employee_id: '', employee_name: '', goal_text: '', due_date: '' }); setShowForm(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not assign goal.'); }
+  }
+  async function saveProgress(id) {
+    setError('');
+    try { await api.put(`/performance/reviews/${id}/progress`, { progress_pct: progressDraft }); setEditingProgress(null); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update progress.'); }
+  }
+
+  return (
+    <div>
+      <h1>Goal Assignment &amp; Tracking</h1>
+      <div className="subtitle">Assign goals and track progress across the team.</div>
+      {error && <div className="banner error">{error}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Performance Management</button>
+
+      <div className="card">
+        {!ov && <div className="empty">Loading…</div>}
+        {ov && (
+          <table>
+            <thead><tr><th>Employee</th><th>Goal</th><th>Due</th><th>Progress</th></tr></thead>
+            <tbody>{ov.reviews.map((r) => (
+              <tr key={r.id}>
+                <td>{r.employee_name}</td>
+                <td>{r.goal_text}</td>
+                <td>{r.due_date || '—'}</td>
+                <td style={{ minWidth: 140 }}>
+                  {editingProgress === r.id ? (
+                    <span className="row" style={{ display: 'inline-flex', alignItems: 'center' }}>
+                      <input type="number" min="0" max="100" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} style={{ width: 60 }} />
+                      <button className="primary" onClick={() => saveProgress(r.id)}>Save</button>
+                      <button onClick={() => setEditingProgress(null)}>Cancel</button>
+                    </span>
+                  ) : (
+                    <span onClick={() => { setEditingProgress(r.id); setProgressDraft(r.progress_pct); }} style={{ cursor: 'pointer' }} title="Click to update">
+                      <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
+                        <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
+                      </div>
+                      <span className="feature-meta">{r.progress_pct}%</span>
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+      </div>
+
+      {showForm && (
+        <div className="card">
+          <form onSubmit={assignGoal} className="row" style={{ flexWrap: 'wrap' }}>
+            <select value={form.employee_id} onChange={(e) => {
+              const emp = employees.find((x) => String(x.id) === e.target.value);
+              setForm({ ...form, employee_id: e.target.value, employee_name: emp?.name || '' });
+            }} required style={{ flex: '1 1 160px' }}>
+              <option value="">Select employee…</option>
+              {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name} ({emp.employee_code})</option>)}
+            </select>
+            <input placeholder="Goal" value={form.goal_text} onChange={(e) => setForm({ ...form, goal_text: e.target.value })} required style={{ flex: '2 1 200px' }} />
+            <input type="date" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} style={{ flex: '1 1 140px' }} />
+            <button className="primary" type="submit">Assign</button>
+          </form>
+        </div>
+      )}
+      <button style={{ background: '#1E8E5A', color: '#fff', borderColor: '#1E8E5A' }} onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Assign New Goal'}</button>
+    </div>
+  );
+}
+
+// --- Dedicated "Performance Reviews & Appraisals — <Name>" screen. ---
+function AppraisalScreen({ reviewId, onDone, onBack }) {
+  const { review, error: loadError } = useReview(reviewId);
+  const [achievements, setAchievements] = useState('');
+  const [development, setDevelopment] = useState('');
+  const [rating, setRating] = useState(5);
+  const [error, setError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (review && !loaded) {
+      setAchievements(review.achievements_text || '');
+      setDevelopment(review.development_areas || '');
+      setRating(review.rating || 5);
+      setLoaded(true);
+    }
+  }, [review, loaded]);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    try {
+      await api.put(`/performance/reviews/${reviewId}/manager-assessment`, { achievements_text: achievements, development_areas: development, rating });
+      onDone();
+    } catch (err) { setError(err.response?.data?.error || 'Could not submit assessment.'); }
+  }
+
+  return (
+    <div>
+      <h1>Performance Reviews &amp; Appraisals{review ? ` — ${review.employee_name}` : ''}</h1>
+      {(error || loadError) && <div className="banner error">{error || loadError}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Performance Management</button>
+      {!review ? <div className="empty">Loading…</div> : (
+        <form onSubmit={submit} className="card" style={{ maxWidth: 520 }}>
+          <label className="field-label">Achievements this cycle</label>
+          <textarea value={achievements} onChange={(e) => setAchievements(e.target.value)} rows={3} style={{ marginBottom: 14, width: '100%' }} />
+          <label className="field-label">Areas for Development</label>
+          <textarea value={development} onChange={(e) => setDevelopment(e.target.value)} rows={3} style={{ marginBottom: 14, width: '100%' }} />
+          <label className="field-label">Rating (1–5)</label>
+          <input type="number" min="1" max="5" value={rating} onChange={(e) => setRating(e.target.value)} style={{ marginBottom: 14, width: 80 }} />
+          <div><button type="submit" className="primary">Submit</button></div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// --- Dedicated "360° & Continuous Feedback — <Name>" screen. ---
+function FeedbackScreen({ reviewId, onBack }) {
+  const { review, error: loadError, reload } = useReview(reviewId);
+  const [note, setNote] = useState('');
+  const [authorType, setAuthorType] = useState('Manager');
+  const [error, setError] = useState('');
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!note.trim()) return;
+    try { await api.post(`/performance/reviews/${reviewId}/feedback`, { note, author_type: authorType }); setNote(''); reload(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add feedback.'); }
+  }
+
+  return (
+    <div>
+      <h1>360° &amp; Continuous Feedback{review ? ` — ${review.employee_name}` : ''}</h1>
+      {(error || loadError) && <div className="banner error">{error || loadError}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Performance Management</button>
+      {!review ? <div className="empty">Loading…</div> : (
+        <div className="card" style={{ maxWidth: 560 }}>
+          {review.feedback.length === 0 && <div className="empty">No feedback yet.</div>}
+          {review.feedback.map((f) => (
+            <div key={f.id} style={{ borderTop: '1px solid #EEF0F3', padding: '8px 0' }}>
+              <div className="row" style={{ justifyContent: 'space-between' }}>
+                <strong>{f.author_name} ({f.author_type})</strong>
+                <span className="feature-meta">{f.created_at.slice(0, 10)}</span>
+              </div>
+              <div className="feature-meta">{f.note}</div>
+            </div>
+          ))}
+          <form onSubmit={submit} className="row" style={{ flexWrap: 'wrap', marginTop: 12 }}>
+            <select value={authorType} onChange={(e) => setAuthorType(e.target.value)} style={{ flex: '1 1 100px' }}>
+              <option value="Manager">Manager</option>
+              <option value="Peer">Peer</option>
+              <option value="Self">Self</option>
+              <option value="Other">Other</option>
+            </select>
+            <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Add feedback…" style={{ flex: '3 1 220px' }} />
+            <button className="primary" type="submit">Submit Feedback</button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Dedicated "Competency & Skill Gap Assessment — <Name>" screen. ---
+function CompetencyScreen({ reviewId, onDone, onBack }) {
+  const { review, error: loadError } = useReview(reviewId);
+  const [notes, setNotes] = useState('');
+  const [error, setError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => { if (review && !loaded) { setNotes(review.competency_notes || ''); setLoaded(true); } }, [review, loaded]);
+
+  async function save(e) {
+    e.preventDefault(); setError('');
+    try { await api.put(`/performance/reviews/${reviewId}/competency`, { notes }); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
+
+  return (
+    <div>
+      <h1>Competency &amp; Skill Gap Assessment{review ? ` — ${review.employee_name}` : ''}</h1>
+      {(error || loadError) && <div className="banner error">{error || loadError}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Performance Management</button>
+      {!review ? <div className="empty">Loading…</div> : (
+        <form onSubmit={save} className="card" style={{ maxWidth: 520 }}>
+          <label className="field-label">Competency / skill-gap notes</label>
+          <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={4} style={{ marginBottom: 14, width: '100%' }} />
+          <button type="submit" className="primary">Save</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// --- Dedicated "Promotion & Improvement Plans (PIP) — <Name>" screen. ---
+function PlanScreen({ reviewId, onDone, onBack }) {
+  const { review, error: loadError } = useReview(reviewId);
+  const [planType, setPlanType] = useState('None');
+  const [error, setError] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => { if (review && !loaded) { setPlanType(review.plan_type || 'None'); setLoaded(true); } }, [review, loaded]);
+
+  async function save(e) {
+    e.preventDefault(); setError('');
+    try { await api.put(`/performance/reviews/${reviewId}/plan`, { plan_type: planType }); onDone(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
+
+  return (
+    <div>
+      <h1>Promotion &amp; Improvement Plans (PIP){review ? ` — ${review.employee_name}` : ''}</h1>
+      {(error || loadError) && <div className="banner error">{error || loadError}</div>}
+      <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Performance Management</button>
+      {!review ? <div className="empty">Loading…</div> : (
+        <form onSubmit={save} className="card" style={{ maxWidth: 420 }}>
+          <label className="field-label">Plan</label>
+          <select value={planType} onChange={(e) => setPlanType(e.target.value)} style={{ marginBottom: 14 }}>
+            <option value="None">None</option>
+            <option value="Promotion">Promotion</option>
+            <option value="PIP">PIP</option>
+          </select>
+          <button type="submit" className="primary">Save</button>
+        </form>
       )}
     </div>
   );

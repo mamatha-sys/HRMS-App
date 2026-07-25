@@ -55,6 +55,9 @@ app.use('/api/learning', learningRoutes);
 app.use('/api/assets', assetsRoutes);
 
 app.use((err, req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'That upload is too large for the server to accept (limit 12 MB per request).' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Internal server error' });
 });

@@ -766,6 +766,12 @@ function migrate() {
   if (!perCols.includes('employee_id')) db.exec('ALTER TABLE performance_reviews ADD COLUMN employee_id INTEGER REFERENCES employees(id)');
   if (!perCols.includes('competency_notes')) db.exec('ALTER TABLE performance_reviews ADD COLUMN competency_notes TEXT');
   if (!perCols.includes('plan_type')) db.exec("ALTER TABLE performance_reviews ADD COLUMN plan_type TEXT NOT NULL DEFAULT 'None' CHECK (plan_type IN ('None','Promotion','PIP'))");
+  // Goal Assignment & Tracking (due date + progress) and the richer Performance Reviews &
+  // Appraisals form (achievements / development areas), each now their own dedicated screen.
+  if (!perCols.includes('due_date')) db.exec('ALTER TABLE performance_reviews ADD COLUMN due_date TEXT');
+  if (!perCols.includes('progress_pct')) db.exec('ALTER TABLE performance_reviews ADD COLUMN progress_pct INTEGER NOT NULL DEFAULT 0');
+  if (!perCols.includes('achievements_text')) db.exec('ALTER TABLE performance_reviews ADD COLUMN achievements_text TEXT');
+  if (!perCols.includes('development_areas')) db.exec('ALTER TABLE performance_reviews ADD COLUMN development_areas TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS performance_feedback (
@@ -776,6 +782,8 @@ function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  const feedbackCols = db.prepare('PRAGMA table_info(performance_feedback)').all().map((c) => c.name);
+  if (!feedbackCols.includes('author_type')) db.exec("ALTER TABLE performance_feedback ADD COLUMN author_type TEXT NOT NULL DEFAULT 'Other' CHECK (author_type IN ('Manager','Peer','Self','Other'))");
 
   // --- Learning Management Key Features: uploaded course materials (PDF/video, stored as
   // base64 like employee documents), a Super-Admin-only download/copy toggle per course, and
@@ -1062,6 +1070,23 @@ function seedModuleData() {
     insRev.run('Ragini', null, 'Ship v2 of the reporting module', 'On-time delivery', 'Submitted', 'Pending', null, 'In Progress');
     insRev.run('Usha', 'Team-A', 'Reduce support ticket backlog by 30%', 'Backlog reduction %', 'Submitted', 'Submitted', 4, 'Completed');
     insRev.run('Vasavi', null, 'Complete QA automation certification', 'Certification completion', 'Pending', 'Pending', null, 'In Progress');
+  }
+  // Backfill Goal Assignment & Tracking demo data (due date / progress) independent of the
+  // block above, so it still lands even on a DB where performance_reviews already existed.
+  if (!db.prepare("SELECT 1 FROM performance_reviews WHERE due_date IS NOT NULL").get()) {
+    const setGoal = db.prepare('UPDATE performance_reviews SET due_date = ?, progress_pct = ? WHERE employee_name = ?');
+    setGoal.run('2026-09-30', 45, 'Ragini');
+    setGoal.run('2026-08-15', 90, 'Usha');
+    setGoal.run('2026-09-30', 15, 'Vasavi');
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM performance_feedback').get().c === 0) {
+    const ragini = db.prepare("SELECT id FROM performance_reviews WHERE employee_name = 'Ragini'").get();
+    if (ragini) {
+      const insFb = db.prepare('INSERT INTO performance_feedback (review_id, author_name, author_type, note, created_at) VALUES (?, ?, ?, ?, ?)');
+      insFb.run(ragini.id, 'Keerthana', 'Manager', 'Strong technical delivery this quarter, great ownership on the reporting module.', '2026-07-02 10:00:00');
+      insFb.run(ragini.id, 'Usha', 'Peer', 'Very responsive in cross-team requests, always helpful.', '2026-06-28 10:00:00');
+      insFb.run(ragini.id, 'Ragini', 'Self', 'Feel confident about delivery pace, want more exposure to architecture decisions.', '2026-06-25 10:00:00');
+    }
   }
 
   if (db.prepare('SELECT COUNT(*) AS c FROM courses').get().c === 0) {

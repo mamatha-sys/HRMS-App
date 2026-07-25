@@ -363,17 +363,14 @@ function NewCourseScreen({ onDone, onCancel, setGlobalError }) {
     e.preventDefault(); setError('');
     if (hasAssessment !== 'Yes') { setError('Selecting "No" is rejected — every course needs at least one assessment or completion criterion.'); return; }
     if (!name.trim()) { setError('Course Name is required'); return; }
+    const oversized = materials.find((m) => m.file && m.file.size > MATERIAL_MAX_BYTES);
+    if (oversized) { setError(`"${oversized.file.name}" is too large (max 8 MB). Create the course first, then add it afterward via "Manage Enrollments" → Materials, or use a smaller file.`); return; }
     setSaving(true);
     try {
       const materialPayload = [];
       for (const m of materials) {
         if (!m.file) continue;
-        const data_url = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = reject;
-          reader.readAsDataURL(m.file);
-        });
+        const data_url = await readFileAsDataUrl(m.file);
         materialPayload.push({ title: m.title || m.file.name, file_type: m.kind, data_url });
       }
       await api.post('/learning/courses', { title: name, mandatory: mandatory === 'Yes', has_assessment: hasAssessment === 'Yes', pass_mark: passMark, materials: materialPayload });
