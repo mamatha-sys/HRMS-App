@@ -1160,6 +1160,28 @@ function seedModuleData() {
       insQ.run(excelCourse.id, 'Which chart type is best suited for showing a trend over time?', 'Pie Chart', 'Line Chart', 'Scatter Plot', 'Doughnut Chart', 'B', 3);
     }
   }
+  // Same fix as Advanced Excel above, for the two other courses that had a pass_mark but no
+  // question bank ("data" and "copmputer" — created later via the Create Course screen).
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions WHERE course_id = (SELECT id FROM courses WHERE title = ?)').get('data').c === 0) {
+    const dataCourse = db.prepare("SELECT id FROM courses WHERE title = 'data'").get();
+    if (dataCourse) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(dataCourse.id, 'What is the primary purpose of data validation in a spreadsheet or database?', 'To format cells', 'To restrict the type of data a user can enter', 'To sort data', 'To delete duplicate data', 'B', 0);
+      insQ.run(dataCourse.id, 'Which of the following best describes structured data?', 'Data with no defined format', 'Data organized in a fixed field format, like a table', 'Free-text documents', 'Images and videos', 'B', 1);
+      insQ.run(dataCourse.id, 'What does "GIGO" stand for in data processing?', 'Get In, Get Out', 'Garbage In, Garbage Out', 'Group In, Group Out', 'Generate Input, Generate Output', 'B', 2);
+      insQ.run(dataCourse.id, 'Which practice best helps protect data privacy when handling employee records?', 'Sharing data openly with everyone', 'Restricting access on a need-to-know basis', 'Storing data in plain text', 'Ignoring access logs', 'B', 3);
+    }
+  }
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions WHERE course_id = (SELECT id FROM courses WHERE title = ?)').get('copmputer').c === 0) {
+    const compCourse = db.prepare("SELECT id FROM courses WHERE title = 'copmputer'").get();
+    if (compCourse) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(compCourse.id, 'What does "CPU" stand for?', 'Central Processing Unit', 'Computer Personal Unit', 'Central Program Utility', 'Control Processing Unit', 'A', 0);
+      insQ.run(compCourse.id, 'Which of these is an example of an operating system?', 'Microsoft Word', 'Windows', 'Google Chrome', 'Adobe Photoshop', 'B', 1);
+      insQ.run(compCourse.id, 'What is the main function of RAM in a computer?', 'Permanent storage', 'Temporary/working memory', 'Power supply', 'Display output', 'B', 2);
+      insQ.run(compCourse.id, 'Which keyboard shortcut is commonly used to save a file?', 'Ctrl+P', 'Ctrl+S', 'Ctrl+C', 'Ctrl+Z', 'B', 3);
+    }
+  }
 
   // Independent of the courses-seed block (which only runs once, ever) so this backfills
   // demo Skill Development & Competency Mapping / Progress-Attendance-Feedback data even on
