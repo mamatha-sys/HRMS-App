@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -59,6 +60,7 @@ function decide(finalStatus) {
 
     if (result.finalized) {
       db.prepare("UPDATE expense_claims SET status = ?, decided_at = datetime('now'), current_stage_role_id = NULL WHERE id = ?").run(finalStatus, claim.id);
+      notifyEmployee(claim.employee_id, `Expense claim ${finalStatus.toLowerCase()}`, `Your expense claim of ₹${claim.amount} (${claim.category}) was ${finalStatus.toLowerCase()}.`);
     } else {
       db.prepare('UPDATE expense_claims SET current_stage_role_id = ? WHERE id = ?').run(result.stageRoleId, claim.id);
     }
@@ -75,6 +77,7 @@ router.put('/:id/reimburse', (req, res) => {
   if (!claim) return res.status(404).json({ error: 'Claim not found' });
   if (claim.status !== 'Approved') return res.status(400).json({ error: 'Only an approved claim can be marked reimbursed.' });
   db.prepare("UPDATE expense_claims SET status = 'Reimbursed', reimbursed_at = datetime('now') WHERE id = ?").run(claim.id);
+  notifyEmployee(claim.employee_id, 'Expense claim reimbursed', `Your expense claim of ₹${claim.amount} (${claim.category}) has been reimbursed.`);
   res.json({ claim: withName([db.prepare('SELECT * FROM expense_claims WHERE id = ?').get(claim.id)])[0] });
 });
 

@@ -135,6 +135,14 @@ db.exec(`
     read_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (notification_id, user_id)
   );
+  `);
+  // Employee self-service must only ever see their own notifications, not the whole
+  // role-broadcast pool — add a nullable per-employee target alongside the existing
+  // role-broadcast target_role, so a notification can be aimed at one specific person
+  // (e.g. "Your leave request was approved") as well as/instead of a whole role.
+  const notificationCols = db.prepare('PRAGMA table_info(notifications)').all().map((c) => c.name);
+  if (!notificationCols.includes('employee_id')) db.exec('ALTER TABLE notifications ADD COLUMN employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE');
+  db.exec(`
 
   CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

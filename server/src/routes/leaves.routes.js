@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -326,8 +327,10 @@ function decide(finalStatus) {
           logBalanceHistory(leave.employee_id, leave.type, -leave.days, newBal, `Leave approved (${leave.from_date} to ${leave.to_date})`, req.user.sub);
         }
         db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL WHERE id = ?').run('Approved', req.user.sub, leave.id);
+        notifyEmployee(leave.employee_id, 'Leave approved', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was approved.`);
       } else {
         db.prepare('UPDATE leaves SET status = ?, decided_by = ? WHERE id = ?').run('Rejected', req.user.sub, leave.id);
+        notifyEmployee(leave.employee_id, 'Leave rejected', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was rejected.`);
       }
     } else {
       db.prepare('UPDATE leaves SET current_stage_role_id = ? WHERE id = ?').run(result.stageRoleId, leave.id);

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { notifyAll } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -22,6 +23,8 @@ router.post('/', (req, res) => {
   const cat = ['General', 'Policy', 'Event', 'Holiday'].includes(category) ? category : 'General';
   const info = db.prepare('INSERT INTO announcements (title, body, category, posted_by, pinned) VALUES (?, ?, ?, ?, ?)')
     .run(title.trim(), body.trim(), cat, req.user.name || 'HR', pinned ? 1 : 0);
+  // Meeting/company-event announcements also surface as a real notification, not just on the notice board.
+  if (cat === 'Event') notifyAll(`Event: ${title.trim()}`, body.trim());
   res.status(201).json({ announcement: db.prepare('SELECT * FROM announcements WHERE id = ?').get(info.lastInsertRowid) });
 });
 

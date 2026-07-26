@@ -6,13 +6,15 @@ const router = Router();
 router.use(requireAuth);
 
 router.get('/', (req, res) => {
+  const employee = db.prepare('SELECT id FROM employees WHERE user_id = ?').get(req.user.sub);
   const rows = db.prepare(`
     SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.user_id = @uid) AS is_read
     FROM notifications n
-    WHERE n.target_role = 'all' OR n.target_role = @role
+    WHERE n.employee_id = @empId
+       OR (n.employee_id IS NULL AND (n.target_role = 'all' OR n.target_role = @role))
     ORDER BY n.created_at DESC
-    LIMIT 20
-  `).all({ uid: req.user.sub, role: req.user.role });
+    LIMIT 30
+  `).all({ uid: req.user.sub, role: req.user.role, empId: employee ? employee.id : null });
   res.json({ notifications: rows.map((r) => ({ ...r, is_read: !!r.is_read })) });
 });
 

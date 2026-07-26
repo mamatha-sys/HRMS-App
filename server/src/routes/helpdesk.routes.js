@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -121,6 +122,9 @@ router.put('/:id', (req, res) => {
   const resolvedAt = (validStatus === 'Resolved' || validStatus === 'Closed') && !ticket.resolved_at ? new Date().toISOString().slice(0, 19).replace('T', ' ') : ticket.resolved_at;
   db.prepare('UPDATE tickets SET status = ?, assigned_to_employee_id = ?, resolved_at = ? WHERE id = ?')
     .run(validStatus, assigned_to_employee_id === undefined ? ticket.assigned_to_employee_id : (assigned_to_employee_id || null), resolvedAt, req.params.id);
+  if (validStatus === 'Resolved' && ticket.status !== 'Resolved') {
+    notifyEmployee(ticket.employee_id, 'Ticket resolved', `Your ticket "${ticket.subject}" was marked resolved. Please confirm or reopen it.`);
+  }
   res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id), { includeInternal: true }) });
 });
 
