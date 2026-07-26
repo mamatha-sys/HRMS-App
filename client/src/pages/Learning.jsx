@@ -24,7 +24,7 @@ function ProtectedMaterial({ material }) {
       {material.file_type === 'video' ? (
         <video src={material.data_url} controls controlsList="nodownload noremoteplayback" disablePictureInPicture style={{ width: '100%', maxWidth: 480, borderRadius: 6 }} />
       ) : material.file_type === 'pdf' ? (
-        <iframe src={material.data_url} title={material.title} style={{ width: '100%', height: 380, border: '1px solid #E2E5EA', borderRadius: 6 }} />
+        <iframe src={material.data_url + '#toolbar=0'} title={material.title} style={{ width: '100%', height: 380, border: '1px solid #E2E5EA', borderRadius: 6 }} />
       ) : (
         <a href={material.data_url} target="_blank" rel="noreferrer">{material.title}</a>
       )}
@@ -626,7 +626,7 @@ function CourseDetailScreen({ courseId, onManageAssessment, onBack }) {
               <div key={m.id} className="rec-row">
                 <span>{m.file_type === 'video' ? '🎬' : '📄'} {m.title}</span>
                 <span className="row" style={{ gap: 6 }}>
-                  <a className="pill" href={m.data_url} target="_blank" rel="noreferrer">{m.file_type === 'video' ? 'Watch Video' : 'View Document'}</a>
+                  <a className="pill" href={m.file_type === 'pdf' ? m.data_url + '#toolbar=0' : m.data_url} target="_blank" rel="noreferrer">{m.file_type === 'video' ? 'Watch Video' : 'View Document'}</a>
                   <button onClick={() => deleteMaterial(m.id)}>Remove</button>
                 </span>
               </div>

@@ -1272,6 +1272,19 @@ function seedModuleData() {
     }
   }
 
+  // Another real course the user created live via Create Course, with a pass_mark but no
+  // questions yet — same gap as every prior course, fixed the same way.
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions WHERE course_id = (SELECT id FROM courses WHERE title = ?)').get('Python Full stack').c === 0) {
+    const pyCourse = db.prepare("SELECT id FROM courses WHERE title = 'Python Full stack'").get();
+    if (pyCourse) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(pyCourse.id, 'Which keyword is used to define a function in Python?', 'func', 'def', 'function', 'lambda', 'B', 0);
+      insQ.run(pyCourse.id, 'Which of these is a commonly used Python web framework for building full-stack applications?', 'Django', 'jQuery', 'Bootstrap', 'Photoshop', 'A', 1);
+      insQ.run(pyCourse.id, 'In a typical full-stack app, what is the main role of the frontend?', 'Storing data permanently in the database', 'Rendering the user interface and handling user interaction', 'Managing server infrastructure', 'Compiling the database schema', 'B', 2);
+      insQ.run(pyCourse.id, 'Which HTTP method is typically used to retrieve data from a REST API without changing anything on the server?', 'POST', 'DELETE', 'GET', 'PUT', 'C', 3);
+    }
+  }
+
   // Independent of the courses-seed block (which only runs once, ever) so this backfills
   // demo Skill Development & Competency Mapping / Progress-Attendance-Feedback data even on
   // a DB where courses already existed. Matches the "Skill Development & Competency Mapping —
