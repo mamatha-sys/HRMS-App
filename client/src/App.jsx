@@ -26,6 +26,11 @@ import Expenses from './pages/Expenses.jsx';
 import Surveys from './pages/Surveys.jsx';
 import Documents from './pages/Documents.jsx';
 import Integrations from './pages/Integrations.jsx';
+import ShiftRoster from './pages/ShiftRoster.jsx';
+import Recognition from './pages/Recognition.jsx';
+import Projects from './pages/Projects.jsx';
+import Timesheet from './pages/Timesheet.jsx';
+import Disciplinary from './pages/Disciplinary.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -55,6 +60,11 @@ export default function App() {
         <Route path="/expenses" element={<Expenses />} />
         <Route path="/surveys" element={<Surveys />} />
         <Route path="/documents" element={<Documents />} />
+        <Route path="/shift-roster" element={<ShiftRoster />} />
+        <Route path="/recognition" element={<Recognition />} />
+        <Route path="/projects" element={<Projects />} />
+        <Route path="/timesheet" element={<Timesheet />} />
+        <Route path="/disciplinary" element={<Disciplinary />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
         <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />

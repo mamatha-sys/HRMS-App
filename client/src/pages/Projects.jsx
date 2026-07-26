@@ -1,0 +1,198 @@
+import { useEffect, useState } from 'react';
+import api from '../api.js';
+import { useAuth } from '../context/AuthContext.jsx';
+
+const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+const STATUS_CLASS = { Active: 'present', 'On Hold': 'pending', Completed: 'locked' };
+
+export default function Projects() {
+  const { user } = useAuth();
+  const isHR = HR_ROLES.includes(user?.role);
+  const [screen, setScreen] = useState('list');
+  const [selectedId, setSelectedId] = useState(null);
+
+  if (screen === 'detail') return <ProjectDetail id={selectedId} isHR={isHR} onBack={() => setScreen('list')} />;
+  if (screen === 'resources') return <ResourceOverview onBack={() => setScreen('list')} />;
+
+  return isHR
+    ? <ProjectList onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />
+    : <MyProjects />;
+}
+
+function ProjectList({ onOpen, onResources }) {
+  const [projects, setProjects] = useState([]);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: '', description: '', start_date: '' });
+
+  function load() { api.get('/projects').then((r) => setProjects(r.data.projects)).catch(() => setError('Could not load projects.')); }
+  useEffect(load, []);
+
+  async function add(e) {
+    e.preventDefault(); setError('');
+    if (!form.name.trim()) { setError('Project name is required.'); return; }
+    try { await api.post('/projects', form); setForm({ name: '', description: '', start_date: '' }); setShowForm(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add project.'); }
+  }
+
+  return (
+    <div>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <div>
+          <h1>Project &amp; Resource Management</h1>
+          <div className="subtitle">Track projects and who's allocated to them.</div>
+        </div>
+        <button onClick={onResources}>Resource Overview</button>
+      </div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        {showForm ? (
+          <form onSubmit={add} className="row" style={{ flexWrap: 'wrap' }}>
+            <input placeholder="Project name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required style={{ flex: '1 1 160px' }} />
+            <input placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ flex: '2 1 200px' }} />
+            <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} />
+            <button className="primary" type="submit">+ Add Project</button>
+            <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+          </form>
+        ) : <button className="primary" onClick={() => setShowForm(true)}>+ Add Project</button>}
+      </div>
+
+      <div className="card">
+        {projects.length === 0 && <div className="empty">No projects yet.</div>}
+        {projects.map((p) => (
+          <div key={p.id} className="rec-row" onClick={() => onOpen(p.id)} style={{ cursor: 'pointer' }}>
+            <span><strong>{p.name}</strong> <span className="feature-meta">{p.assignedCount} assigned</span>
+              {p.description && <div className="feature-meta">{p.description}</div>}
+            </span>
+            <span className={'status-tag ' + (STATUS_CLASS[p.status] || 'info')}>{p.status}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProjectDetail({ id, isHR, onBack }) {
+  const [project, setProject] = useState(null);
+  const [assignments, setAssignments] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [error, setError] = useState('');
+  const [form, setForm] = useState({ employee_id: '', allocation_pct: 100, role_on_project: '' });
+
+  function load() {
+    api.get(`/projects/${id}`).then((r) => { setProject(r.data.project); setAssignments(r.data.assignments); }).catch(() => setError('Could not load project.'));
+    if (isHR) api.get('/employees').then((r) => setEmployees(r.data.employees || r.data)).catch(() => {});
+  }
+  useEffect(load, [id]);
+
+  async function assign(e) {
+    e.preventDefault(); setError('');
+    if (!form.employee_id) { setError('Choose an employee.'); return; }
+    try { await api.post(`/projects/${id}/assign`, form); setForm({ employee_id: '', allocation_pct: 100, role_on_project: '' }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not assign.'); }
+  }
+  async function unassign(employeeId) {
+    try { await api.delete(`/projects/${id}/assign/${employeeId}`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not remove.'); }
+  }
+  async function setStatus(status) {
+    try { await api.put(`/projects/${id}`, { status }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
+
+  if (!project) return <div><button onClick={onBack}>← Back to Projects</button></div>;
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Projects</button>
+      <h1>{project.name}</h1>
+      <div className="subtitle">{project.description}</div>
+      {error && <div className="banner error">{error}</div>}
+
+      {isHR && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="row" style={{ gap: 6 }}>
+            {['Active', 'On Hold', 'Completed'].map((s) => (
+              <button key={s} className={project.status === s ? 'primary' : ''} onClick={() => setStatus(s)}>{s}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="feature-name" style={{ marginBottom: 8 }}>Assigned Employees</div>
+        {assignments.length === 0 && <div className="empty">No one assigned yet.</div>}
+        {assignments.map((a) => (
+          <div key={a.employee_id} className="rec-row">
+            <span>{a.name} <span className="feature-meta">({a.employee_code}){a.role_on_project ? ` · ${a.role_on_project}` : ''}</span></span>
+            <span className="row" style={{ gap: 6 }}>
+              <span className="status-tag info">{a.allocation_pct}%</span>
+              {isHR && <button onClick={() => unassign(a.employee_id)}>Remove</button>}
+            </span>
+          </div>
+        ))}
+        {isHR && (
+          <form onSubmit={assign} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
+            <select value={form.employee_id} onChange={(e) => setForm({ ...form, employee_id: e.target.value })} required style={{ flex: '1 1 180px' }}>
+              <option value="">Select employee…</option>
+              {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+            </select>
+            <input type="number" min="1" max="100" placeholder="Allocation %" value={form.allocation_pct} onChange={(e) => setForm({ ...form, allocation_pct: e.target.value })} style={{ width: 110 }} />
+            <input placeholder="Role on project" value={form.role_on_project} onChange={(e) => setForm({ ...form, role_on_project: e.target.value })} style={{ flex: '1 1 140px' }} />
+            <button className="primary" type="submit">Assign</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ResourceOverview({ onBack }) {
+  const [rows, setRows] = useState([]);
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/projects/reports/resource-overview').then((r) => setRows(r.data.rows)).catch(() => setError('Could not load resource overview.')); }, []);
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Projects</button>
+      <h1>Resource Overview</h1>
+      <div className="subtitle">Total allocation % across every Active project — anyone over 100% is double-booked.</div>
+      {error && <div className="banner error">{error}</div>}
+      <div className="card">
+        {rows.length === 0 && <div className="empty">No active project assignments.</div>}
+        {rows.map((r) => (
+          <div key={r.id} className="rec-row">
+            <span>{r.name} <span className="feature-meta">({r.employee_code} · {r.department}) · {r.project_count} project{r.project_count === 1 ? '' : 's'}</span></span>
+            <span className={'status-tag ' + (r.overAllocated ? 'absent' : 'present')}>{r.total_allocation_pct}%{r.overAllocated ? ' — over-allocated' : ''}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MyProjects() {
+  const [assignments, setAssignments] = useState([]);
+  const [error, setError] = useState('');
+  useEffect(() => { api.get('/projects/mine/list').then((r) => setAssignments(r.data.assignments)).catch(() => setError('Could not load your projects.')); }, []);
+
+  return (
+    <div>
+      <h1>My Projects</h1>
+      <div className="subtitle">Projects you're assigned to.</div>
+      {error && <div className="banner error">{error}</div>}
+      <div className="card">
+        {assignments.length === 0 && <div className="empty">You're not assigned to any project yet.</div>}
+        {assignments.map((a) => (
+          <div key={a.id} className="rec-row">
+            <span><strong>{a.project_name}</strong>{a.role_on_project ? ` — ${a.role_on_project}` : ''}</span>
+            <span className="row" style={{ gap: 6 }}>
+              <span className="status-tag info">{a.allocation_pct}%</span>
+              <span className={'status-tag ' + (STATUS_CLASS[a.project_status] || 'info')}>{a.project_status}</span>
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

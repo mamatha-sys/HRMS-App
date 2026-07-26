@@ -52,6 +52,21 @@ export default function Sidebar() {
       <NavLink to="/documents" className={item}>
         <span className="dot" />Document Management
       </NavLink>
+      <NavLink to="/shift-roster" className={item}>
+        <span className="dot" />Shift &amp; Roster
+      </NavLink>
+      <NavLink to="/recognition" className={item}>
+        <span className="dot" />Rewards &amp; Recognition
+      </NavLink>
+      <NavLink to="/projects" className={item}>
+        <span className="dot" />Project &amp; Resource Management
+      </NavLink>
+      <NavLink to="/timesheet" className={item}>
+        <span className="dot" />Timesheet
+      </NavLink>
+      <NavLink to="/disciplinary" className={item}>
+        <span className="dot" />Disciplinary Action Tracking
+      </NavLink>
 
       {user?.role === 'super_admin' && (
         <>

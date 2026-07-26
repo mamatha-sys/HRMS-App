@@ -1160,6 +1160,115 @@ function migrate() {
   // been pushed as, so re-saving a session never creates a duplicate calendar entry.
   const trainingSessionCols = db.prepare('PRAGMA table_info(training_sessions)').all().map((c) => c.name);
   if (!trainingSessionCols.includes('calendar_event_id')) db.exec('ALTER TABLE training_sessions ADD COLUMN calendar_event_id TEXT');
+
+  // --- Shift & Roster: shift patterns, per-day assignments, and swap requests. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shifts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS roster_assignments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(employee_id, date)
+    );
+
+    CREATE TABLE IF NOT EXISTS shift_swap_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      requester_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      target_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Rewards & Recognition: peer/manager nominations with a points value per award type. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS recognitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      from_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      award_type TEXT NOT NULL CHECK (award_type IN ('Employee of the Month','Spot Award','Team Player','Innovation Award','Above & Beyond')),
+      message TEXT NOT NULL,
+      points INTEGER NOT NULL DEFAULT 10,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Project & Resource Management: projects + per-employee allocation %, so over/under
+  // allocation can be flagged across active projects. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','On Hold','Completed')),
+      start_date TEXT,
+      end_date TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS project_assignments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      allocation_pct INTEGER NOT NULL DEFAULT 100 CHECK (allocation_pct > 0 AND allocation_pct <= 100),
+      role_on_project TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_id, employee_id)
+    );
+  `);
+
+  // --- Timesheet: daily hours logged against a project, HR-approved. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS timesheet_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      date TEXT NOT NULL,
+      task_description TEXT,
+      hours REAL NOT NULL CHECK (hours > 0 AND hours <= 24),
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Disciplinary Action Tracking: HR-only case log against an employee, with a timeline
+  // of notes. An employee may see only their own cases (never another's), matching the
+  // PIP-flag privacy pattern already used in Performance Management. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS disciplinary_cases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      category TEXT NOT NULL CHECK (category IN ('Warning','Suspension','Termination','Other')),
+      description TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','Resolved')),
+      raised_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      resolution_notes TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS disciplinary_case_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id INTEGER NOT NULL REFERENCES disciplinary_cases(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      note TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 }
 
 // One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a
@@ -1715,6 +1824,49 @@ function seedModuleData() {
     const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
     if (arjun) db.prepare('INSERT INTO document_acknowledgments (document_id, employee_id) VALUES (?, ?)').run(docId, arjun.id);
   }
+
+  // --- Shift & Roster demo data: 3 standard shifts + a week of assignments for real employees. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM shifts').get().c === 0) {
+    const insShift = db.prepare('INSERT INTO shifts (name, start_time, end_time) VALUES (?, ?, ?)');
+    const morning = insShift.run('Morning', '09:00', '18:00').lastInsertRowid;
+    insShift.run('Evening', '14:00', '23:00');
+    insShift.run('Night', '22:00', '07:00');
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    const priya = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-001'").get();
+    const insRoster = db.prepare('INSERT INTO roster_assignments (employee_id, shift_id, date) VALUES (?, ?, ?)');
+    if (arjun) insRoster.run(arjun.id, morning, '2026-07-27');
+    if (priya) insRoster.run(priya.id, morning, '2026-07-27');
+  }
+
+  // --- Rewards & Recognition demo data. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM recognitions').get().c === 0) {
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    const priya = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-001'").get();
+    if (arjun && priya) {
+      db.prepare('INSERT INTO recognitions (from_employee_id, to_employee_id, award_type, message, points, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(priya.id, arjun.id, 'Spot Award', 'Jumped in over the weekend to fix the client-facing reporting bug before Monday.', 15, '2026-07-20 09:00:00');
+    }
+  }
+
+  // --- Project & Resource Management demo data. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM projects').get().c === 0) {
+    const projId = db.prepare("INSERT INTO projects (name, description, start_date) VALUES ('Client Reporting Revamp', 'Rebuild the client-facing analytics dashboard.', '2026-07-01')").run().lastInsertRowid;
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    if (arjun) db.prepare('INSERT INTO project_assignments (project_id, employee_id, allocation_pct, role_on_project) VALUES (?, ?, ?, ?)').run(projId, arjun.id, 60, 'Developer');
+  }
+
+  // --- Timesheet demo data (needs the project seeded just above). ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM timesheet_entries').get().c === 0) {
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    const proj = db.prepare('SELECT id FROM projects LIMIT 1').get();
+    if (arjun && proj) {
+      db.prepare("INSERT INTO timesheet_entries (employee_id, project_id, date, task_description, hours, status) VALUES (?, ?, '2026-07-24', 'Built the new chart export endpoint', 6, 'Approved')").run(arjun.id, proj.id);
+      db.prepare("INSERT INTO timesheet_entries (employee_id, project_id, date, task_description, hours, status) VALUES (?, ?, '2026-07-25', 'Code review + bug fixes', 5, 'Pending')").run(arjun.id, proj.id);
+    }
+  }
+
+  // --- Disciplinary Action Tracking: no demo case seeded on purpose — this is sensitive,
+  // real HR data and should only ever contain genuine cases HR raises themselves. ---
 }
 
 export const ONBOARDING_TASK_DEFAULTS = [
