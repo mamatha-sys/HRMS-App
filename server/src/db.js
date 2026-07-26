@@ -1243,6 +1243,35 @@ function seedModuleData() {
     }
   }
 
+  // "Leadership Fundamentals" was seeded long before the "every course needs an assessment"
+  // rule existed (pass_mark null, zero questions). Give it a real bank + pass mark so its
+  // Take Assessment button actually works like every other course.
+  if (db.prepare('SELECT COUNT(*) AS c FROM course_questions WHERE course_id = (SELECT id FROM courses WHERE title = ?)').get('Leadership Fundamentals').c === 0) {
+    const leadership = db.prepare("SELECT id FROM courses WHERE title = 'Leadership Fundamentals'").get();
+    if (leadership) {
+      db.prepare('UPDATE courses SET pass_mark = 70 WHERE id = ?').run(leadership.id);
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(leadership.id, 'Which leadership style involves setting a high standard and expecting the team to keep pace with the leader?', 'Democratic', 'Pacesetting', 'Laissez-faire', 'Coaching', 'B', 0);
+      insQ.run(leadership.id, 'What is the primary goal of giving constructive feedback?', 'To criticize the person', "To help someone improve specific behavior or performance", 'To assign blame', 'To avoid conflict entirely', 'B', 1);
+      insQ.run(leadership.id, 'Which of these best describes emotional intelligence in leadership?', 'Suppressing all emotion at work', "Recognizing and managing your own and others' emotions effectively", 'Only focusing on your own goals', 'Ignoring team morale', 'B', 2);
+      insQ.run(leadership.id, 'What is a key benefit of delegating tasks effectively?', 'It reduces trust in the team', "It frees the leader's time and develops team members' skills", 'It always slows down projects', "It removes the leader's accountability", 'B', 3);
+    }
+  }
+
+  // The real user created "prompt engineer" live via Create Course and added one question of
+  // their own. Backfill 3 more so it has a proper bank, guarded by a specific question's text
+  // (not a bare count) since the user may keep adding their own alongside these.
+  {
+    const promptCourse = db.prepare("SELECT id FROM courses WHERE title = 'prompt engineer'").get();
+    const marker = 'Which of these is a best practice when writing a prompt for an LLM?';
+    if (promptCourse && !db.prepare('SELECT 1 FROM course_questions WHERE course_id = ? AND question_text = ?').get(promptCourse.id, marker)) {
+      const insQ = db.prepare('INSERT INTO course_questions (course_id, question_text, option_a, option_b, option_c, option_d, correct_option, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+      insQ.run(promptCourse.id, marker, 'Being as vague as possible', 'Giving clear context, instructions and examples', 'Never specifying a format', 'Avoiding any constraints', 'B', 1);
+      insQ.run(promptCourse.id, 'What is "few-shot prompting"?', 'Asking a very short question', 'Providing a few examples of the desired input/output in the prompt', 'Limiting the model to a few words', 'Using multiple different models', 'B', 2);
+      insQ.run(promptCourse.id, 'Why is it useful to ask an LLM to "think step by step"?', 'It makes the response shorter', 'It encourages more structured, accurate reasoning before the final answer', 'It has no effect', 'It reduces token usage', 'B', 3);
+    }
+  }
+
   // Independent of the courses-seed block (which only runs once, ever) so this backfills
   // demo Skill Development & Competency Mapping / Progress-Attendance-Feedback data even on
   // a DB where courses already existed. Matches the "Skill Development & Competency Mapping —
