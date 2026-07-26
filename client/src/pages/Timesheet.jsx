@@ -162,7 +162,7 @@ function MyTasksSection({ isHR }) {
                 <tr key={t.id} style={{ borderBottom: '1px solid #EEF0F3' }}>
                   <td style={{ padding: '6px 8px' }}>
                     <strong>{t.task_name}</strong>
-                    {t.project_name && <div className="feature-meta">{t.project_name}</div>}
+                    {t.department && <div className="feature-meta">{t.department}</div>}
                     {t.created_by_name && <div className="feature-meta">Assigned by {t.created_by_name}</div>}
                     {t.is_dependent && t.depends_on_name && <div className="feature-meta">Depends on: {t.depends_on_name}</div>}
                   </td>
@@ -191,11 +191,11 @@ function MyTasksSection({ isHR }) {
 }
 
 function NewTaskModal({ isHR, onClose, onCreated }) {
-  const [options, setOptions] = useState({ projects: [], statuses: [], employees: [] });
+  const [options, setOptions] = useState({ departments: [], statuses: [], employees: [] });
   const [existingTasks, setExistingTasks] = useState([]);
   const [error, setError] = useState('');
   const [form, setForm] = useState({
-    project_id: '', task_name: '', description: '', sub_task_name: '',
+    department: '', task_name: '', description: '', sub_task_name: '',
     status: '', start_date: today(), end_date: '', is_dependent: false, depends_on_task_id: '',
     assigned_to_employee_id: ''
   });
@@ -207,7 +207,7 @@ function NewTaskModal({ isHR, onClose, onCreated }) {
 
   async function submit(e) {
     e.preventDefault(); setError('');
-    if (!form.project_id) { setError('Select a project.'); return; }
+    if (!form.department) { setError('Select a department.'); return; }
     if (!form.task_name.trim()) { setError('Task name is required.'); return; }
     if (!form.status) { setError('Select a status.'); return; }
     if (!form.start_date) { setError('Task start date is required.'); return; }
@@ -228,10 +228,10 @@ function NewTaskModal({ isHR, onClose, onCreated }) {
         <form onSubmit={submit}>
           <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
             <div style={{ flex: '1 1 260px' }}>
-              <label className="field-label">Select Project *</label>
-              <select value={form.project_id} onChange={(e) => setForm({ ...form, project_id: e.target.value })} required>
-                <option value="">-- Select Project --</option>
-                {options.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              <label className="field-label">Select Department *</label>
+              <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} required>
+                <option value="">-- Select Department --</option>
+                {options.departments.map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
             </div>
             <div style={{ flex: '1 1 260px' }}>

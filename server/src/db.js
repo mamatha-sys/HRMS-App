@@ -1275,6 +1275,10 @@ function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  // My Tasks is now scoped by department rather than project — project_id is left in place
+  // (never destructively dropped) but unused by the create-task form going forward.
+  const projectTaskCols = db.prepare('PRAGMA table_info(project_tasks)').all().map((c) => c.name);
+  if (!projectTaskCols.includes('department')) db.exec('ALTER TABLE project_tasks ADD COLUMN department TEXT');
 
   // --- Disciplinary Action Tracking: HR-only case log against an employee, with a timeline
   // of notes. An employee may see only their own cases (never another's), matching the
