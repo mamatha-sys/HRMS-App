@@ -831,6 +831,21 @@ function migrate() {
       decided_at TEXT
     );
   `);
+  migrateAssetRequestsTable();
+
+  // --- Asset Audit: a full-sweep audit run (checks every active, non-disposed asset at
+  // once and records a summary), matching the "Asset Audit" Key Feature's "4/4 accounted
+  // for, 0 discrepancies" prototype, alongside the existing per-asset manual audit log.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS asset_audits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      total INTEGER NOT NULL,
+      accounted_for INTEGER NOT NULL,
+      discrepancies INTEGER NOT NULL DEFAULT 0,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
   // --- Learning "Assessments & Assignments": a real MCQ question bank per course, so
   // employees get a scored quiz (shuffled per attempt) instead of a manually-entered score.
@@ -959,6 +974,42 @@ function migrateAssetsTable() {
     db.prepare('SELECT id FROM assets ORDER BY id').all().forEach((r) => {
       db.prepare('UPDATE assets SET asset_tag = ? WHERE id = ?').run('AST-' + String(r.id).padStart(4, '0'), r.id);
     });
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// One-time rebuild: asset_requests originally required an asset_id (every request had to be
+// against an asset the employee already held). The "Request Asset" Quick Action needs a
+// request type with no asset yet — a brand-new asset ask (category + urgency) reviewed via
+// Asset Approval — so asset_id becomes nullable and category/urgency columns are added.
+function migrateAssetRequestsTable() {
+  const cols = db.prepare('PRAGMA table_info(asset_requests)').all().map((c) => c.name);
+  if (cols.includes('urgency')) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE asset_requests_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        type TEXT NOT NULL CHECK (type IN ('Return','Damage','Regularization','New Asset')),
+        category TEXT,
+        urgency TEXT NOT NULL DEFAULT 'Medium' CHECK (urgency IN ('Low','Medium','High')),
+        detail TEXT,
+        status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        decided_at TEXT
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO asset_requests_new (id, asset_id, employee_id, type, detail, status, created_at, decided_at)
+      VALUES (@id, @asset_id, @employee_id, @type, @detail, @status, @created_at, @decided_at)
+    `);
+    db.prepare('SELECT * FROM asset_requests').all().forEach((r) => insert.run(r));
+    db.exec('DROP TABLE asset_requests');
+    db.exec('ALTER TABLE asset_requests_new RENAME TO asset_requests');
   });
   rebuild();
   db.pragma('foreign_keys = ON');
