@@ -925,7 +925,26 @@ function migrate() {
       comment TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS kb_articles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'General',
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS ticket_routing (
+      category TEXT PRIMARY KEY,
+      assigned_to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE
+    );
   `);
+  migrateTicketsTable();
+  const ticketCommentCols = db.prepare('PRAGMA table_info(ticket_comments)').all().map((c) => c.name);
+  if (!ticketCommentCols.includes('internal')) db.exec('ALTER TABLE ticket_comments ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
+  if (!ticketCommentCols.includes('attachment_data_url')) db.exec('ALTER TABLE ticket_comments ADD COLUMN attachment_data_url TEXT');
+  if (!ticketCommentCols.includes('attachment_name')) db.exec('ALTER TABLE ticket_comments ADD COLUMN attachment_name TEXT');
 
   // --- Announcements / Company Notice Board: HR broadcasts posts every employee sees on
   // their dashboard, distinct from the personal notifications table. ---
@@ -1124,6 +1143,45 @@ function migrateAssetRequestsTable() {
     db.prepare('SELECT * FROM asset_requests').all().forEach((r) => insert.run(r));
     db.exec('DROP TABLE asset_requests');
     db.exec('ALTER TABLE asset_requests_new RENAME TO asset_requests');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// One-time rebuild: Helpdesk's Key Features (SLA Tracking, Ticket Resolution/Closure/
+// Reopening, Ticket Escalation, CSAT) need a wider category/priority CHECK (Facilities,
+// Payroll, Critical) plus sla_deadline/requester_confirmed/escalated/csat_rating columns.
+function migrateTicketsTable() {
+  const cols = db.prepare('PRAGMA table_info(tickets)').all().map((c) => c.name);
+  if (cols.includes('sla_deadline')) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE tickets_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        category TEXT NOT NULL CHECK (category IN ('IT','HR','Admin','Grievance','Facilities','Payroll','Other')),
+        priority TEXT NOT NULL DEFAULT 'Medium' CHECK (priority IN ('Low','Medium','High','Critical')),
+        subject TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','In Progress','Resolved','Closed')),
+        assigned_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+        sla_deadline TEXT,
+        requester_confirmed INTEGER NOT NULL DEFAULT 0,
+        escalated INTEGER NOT NULL DEFAULT 0,
+        csat_rating INTEGER CHECK (csat_rating IS NULL OR csat_rating BETWEEN 1 AND 5),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+    `);
+    const insert = db.prepare(`
+      INSERT INTO tickets_new (id, employee_id, category, priority, subject, description, status, assigned_to_employee_id, created_at, resolved_at)
+      VALUES (@id, @employee_id, @category, @priority, @subject, @description, @status, @assigned_to_employee_id, @created_at, @resolved_at)
+    `);
+    db.prepare('SELECT * FROM tickets').all().forEach((r) => insert.run(r));
+    db.exec('DROP TABLE tickets');
+    db.exec('ALTER TABLE tickets_new RENAME TO tickets');
   });
   rebuild();
   db.pragma('foreign_keys = ON');
@@ -1457,6 +1515,39 @@ function seedModuleData() {
     if (fernandes) {
       db.prepare("INSERT INTO tickets (employee_id, category, priority, subject, description, status) VALUES (?, 'HR', 'Medium', 'Query about shift allowance', 'Could someone clarify how the night-shift allowance is calculated on the payslip?', 'Open')").run(fernandes.id);
     }
+  }
+  // Independent of the tickets-seed block above so this still backfills the newer
+  // Facilities/Payroll categories and Critical priority even on a DB that already had the
+  // original 2 tickets seeded.
+  if (!db.prepare("SELECT 1 FROM tickets WHERE subject = 'AC not working on 3rd floor'").get()) {
+    const pnair = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-005'").get();
+    if (pnair) db.prepare("INSERT INTO tickets (employee_id, category, priority, subject, description, status) VALUES (?, 'Facilities', 'Low', 'AC not working on 3rd floor', 'The air conditioning on the 3rd floor has not been cooling since yesterday.', 'Open')").run(pnair.id);
+  }
+  if (!db.prepare("SELECT 1 FROM tickets WHERE subject = 'Salary not credited this month'").get()) {
+    const kmenon = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-006'").get();
+    if (kmenon) db.prepare("INSERT INTO tickets (employee_id, category, priority, subject, description, status, resolved_at, requester_confirmed) VALUES (?, 'Payroll', 'Critical', 'Salary not credited this month', 'My salary for this month has not been credited yet — please check urgently.', 'Resolved', datetime('now'), 1)").run(kmenon.id);
+  }
+  // Backfill sla_deadline for any ticket that doesn't have one yet (pre-existing rows, or
+  // rows seeded before this column existed) — High: 4h, Medium: 24h, Low: 72h, Critical: 1h.
+  {
+    const SLA_HOURS = { Critical: 1, High: 4, Medium: 24, Low: 72 };
+    db.prepare('SELECT id, priority, created_at FROM tickets WHERE sla_deadline IS NULL').all().forEach((t) => {
+      db.prepare("UPDATE tickets SET sla_deadline = datetime(?, '+' || ? || ' hours') WHERE id = ?").run(t.created_at, SLA_HOURS[t.priority] || 24, t.id);
+    });
+  }
+
+  // --- Knowledge Base demo articles. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM kb_articles').get().c === 0) {
+    const insKb = db.prepare('INSERT INTO kb_articles (title, body, category, created_by) VALUES (?, ?, ?, ?)');
+    insKb.run('How to reset your laptop password', 'Go to Settings > Accounts > Sign-in options > Reset password, and follow the prompts. If you are locked out entirely, raise an IT ticket.', 'IT', 'IT Support');
+    insKb.run('Understanding your payslip components', 'Your payslip breaks pay into Basic, HRA, allowances and deductions. See the Payroll module for a full component-wise breakdown of your latest payslip.', 'Payroll', 'HR Admin');
+    insKb.run('How to raise a regularization request', 'Go to Attendance > Regularize, pick the date and reason, and submit — it follows the same approval chain as leave requests.', 'HR', 'HR Admin');
+  }
+
+  // --- Auto Routing & Email Notifications: a starter rule so new IT tickets auto-assign. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM ticket_routing').get().c === 0) {
+    const fernandes = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-003'").get();
+    if (fernandes) db.prepare('INSERT INTO ticket_routing (category, assigned_to_employee_id) VALUES (?, ?)').run('IT', fernandes.id);
   }
 
   // --- Announcements / Company Notice Board demo data. ---

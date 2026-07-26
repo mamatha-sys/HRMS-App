@@ -9,17 +9,49 @@ const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const isHR = (role) => HR_ROLES.includes(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
-function withDetails(t) {
+const CATEGORIES = ['IT', 'HR', 'Admin', 'Grievance', 'Facilities', 'Payroll', 'Other'];
+const PRIORITIES = ['Low', 'Medium', 'High', 'Critical'];
+// Ticket Escalation: how many hours each priority has before its SLA is considered breached.
+const SLA_HOURS = { Critical: 1, High: 4, Medium: 24, Low: 72 };
+// Ticket Resolution, Closure & Reopening: a resolved ticket auto-clears for closure after this
+// many days even if the requester never explicitly confirms.
+const AUTO_CLOSE_DAYS = 3;
+
+function isBreached(t) {
+  if (!t.sla_deadline || ['Resolved', 'Closed'].includes(t.status)) return false;
+  return new Date() > new Date(t.sla_deadline.replace(' ', 'T'));
+}
+function canClose(t) {
+  if (t.requester_confirmed) return true;
+  if (!t.resolved_at) return false;
+  const days = (Date.now() - new Date(t.resolved_at.replace(' ', 'T')).getTime()) / 86400000;
+  return days >= AUTO_CLOSE_DAYS;
+}
+
+function withDetails(t, { includeInternal } = { includeInternal: false }) {
   const employee = db.prepare('SELECT name, employee_code FROM employees WHERE id = ?').get(t.employee_id);
   const assignee = t.assigned_to_employee_id ? db.prepare('SELECT name FROM employees WHERE id = ?').get(t.assigned_to_employee_id) : null;
-  const comments = db.prepare('SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY created_at').all(t.id);
-  return { ...t, employee_name: employee?.name, employee_code: employee?.employee_code, assignee_name: assignee?.name || null, comments };
+  const comments = db.prepare('SELECT * FROM ticket_comments WHERE ticket_id = ? ORDER BY created_at').all(t.id)
+    .filter((c) => includeInternal || !c.internal);
+  return {
+    ...t,
+    employee_name: employee?.name, employee_code: employee?.employee_code,
+    assignee_name: assignee?.name || null,
+    slaBreached: isBreached(t),
+    canClose: canClose(t),
+    comments
+  };
+}
+
+function logComment(ticketId, authorName, comment, { internal, attachment_data_url, attachment_name } = {}) {
+  db.prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment, internal, attachment_data_url, attachment_name) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(ticketId, authorName, comment, internal ? 1 : 0, attachment_data_url || null, attachment_name || null);
 }
 
 // HR: dashboard of every ticket, with KPIs by status.
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const tickets = db.prepare("SELECT * FROM tickets ORDER BY (status = 'Open') DESC, created_at DESC").all().map(withDetails);
+  const tickets = db.prepare("SELECT * FROM tickets ORDER BY (status = 'Open') DESC, created_at DESC").all().map((t) => withDetails(t, { includeInternal: true }));
   const count = (s) => tickets.filter((t) => t.status === s).length;
   res.json({
     kpis: [
@@ -27,62 +59,203 @@ router.get('/overview', (req, res) => {
       { label: 'In Progress', value: count('In Progress'), color: 'blue' },
       { label: 'Resolved', value: count('Resolved') + count('Closed'), color: 'green' }
     ],
-    tickets
+    tickets,
+    categories: CATEGORIES,
+    priorities: PRIORITIES
   });
 });
 
 // Employee self-service: my own tickets.
 router.get('/my', (req, res) => {
   const me = myEmployee(req.user.sub);
-  if (!me) return res.json({ tickets: [] });
-  const tickets = db.prepare('SELECT * FROM tickets WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map(withDetails);
-  res.json({ tickets });
+  if (!me) return res.json({ tickets: [], categories: CATEGORIES, priorities: PRIORITIES });
+  const tickets = db.prepare('SELECT * FROM tickets WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map((t) => withDetails(t));
+  res.json({ tickets, categories: CATEGORIES, priorities: PRIORITIES });
 });
 
 router.get('/:id', (req, res) => {
   const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
   if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
   const me = myEmployee(req.user.sub);
-  if (!isHR(req.user.role) && ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ ticket: withDetails(ticket) });
+  const isOwner = ticket.employee_id === me?.id;
+  if (!isHR(req.user.role) && !isOwner) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ ticket: withDetails(ticket, { includeInternal: isHR(req.user.role) }) });
 });
 
-// Employee raises a new ticket.
+// Ticket Creation, Assignment & Categorization: employee raises a ticket. SLA deadline is set
+// automatically from priority, and Auto Routing assigns + notifies based on category if a
+// routing rule exists.
 router.post('/', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const { category, priority, subject, description } = req.body || {};
-  if (!['IT', 'HR', 'Admin', 'Grievance', 'Other'].includes(category)) return res.status(400).json({ error: 'A valid category is required' });
+  if (!CATEGORIES.includes(category)) return res.status(400).json({ error: 'A valid category is required' });
   if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' });
-  const prio = ['Low', 'Medium', 'High'].includes(priority) ? priority : 'Medium';
-  const info = db.prepare('INSERT INTO tickets (employee_id, category, priority, subject, description) VALUES (?, ?, ?, ?, ?)')
-    .run(me.id, category, prio, subject.trim(), description || null);
+  const prio = PRIORITIES.includes(priority) ? priority : 'Medium';
+  const slaDeadline = new Date(Date.now() + SLA_HOURS[prio] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+
+  const routing = db.prepare('SELECT assigned_to_employee_id FROM ticket_routing WHERE category = ?').get(category);
+  const info = db.prepare('INSERT INTO tickets (employee_id, category, priority, subject, description, sla_deadline, assigned_to_employee_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(me.id, category, prio, subject.trim(), description || null, slaDeadline, routing?.assigned_to_employee_id || null);
+
+  if (routing) {
+    const assignee = db.prepare('SELECT name FROM employees WHERE id = ?').get(routing.assigned_to_employee_id);
+    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
+      .run('New Helpdesk Ticket', `"${subject.trim()}" (${category}) auto-routed to ${assignee?.name || 'a staff member'}.`, 'all');
+  }
   res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(info.lastInsertRowid)) });
 });
 
-// HR: update status and/or assign to a staff member.
+// HR: update status and/or assign to a staff member (SLA Tracking & Status / Assignment).
+// Rule: a ticket cannot be closed until the requester confirms resolution or the auto-close
+// window elapses.
 router.put('/:id', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
   if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
   const { status, assigned_to_employee_id } = req.body || {};
   const validStatus = status === undefined ? ticket.status : (['Open', 'In Progress', 'Resolved', 'Closed'].includes(status) ? status : ticket.status);
+  if (validStatus === 'Closed' && ticket.status !== 'Closed' && !canClose(ticket)) {
+    return res.status(400).json({ error: `This ticket cannot be closed until the requester confirms resolution, or ${AUTO_CLOSE_DAYS} days have passed since it was resolved.` });
+  }
   const resolvedAt = (validStatus === 'Resolved' || validStatus === 'Closed') && !ticket.resolved_at ? new Date().toISOString().slice(0, 19).replace('T', ' ') : ticket.resolved_at;
   db.prepare('UPDATE tickets SET status = ?, assigned_to_employee_id = ?, resolved_at = ? WHERE id = ?')
     .run(validStatus, assigned_to_employee_id === undefined ? ticket.assigned_to_employee_id : (assigned_to_employee_id || null), resolvedAt, req.params.id);
-  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id)) });
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id), { includeInternal: true }) });
 });
 
-// Both HR and the ticket's own employee can add a comment to the thread.
-router.post('/:id/comments', (req, res) => {
+// Ticket Resolution, Closure & Reopening: requester confirms a Resolved ticket is genuinely
+// fixed (unlocking Close before the auto-close window would otherwise allow it).
+router.post('/:id/confirm', (req, res) => {
   const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
   if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
   const me = myEmployee(req.user.sub);
   if (!isHR(req.user.role) && ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { comment } = req.body || {};
+  if (ticket.status !== 'Resolved') return res.status(400).json({ error: 'Only a Resolved ticket can be confirmed.' });
+  db.prepare('UPDATE tickets SET requester_confirmed = 1 WHERE id = ?').run(ticket.id);
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id)) });
+});
+
+// Reopen a Resolved/Closed ticket that turned out not to actually be fixed.
+router.post('/:id/reopen', (req, res) => {
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const me = myEmployee(req.user.sub);
+  if (!isHR(req.user.role) && ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!['Resolved', 'Closed'].includes(ticket.status)) return res.status(400).json({ error: 'Only a Resolved or Closed ticket can be reopened.' });
+  db.prepare('UPDATE tickets SET status = ?, resolved_at = NULL, requester_confirmed = 0 WHERE id = ?').run('Open', ticket.id);
+  logComment(ticket.id, req.user.name || 'Anonymous', 'Ticket reopened.');
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id), { includeInternal: isHR(req.user.role) }) });
+});
+
+// CSAT / Customer Satisfaction Feedback: requester rates a Resolved/Closed ticket 1-5.
+router.post('/:id/csat', (req, res) => {
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const me = myEmployee(req.user.sub);
+  if (ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Only the requester can rate this ticket.' });
+  if (!['Resolved', 'Closed'].includes(ticket.status)) return res.status(400).json({ error: 'You can only rate a Resolved or Closed ticket.' });
+  const rating = Math.max(1, Math.min(5, parseInt(req.body?.rating, 10) || 0));
+  if (!rating) return res.status(400).json({ error: 'A rating from 1 to 5 is required.' });
+  db.prepare('UPDATE tickets SET csat_rating = ? WHERE id = ?').run(rating, ticket.id);
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id)) });
+});
+
+// Both HR and the ticket's own employee can add a comment to the public thread; HR can also
+// add an internal-only note (Internal Notes, Attachments & Screenshots), optionally with an
+// attached file/screenshot.
+router.post('/:id/comments', (req, res) => {
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const me = myEmployee(req.user.sub);
+  const hr = isHR(req.user.role);
+  if (!hr && ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { comment, internal, attachment_data_url, attachment_name } = req.body || {};
   if (!comment?.trim()) return res.status(400).json({ error: 'Comment is required' });
-  db.prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment) VALUES (?, ?, ?)').run(ticket.id, req.user.name || 'Anonymous', comment.trim());
-  res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id)) });
+  if (internal && !hr) return res.status(403).json({ error: 'Only HR can add an internal note.' });
+  logComment(ticket.id, req.user.name || 'Anonymous', comment.trim(), { internal: !!internal, attachment_data_url, attachment_name });
+  res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id), { includeInternal: hr }) });
+});
+
+// Ticket Escalation: every SLA-breached, unresolved ticket, with a one-click approval that
+// bumps its priority and flags it as escalated.
+router.get('/escalations/list', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const tickets = db.prepare("SELECT * FROM tickets WHERE status NOT IN ('Resolved','Closed')").all().map((t) => withDetails(t, { includeInternal: true })).filter((t) => t.slaBreached);
+  res.json({ tickets });
+});
+
+router.post('/:id/escalate', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const nextPriority = PRIORITIES[Math.min(PRIORITIES.indexOf(ticket.priority) + 1, PRIORITIES.length - 1)];
+  const newDeadline = new Date(Date.now() + SLA_HOURS[nextPriority] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare('UPDATE tickets SET escalated = 1, priority = ?, sla_deadline = ? WHERE id = ?').run(nextPriority, newDeadline, ticket.id);
+  logComment(ticket.id, req.user.name || 'Anonymous', `Escalation approved — priority raised to ${nextPriority}.`, { internal: true });
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id), { includeInternal: true }) });
+});
+
+// Knowledge Base: everyone can browse; only HR can author articles.
+router.get('/kb/articles', (req, res) => {
+  res.json({ articles: db.prepare('SELECT * FROM kb_articles ORDER BY created_at DESC').all() });
+});
+router.post('/kb/articles', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { title, body, category } = req.body || {};
+  if (!title?.trim() || !body?.trim()) return res.status(400).json({ error: 'Title and body are both required.' });
+  const info = db.prepare('INSERT INTO kb_articles (title, body, category, created_by) VALUES (?, ?, ?, ?)')
+    .run(title.trim(), body.trim(), category?.trim() || 'General', req.user.name || 'HR');
+  res.status(201).json({ article: db.prepare('SELECT * FROM kb_articles WHERE id = ?').get(info.lastInsertRowid) });
+});
+router.delete('/kb/articles/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  db.prepare('DELETE FROM kb_articles WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Auto Routing & Email Notifications: HR maps a category to a default assignee; new tickets
+// in that category auto-assign and fire a notification (see POST / above).
+router.get('/routing/rules', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rules = db.prepare(`
+    SELECT r.category, r.assigned_to_employee_id, e.name AS assignee_name, e.employee_code
+    FROM ticket_routing r JOIN employees e ON e.id = r.assigned_to_employee_id
+  `).all();
+  const employees = db.prepare("SELECT id, name, employee_code FROM employees WHERE status = 'Active'").all();
+  res.json({ rules, categories: CATEGORIES, employees });
+});
+router.put('/routing/rules', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { category, assigned_to_employee_id } = req.body || {};
+  if (!CATEGORIES.includes(category)) return res.status(400).json({ error: 'A valid category is required' });
+  const emp = db.prepare('SELECT id FROM employees WHERE id = ?').get(assigned_to_employee_id);
+  if (!emp) return res.status(400).json({ error: 'A valid employee is required' });
+  db.prepare('INSERT INTO ticket_routing (category, assigned_to_employee_id) VALUES (?, ?) ON CONFLICT(category) DO UPDATE SET assigned_to_employee_id = excluded.assigned_to_employee_id')
+    .run(category, emp.id);
+  res.json({ ok: true });
+});
+router.delete('/routing/rules/:category', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  db.prepare('DELETE FROM ticket_routing WHERE category = ?').run(req.params.category);
+  res.json({ ok: true });
+});
+
+// Helpdesk Dashboard, Reports & Analytics: counts by category + average CSAT.
+router.get('/reports/summary', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const tickets = db.prepare('SELECT * FROM tickets').all();
+  const byCategory = CATEGORIES.map((cat) => ({ category: cat, count: tickets.filter((t) => t.category === cat).length })).filter((c) => c.count > 0);
+  const rated = tickets.filter((t) => t.csat_rating != null);
+  const avgCsat = rated.length ? Math.round((rated.reduce((s, t) => s + t.csat_rating, 0) / rated.length) * 10) / 10 : null;
+  res.json({
+    byCategory,
+    avgCsat,
+    ratedCount: rated.length,
+    totalTickets: tickets.length,
+    openCount: tickets.filter((t) => t.status === 'Open').length,
+    resolvedCount: tickets.filter((t) => ['Resolved', 'Closed'].includes(t.status)).length
+  });
 });
 
 export default router;
