@@ -142,6 +142,30 @@ db.exec(`
   // (e.g. "Your leave request was approved") as well as/instead of a whole role.
   const notificationCols = db.prepare('PRAGMA table_info(notifications)').all().map((c) => c.name);
   if (!notificationCols.includes('employee_id')) db.exec('ALTER TABLE notifications ADD COLUMN employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE');
+  // Department-wide targeting (alongside the existing whole-role and single-employee targets)
+  // and a record of which external channels (Email/SMS/WhatsApp, beyond the always-on in-app
+  // entry) were requested for this notification.
+  if (!notificationCols.includes('target_department')) db.exec('ALTER TABLE notifications ADD COLUMN target_department TEXT');
+  if (!notificationCols.includes('channels')) db.exec("ALTER TABLE notifications ADD COLUMN channels TEXT NOT NULL DEFAULT 'in_app'");
+
+  // --- Multi-channel delivery log: every Email/SMS/WhatsApp send attempt for a Notification
+  // or Announcement, one row per (recipient, channel) — this is the "Notification Log" the
+  // prototype shows (e.g. "Email -> Ragini: message"), and lets HR see what actually went out
+  // (or why it failed, e.g. no provider configured) rather than assuming silent success. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS channel_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source TEXT NOT NULL CHECK (source IN ('notification','announcement')),
+      source_id INTEGER NOT NULL,
+      employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+      channel TEXT NOT NULL CHECK (channel IN ('email','sms','whatsapp')),
+      target TEXT,
+      title TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('Sent','Failed')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
   db.exec(`
 
   CREATE TABLE IF NOT EXISTS events (
@@ -965,6 +989,21 @@ function migrate() {
       posted_by TEXT NOT NULL,
       pinned INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  // Department-wide targeting (nullable — a plain NULL keeps today's "everyone sees it"
+  // behavior for every existing row) and a record of which external channels were requested,
+  // alongside individual-employee targeting via the announcement_recipients join table (an
+  // announcement can be aimed at several specific people at once, unlike notifications which
+  // fan out one row per employee).
+  const announcementCols = db.prepare('PRAGMA table_info(announcements)').all().map((c) => c.name);
+  if (!announcementCols.includes('target_department')) db.exec('ALTER TABLE announcements ADD COLUMN target_department TEXT');
+  if (!announcementCols.includes('channels')) db.exec("ALTER TABLE announcements ADD COLUMN channels TEXT NOT NULL DEFAULT 'in_app'");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS announcement_recipients (
+      announcement_id INTEGER NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      PRIMARY KEY (announcement_id, employee_id)
     );
   `);
 
