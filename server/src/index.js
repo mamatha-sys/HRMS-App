@@ -24,6 +24,11 @@ import recruitmentRoutes from './routes/recruitment.routes.js';
 import performanceRoutes from './routes/performance.routes.js';
 import learningRoutes from './routes/learning.routes.js';
 import assetsRoutes from './routes/assets.routes.js';
+import helpdeskRoutes from './routes/helpdesk.routes.js';
+import announcementsRoutes from './routes/announcements.routes.js';
+import expensesRoutes from './routes/expenses.routes.js';
+import surveysRoutes from './routes/surveys.routes.js';
+import documentsRoutes from './routes/documents.routes.js';
 
 const app = express();
 app.use(cors());
@@ -53,6 +58,11 @@ app.use('/api/recruitment', recruitmentRoutes);
 app.use('/api/performance', performanceRoutes);
 app.use('/api/learning', learningRoutes);
 app.use('/api/assets', assetsRoutes);
+app.use('/api/helpdesk', helpdeskRoutes);
+app.use('/api/announcements', announcementsRoutes);
+app.use('/api/expenses', expensesRoutes);
+app.use('/api/surveys', surveysRoutes);
+app.use('/api/documents', documentsRoutes);
 
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {

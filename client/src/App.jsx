@@ -20,6 +20,11 @@ import Payroll from './pages/Payroll.jsx';
 import Performance from './pages/Performance.jsx';
 import Learning from './pages/Learning.jsx';
 import Assets from './pages/Assets.jsx';
+import Helpdesk from './pages/Helpdesk.jsx';
+import Announcements from './pages/Announcements.jsx';
+import Expenses from './pages/Expenses.jsx';
+import Surveys from './pages/Surveys.jsx';
+import Documents from './pages/Documents.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -44,6 +49,11 @@ export default function App() {
         <Route path="/performance" element={<Performance />} />
         <Route path="/learning" element={<Learning />} />
         <Route path="/assets" element={<Assets />} />
+        <Route path="/helpdesk" element={<Helpdesk />} />
+        <Route path="/announcements" element={<Announcements />} />
+        <Route path="/expenses" element={<Expenses />} />
+        <Route path="/surveys" element={<Surveys />} />
+        <Route path="/documents" element={<Documents />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
         <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />

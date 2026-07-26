@@ -100,6 +100,12 @@ Login requires email + password **and** a webcam face capture:
 
   All four new modules' **Key Features** tile grids are functional — Recruitment/Performance jump to the relevant section on the same page; Learning/Asset Management tiles that need more room (Create Course, Manage Assessment, Certifications, Add Asset, Assign, Asset Requests) open their own dedicated screen with a way back to the dashboard.
 
+- **Helpdesk** — employees raise IT/HR/Admin/Grievance tickets (category, priority, subject, description) and track status (Open/In Progress/Resolved/Closed) with a reply thread. HR gets a KPI row (Open/In Progress/Resolved) and a filterable queue; either side can reply on the same thread.
+- **Announcements** — HR posts a company-wide notice (title/body/category: General/Policy/Event/Holiday, optionally pinned to the top); every employee sees the same feed, newest-first with pinned posts always on top. Distinct from the personal notifications already on the Dashboard.
+- **Expense & Travel Claims** — employees submit a claim (category/amount/description/optional receipt upload) that goes through the exact same sequential approval chain already used by Leave and Attendance Regularization (`chain.js`, the visual `ChainStepper`). Once Approved, HR marks it **Reimbursed** as a separate terminal step. A Reports tab breaks totals down by category and pending vs. reimbursed amounts.
+- **Employee Engagement Surveys** — HR builds a survey (title + a list of 1–5 rating questions), activates it, and employees respond once per survey (rating per question + an optional free-text comment). HR sees an aggregated **average rating per question** plus every comment — never an individual employee's raw answers.
+- **Document Management** — a policy/handbook/form library. **Mandatory** documents require every active employee to explicitly acknowledge having read them; HR sees who has and hasn't acknowledged a given document. Employees just see their own acknowledgment status and an Acknowledge button.
+
 Role access is strictly layered: **Super Admin has full, unrestricted access everywhere** (every module, every admin screen, read-only-safe on its own role); **HR Admin** and **Manager/Assistant Manager** get the operational HR screens (Attendance/Leave/Payroll/Employee Management) but are blocked from Super-Admin-only configuration (Manage Roles, Configurations, adding Leave Types) — verified via direct API checks.
 
 ### Admin (Super Admin only)

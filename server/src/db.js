@@ -902,6 +902,120 @@ function migrate() {
     );
   `);
 
+  // --- Helpdesk / Grievance Ticketing: employees raise IT/HR/Admin/Grievance tickets,
+  // HR/assigned staff track status and reply on a comment thread. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tickets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      category TEXT NOT NULL CHECK (category IN ('IT','HR','Admin','Grievance','Other')),
+      priority TEXT NOT NULL DEFAULT 'Medium' CHECK (priority IN ('Low','Medium','High')),
+      subject TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','In Progress','Resolved','Closed')),
+      assigned_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS ticket_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      comment TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Announcements / Company Notice Board: HR broadcasts posts every employee sees on
+  // their dashboard, distinct from the personal notifications table. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS announcements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'General' CHECK (category IN ('General','Policy','Event','Holiday')),
+      posted_by TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // --- Expense & Travel Claims: reuses the same sequential approval-chain pattern already
+  // shared by Leave and Attendance Regularization (current_stage_role_id + chain.js). ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS expense_claims (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      category TEXT NOT NULL CHECK (category IN ('Travel','Food','Accommodation','Other')),
+      amount INTEGER NOT NULL,
+      description TEXT,
+      receipt_data_url TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected','Reimbursed')),
+      current_stage_role_id INTEGER REFERENCES roles(id),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_at TEXT,
+      reimbursed_at TEXT
+    );
+  `);
+
+  // --- Employee Engagement Surveys: HR builds a rating-scale survey, employees respond once,
+  // HR sees aggregated per-question averages. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS surveys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft','Active','Closed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS survey_questions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
+      question_text TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS survey_responses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      comment TEXT,
+      submitted_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(survey_id, employee_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS survey_answers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      response_id INTEGER NOT NULL REFERENCES survey_responses(id) ON DELETE CASCADE,
+      question_id INTEGER NOT NULL REFERENCES survey_questions(id) ON DELETE CASCADE,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5)
+    );
+  `);
+
+  // --- Document Management: a policy/handbook library; mandatory documents require every
+  // active employee to explicitly acknowledge having read them. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS company_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'Policy' CHECK (category IN ('Policy','Handbook','Form','Other')),
+      file_data_url TEXT NOT NULL,
+      mandatory INTEGER NOT NULL DEFAULT 0,
+      uploaded_by TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS document_acknowledgments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      document_id INTEGER NOT NULL REFERENCES company_documents(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      acknowledged_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(document_id, employee_id)
+    );
+  `);
+
   migrateLeavesTable();
 }
 
@@ -1330,6 +1444,62 @@ function seedModuleData() {
     if (db.prepare('SELECT COUNT(*) c FROM offboarding_tasks WHERE exit_id = ?').get(x.id).c > 0) return;
     OFFBOARDING_TASK_DEFAULTS.forEach((t, i) => insOffTask.run(x.id, t, i));
   });
+
+  // --- Helpdesk / Grievance Ticketing demo data. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM tickets').get().c === 0) {
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    const fernandes = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-003'").get();
+    if (arjun) {
+      const t1 = db.prepare("INSERT INTO tickets (employee_id, category, priority, subject, description, status, resolved_at) VALUES (?, 'IT', 'High', 'Laptop battery draining fast', 'Battery drops from 100% to 20% within an hour of unplugging.', 'Resolved', datetime('now'))").run(arjun.id).lastInsertRowid;
+      db.prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment) VALUES (?, ?, ?)').run(t1, 'IT Support', 'Replaced the battery — please confirm it is holding charge normally now.');
+      db.prepare('INSERT INTO ticket_comments (ticket_id, author_name, comment) VALUES (?, ?, ?)').run(t1, 'Arjun Employee', 'Confirmed, working fine now. Thank you!');
+    }
+    if (fernandes) {
+      db.prepare("INSERT INTO tickets (employee_id, category, priority, subject, description, status) VALUES (?, 'HR', 'Medium', 'Query about shift allowance', 'Could someone clarify how the night-shift allowance is calculated on the payslip?', 'Open')").run(fernandes.id);
+    }
+  }
+
+  // --- Announcements / Company Notice Board demo data. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM announcements').get().c === 0) {
+    const insAnn = db.prepare('INSERT INTO announcements (title, body, category, posted_by, pinned, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+    insAnn.run('Revised Work-From-Home Policy', 'Effective next month, WFH requests must be submitted at least 2 working days in advance via your reporting manager.', 'Policy', 'HR Admin', 1, '2026-07-20 09:00:00');
+    insAnn.run('Team Outing — August 15th', 'Join us for the annual team outing! Details and RSVP link will follow shortly.', 'Event', 'HR Admin', 0, '2026-07-22 11:00:00');
+    insAnn.run('Office Closed — Independence Day', 'The office will remain closed on August 15th for the public holiday.', 'Holiday', 'Super Admin', 0, '2026-07-24 10:00:00');
+  }
+
+  // --- Expense & Travel Claims demo data. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM expense_claims').get().c === 0) {
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    const priya = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-001'").get();
+    const bottomRoleId = db.prepare("SELECT id FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get()?.id || null;
+    if (arjun) {
+      db.prepare("INSERT INTO expense_claims (employee_id, category, amount, description, status, current_stage_role_id) VALUES (?, 'Travel', 850, 'Cab fare for client site visit', 'Pending', ?)").run(arjun.id, bottomRoleId);
+    }
+    if (priya) {
+      db.prepare("INSERT INTO expense_claims (employee_id, category, amount, description, status, decided_at, reimbursed_at) VALUES (?, 'Accommodation', 4200, 'Hotel stay — Bangalore offsite', 'Reimbursed', datetime('now'), datetime('now'))").run(priya.id);
+    }
+  }
+
+  // --- Employee Engagement Surveys demo data: one active survey with a couple of responses. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM surveys').get().c === 0) {
+    const surveyId = db.prepare("INSERT INTO surveys (title, description, status) VALUES ('Quarterly Pulse Check', 'A quick check-in on how the team is feeling this quarter.', 'Active')").run().lastInsertRowid;
+    const q1 = db.prepare('INSERT INTO survey_questions (survey_id, question_text, sort_order) VALUES (?, ?, 0)').run(surveyId, 'I feel valued for the work I do').lastInsertRowid;
+    const q2 = db.prepare('INSERT INTO survey_questions (survey_id, question_text, sort_order) VALUES (?, ?, 1)').run(surveyId, 'My manager gives me useful feedback').lastInsertRowid;
+    const q3 = db.prepare('INSERT INTO survey_questions (survey_id, question_text, sort_order) VALUES (?, ?, 2)').run(surveyId, 'I have a healthy work-life balance').lastInsertRowid;
+    const fernandes = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-003'").get();
+    if (fernandes) {
+      const respId = db.prepare('INSERT INTO survey_responses (survey_id, employee_id, comment) VALUES (?, ?, ?)').run(surveyId, fernandes.id, 'Overall a good quarter, would like more recognition for cross-team work.').lastInsertRowid;
+      const insAns = db.prepare('INSERT INTO survey_answers (response_id, question_id, rating) VALUES (?, ?, ?)');
+      insAns.run(respId, q1, 4); insAns.run(respId, q2, 4); insAns.run(respId, q3, 3);
+    }
+  }
+
+  // --- Document Management demo data: one mandatory policy with a partial acknowledgment. ---
+  if (db.prepare('SELECT COUNT(*) AS c FROM company_documents').get().c === 0) {
+    const docId = db.prepare("INSERT INTO company_documents (title, category, file_data_url, mandatory, uploaded_by) VALUES ('Employee Code of Conduct', 'Policy', 'data:text/plain;base64,RW1wbG95ZWUgQ29kZSBvZiBDb25kdWN0IC0gcGxhY2Vob2xkZXIgZG9jdW1lbnQu', 1, 'HR Admin')").run().lastInsertRowid;
+    const arjun = db.prepare("SELECT id FROM employees WHERE employee_code = 'EMP-002'").get();
+    if (arjun) db.prepare('INSERT INTO document_acknowledgments (document_id, employee_id) VALUES (?, ?)').run(docId, arjun.id);
+  }
 }
 
 export const ONBOARDING_TASK_DEFAULTS = [

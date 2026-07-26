@@ -37,6 +37,21 @@ export default function Sidebar() {
       <NavLink to="/assets" className={item}>
         <span className="dot" />Asset Management
       </NavLink>
+      <NavLink to="/helpdesk" className={item}>
+        <span className="dot" />Helpdesk
+      </NavLink>
+      <NavLink to="/announcements" className={item}>
+        <span className="dot" />Announcements
+      </NavLink>
+      <NavLink to="/expenses" className={item}>
+        <span className="dot" />Expense &amp; Travel Claims
+      </NavLink>
+      <NavLink to="/surveys" className={item}>
+        <span className="dot" />Engagement Surveys
+      </NavLink>
+      <NavLink to="/documents" className={item}>
+        <span className="dot" />Document Management
+      </NavLink>
 
       {user?.role === 'super_admin' && (
         <>
