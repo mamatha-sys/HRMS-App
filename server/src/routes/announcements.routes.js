@@ -3,6 +3,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { notifyAll, employeesForTarget } from '../utils/notify.js';
 import { dispatchChannels, recentDeliveries } from '../utils/channels.js';
+import { notifyWebhooks } from '../utils/webhooks.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -78,6 +79,7 @@ router.post('/', async (req, res) => {
     const recipients = employeesForTarget({ target_department: targetDept, employee_ids: targetEmployeeIds.length ? targetEmployeeIds : null });
     await dispatchChannels({ source: 'announcement', sourceId: announcementId, employees: recipients, channels: chosenChannels, title: title.trim(), message: body.trim() });
   }
+  notifyWebhooks('New Announcement', `[${cat}] ${title.trim()} — ${body.trim()}`).catch(() => {});
 
   res.status(201).json({ announcement: withRecipients([db.prepare('SELECT * FROM announcements WHERE id = ?').get(announcementId)])[0] });
 });

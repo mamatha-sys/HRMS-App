@@ -108,6 +108,17 @@ Login requires email + password **and** a webcam face capture:
 - **Employee Engagement Surveys** — HR builds a survey (title + a list of 1–5 rating questions), activates it, and employees respond once per survey (rating per question + an optional free-text comment). HR sees an aggregated **average rating per question** plus every comment — never an individual employee's raw answers.
 - **Document Management** — a policy/handbook/form library. **Mandatory** documents require every active employee to explicitly acknowledge having read them; HR sees who has and hasn't acknowledged a given document. Employees just see their own acknowledgment status and an Acknowledge button.
 
+### Integrations (Super Admin only)
+
+A dedicated module connecting the HRMS to real external systems, with a status dashboard + 5 **Key Feature** screens:
+- **Email, SMS & WhatsApp** — a read-only status view of the channels already wired into Announcements/Notifications, plus the full recent-deliveries log.
+- **Biometric Device Integration (eSSL)** — real fingerprint/face terminals (eSSL and other ADMS/iClock-protocol-compatible hardware) push attendance punches directly over HTTP to `/api/biometric-device/cdata` — no vendor SDK, no JWT (the device can't send one); the gate is device pre-registration by serial number. Register a device, map each employee's on-device enrollment ID, and punches flow through the *exact same* check-in/check-out/late-flag logic as a manual web check-in (`attendanceCore.js`, shared with `attendance.routes.js`). Every punch is logged (mapped or not) with a **Simulate a punch** test tool that proves the whole receive → map → attendance pipeline end-to-end without physical hardware in hand — verified against both the simulate endpoint and a raw `curl` POST to the real device endpoint.
+- **Slack & Microsoft Teams Alerts** — paste an incoming webhook URL and new Helpdesk tickets + new Announcements mirror into that channel in real time. A delivery log shows every send attempt (Sent/Failed + the exact error, e.g. a bad URL) — verified against a real (fake) URL to confirm failures are caught and logged, never thrown.
+- **Calendar Sync (Google)** — connect a Google account (OAuth Client ID/Secret from the Google Cloud Console) and every new Learning **Training Session** is pushed as a real Google Calendar event automatically. Best-effort: a session always saves even if the calendar push fails or isn't connected.
+- **Payroll Bank-Transfer Export** — generates a bank-ready salary disbursement CSV (account number, IFSC, amount, narration) from any completed payroll run, using each employee's on-file bank details; flags how many employees in that run are missing bank details via an `X-Missing-Bank-Details` response header.
+
+None of the external integrations invent credentials — Twilio/SMTP/Slack/Teams/Google all require you to supply your own real account details (see `server/.env.example` and the Integrations screen itself); every one fails safely with a clear reason logged instead of crashing when left unconfigured.
+
 Role access is strictly layered: **Super Admin has full, unrestricted access everywhere** (every module, every admin screen, read-only-safe on its own role); **HR Admin** and **Manager/Assistant Manager** get the operational HR screens (Attendance/Leave/Payroll/Employee Management) but are blocked from Super-Admin-only configuration (Manage Roles, Configurations, adding Leave Types) — verified via direct API checks.
 
 ### Admin (Super Admin only)

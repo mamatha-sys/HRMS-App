@@ -29,6 +29,8 @@ import announcementsRoutes from './routes/announcements.routes.js';
 import expensesRoutes from './routes/expenses.routes.js';
 import surveysRoutes from './routes/surveys.routes.js';
 import documentsRoutes from './routes/documents.routes.js';
+import integrationsRoutes from './routes/integrations.routes.js';
+import biometricDeviceRoutes from './routes/biometricDevice.routes.js';
 
 const app = express();
 app.use(cors());
@@ -63,6 +65,9 @@ app.use('/api/announcements', announcementsRoutes);
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/surveys', surveysRoutes);
 app.use('/api/documents', documentsRoutes);
+app.use('/api/integrations', integrationsRoutes);
+// Real biometric hardware calls this directly (no JWT) — see biometricDevice.routes.js.
+app.use('/api/biometric-device', biometricDeviceRoutes);
 
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {

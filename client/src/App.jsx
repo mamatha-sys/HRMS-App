@@ -25,6 +25,7 @@ import Announcements from './pages/Announcements.jsx';
 import Expenses from './pages/Expenses.jsx';
 import Surveys from './pages/Surveys.jsx';
 import Documents from './pages/Documents.jsx';
+import Integrations from './pages/Integrations.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -65,6 +66,7 @@ export default function App() {
         <Route path="/permissions" element={<RequireSuperAdmin><Permissions /></RequireSuperAdmin>} />
         <Route path="/users" element={<RequireSuperAdmin><UserManagement /></RequireSuperAdmin>} />
         <Route path="/manage-modules" element={<RequireSuperAdmin><ManageModules /></RequireSuperAdmin>} />
+        <Route path="/integrations" element={<RequireSuperAdmin><Integrations /></RequireSuperAdmin>} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

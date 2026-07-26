@@ -1083,6 +1083,69 @@ function migrate() {
   `);
 
   migrateLeavesTable();
+
+  // --- Integrations: generic key/value config store (Slack/Teams webhook URLs, Google
+  // Calendar OAuth client id/secret + refresh token) so Super Admin can manage credentials
+  // from the app itself instead of editing server/.env and restarting. Not encrypted at
+  // rest — consistent with this demo app's existing plaintext bank/Aadhaar storage, not
+  // production-grade secret management. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS integration_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target TEXT NOT NULL CHECK (target IN ('slack','teams')),
+      event TEXT NOT NULL,
+      message TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('Sent','Failed')),
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Biometric Device Integration (eSSL and compatible ADMS/iClock-protocol terminals): a
+    -- device pushes raw punches over HTTP with no vendor SDK required. Each device is
+    -- pre-registered by serial number so the unauthenticated device-facing endpoint only
+    -- accepts punches from known hardware.
+    CREATE TABLE IF NOT EXISTS biometric_devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      vendor TEXT NOT NULL DEFAULT 'eSSL',
+      serial_number TEXT NOT NULL UNIQUE,
+      location TEXT,
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+      last_seen_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Maps the numeric enrollment ID punched into the device to a real employee.
+    CREATE TABLE IF NOT EXISTS employee_biometric_ids (
+      employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,
+      device_user_id TEXT NOT NULL UNIQUE,
+      mapped_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Every raw punch received, mapped or not — lets HR see unmapped punches and map them
+    -- retroactively (the punch is then processed into the attendance table).
+    CREATE TABLE IF NOT EXISTS biometric_punches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_serial TEXT NOT NULL,
+      device_user_id TEXT NOT NULL,
+      employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+      punch_time TEXT NOT NULL,
+      punch_type TEXT NOT NULL DEFAULT 'unknown' CHECK (punch_type IN ('check-in','check-out','unknown')),
+      processed INTEGER NOT NULL DEFAULT 0,
+      raw_line TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  // Google Calendar sync target: which Training Session event (if any) a session has already
+  // been pushed as, so re-saving a session never creates a duplicate calendar entry.
+  const trainingSessionCols = db.prepare('PRAGMA table_info(training_sessions)').all().map((c) => c.name);
+  if (!trainingSessionCols.includes('calendar_event_id')) db.exec('ALTER TABLE training_sessions ADD COLUMN calendar_event_id TEXT');
 }
 
 // One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a

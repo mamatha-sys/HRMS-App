@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
+import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -9,27 +10,6 @@ router.use(requireAuth);
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const isHR = (role) => HR_ROLES.includes(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
-const nowTime = () => new Date().toTimeString().slice(0, 5);
-const today = () => db.prepare("SELECT date('now') AS d").get().d;
-// Company rule: General shift is 9:00 AM – 6:00 PM with a grace period until 9:15.
-const LATE_AFTER = '09:15';
-
-export function freeLateAllowance() {
-  const row = db.prepare("SELECT value FROM policies WHERE name = 'Free late arrivals per month'").get();
-  const n = parseInt(row?.value, 10);
-  return Number.isFinite(n) && n >= 0 ? n : 2;
-}
-
-// Recomputes half_day_flag for every late day this month for one employee, in date order,
-// so the (allowance+1)-th late arrival onward is flagged for an automatic payroll deduction.
-// Re-run after every check-in so corrections (e.g. HR editing a time) stay consistent.
-function recomputeLateFlags(employeeId, month) {
-  const allowance = freeLateAllowance();
-  const lateRows = db.prepare('SELECT id FROM attendance WHERE employee_id = ? AND date LIKE ? AND check_in_time > ? ORDER BY date')
-    .all(employeeId, month + '%', LATE_AFTER);
-  const update = db.prepare('UPDATE attendance SET half_day_flag = ? WHERE id = ?');
-  lateRows.forEach((r, idx) => update.run(idx >= allowance ? 1 : 0, r.id));
-}
 
 const SCOPE_BANNER = {
   super_admin: 'Full, unrestricted access — configures the escalation window itself, organization-wide.',
@@ -177,19 +157,7 @@ router.get('/', (req, res) => {
   res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel() });
 });
 
-function upsertToday(employeeId, patch) {
-  const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, today());
-  if (existing) {
-    const merged = { ...existing, ...patch };
-    db.prepare('UPDATE attendance SET status = @status, check_in_time = @check_in_time, check_out_time = @check_out_time, method = @method, latitude = @latitude, longitude = @longitude WHERE id = @id').run(merged);
-    return db.prepare('SELECT * FROM attendance WHERE id = ?').get(existing.id);
-  }
-  const row = { employee_id: employeeId, date: today(), status: 'Present', check_in_time: null, check_out_time: null, method: 'Web Check-in', latitude: null, longitude: null, ...patch };
-  const info = db.prepare('INSERT INTO attendance (employee_id, date, status, check_in_time, check_out_time, method, latitude, longitude) VALUES (@employee_id, @date, @status, @check_in_time, @check_out_time, @method, @latitude, @longitude)').run(row);
-  return db.prepare('SELECT * FROM attendance WHERE id = ?').get(info.lastInsertRowid);
-}
-
-const METHODS = ['Web Check-in', 'Mobile App', 'Biometric (Fingerprint)', 'Face Recognition'];
+const upsertToday = (employeeId, patch) => upsertAttendanceForDate(employeeId, today(), patch);
 
 function validCoord(v) { return typeof v === 'number' && Number.isFinite(v); }
 

@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { notifyWebhooks } from '../utils/webhooks.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -104,6 +105,7 @@ router.post('/', (req, res) => {
     db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
       .run('New Helpdesk Ticket', `"${subject.trim()}" (${category}) auto-routed to ${assignee?.name || 'a staff member'}.`, 'all');
   }
+  notifyWebhooks('New Helpdesk Ticket', `${me.name} raised a ${prio} priority ${category} ticket: "${subject.trim()}"`).catch(() => {});
   res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(info.lastInsertRowid)) });
 });
 

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import * as googleCalendar from '../utils/googleCalendar.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -381,12 +382,25 @@ router.get('/sessions', (req, res) => {
   res.json({ sessions: rows, courses: db.prepare('SELECT id, title FROM courses ORDER BY title').all() });
 });
 
-router.post('/sessions', (req, res) => {
+router.post('/sessions', async (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { course_id, mode, scheduled_at } = req.body || {};
-  const course = course_id ? db.prepare('SELECT id FROM courses WHERE id = ?').get(course_id) : null;
+  const course = course_id ? db.prepare('SELECT id, title FROM courses WHERE id = ?').get(course_id) : null;
   if (!course || !mode?.trim() || !scheduled_at?.trim()) return res.status(400).json({ error: 'Course, mode and date & time are all required' });
-  db.prepare('INSERT INTO training_sessions (course_id, mode, scheduled_at) VALUES (?, ?, ?)').run(course.id, mode.trim(), scheduled_at.trim());
+  const info = db.prepare('INSERT INTO training_sessions (course_id, mode, scheduled_at) VALUES (?, ?, ?)').run(course.id, mode.trim(), scheduled_at.trim());
+
+  // Best-effort: if Google Calendar is connected (Integrations > Calendar Sync), also create a
+  // real calendar event for this session. Never blocks or fails the session creation itself.
+  if (googleCalendar.isConnected()) {
+    try {
+      const eventId = await googleCalendar.createCalendarEvent({
+        summary: `Training: ${course.title}`,
+        description: `Mode: ${mode.trim()}`,
+        startsAt: scheduled_at.trim()
+      });
+      db.prepare('UPDATE training_sessions SET calendar_event_id = ? WHERE id = ?').run(eventId, info.lastInsertRowid);
+    } catch { /* calendar push is best-effort — session is already saved either way */ }
+  }
   res.status(201).json({ ok: true });
 });
 

@@ -68,6 +68,9 @@ export default function Sidebar() {
           <NavLink to="/org-structure" className={item}>
             <span className="dot" />Organization Structure
           </NavLink>
+          <NavLink to="/integrations" className={item}>
+            <span className="dot" />Integrations
+          </NavLink>
         </>
       )}
     </div>
