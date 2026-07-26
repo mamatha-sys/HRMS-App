@@ -2,8 +2,11 @@
 body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #F7F8FA; color: #1A2233; }
 
 .topbar { background: #161E33; color: #fff; padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; }
-.topbar .brand { font-weight: 700; font-size: 16px; }
+.topbar .brand { font-weight: 700; font-size: 16px; display: flex; align-items: center; gap: 8px; }
 .topbar .brand span { color: #9AA4BC; font-weight: 400; font-size: 12px; margin-left: 8px; }
+.brand-logo { height: 26px; width: 26px; object-fit: contain; border-radius: 4px; background: #fff; }
+.login-brand { display: flex; align-items: center; justify-content: center; gap: 8px; }
+.login-brand .brand-logo { height: 32px; width: 32px; }
 .role-switch { display: flex; align-items: center; gap: 10px; font-size: 13px; }
 .role-switch button { background: #232D4B; color: #fff; border: 1px solid #334060; }
 .role-switch button:hover { background: #2C3760; }

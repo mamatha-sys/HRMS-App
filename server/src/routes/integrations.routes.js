@@ -19,12 +19,15 @@ const KEY_FEATURES = [
   { key: 'biometric', label: 'Biometric Device Integration (eSSL)', screen: 'biometric' },
   { key: 'webhooks', label: 'Slack & Microsoft Teams Alerts', screen: 'webhooks' },
   { key: 'calendar', label: 'Calendar Sync (Google)', screen: 'calendar' },
-  { key: 'payroll-export', label: 'Payroll Bank-Transfer Export', screen: 'payroll-export' }
+  { key: 'payroll-export', label: 'Payroll Bank-Transfer Export', screen: 'payroll-export' },
+  { key: 'custom', label: 'Custom Integrations (Add Your Own)', screen: 'custom' },
+  { key: 'branding', label: 'Company Branding (Logo & Name)', screen: 'branding' }
 ];
 
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const deviceCount = db.prepare("SELECT COUNT(*) c FROM biometric_devices WHERE status = 'Active'").get().c;
+  const customCount = db.prepare("SELECT COUNT(*) c FROM custom_integrations WHERE status = 'Active'").get().c;
   res.json({
     features: KEY_FEATURES,
     status: {
@@ -34,7 +37,8 @@ router.get('/overview', (req, res) => {
       biometricDevices: deviceCount,
       slack: !!getSetting('slack_webhook_url'),
       teams: !!getSetting('teams_webhook_url'),
-      calendarConnected: googleCalendar.isConnected()
+      calendarConnected: googleCalendar.isConnected(),
+      customIntegrations: customCount
     }
   });
 });
@@ -239,5 +243,46 @@ router.get('/payroll-export/:period', (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="salary-transfer-${period.replace(/\s+/g, '-')}.csv"`);
   res.send(csv);
 });
+
+// ---------- Custom Integrations (Super Admin adds their own, beyond the 5 built-in ones) ----------
+router.get('/custom', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ integrations: db.prepare('SELECT * FROM custom_integrations ORDER BY created_at DESC').all() });
+});
+
+router.post('/custom', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { name, description, logo, url } = req.body || {};
+  if (!name?.trim()) return res.status(400).json({ error: 'Name is required' });
+  if (db.prepare('SELECT 1 FROM custom_integrations WHERE name = ?').get(name.trim())) {
+    return res.status(409).json({ error: 'An integration with this name already exists' });
+  }
+  const info = db.prepare('INSERT INTO custom_integrations (name, description, logo, url, created_by) VALUES (?, ?, ?, ?, ?)')
+    .run(name.trim(), description?.trim() || null, logo || null, url?.trim() || null, req.user.sub);
+  res.status(201).json({ integration: db.prepare('SELECT * FROM custom_integrations WHERE id = ?').get(info.lastInsertRowid) });
+});
+
+router.put('/custom/:id', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const existing = db.prepare('SELECT * FROM custom_integrations WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'Integration not found' });
+  const { name, description, logo, url, status } = req.body || {};
+  db.prepare(`
+    UPDATE custom_integrations SET
+      name = COALESCE(?, name), description = COALESCE(?, description),
+      logo = COALESCE(?, logo), url = COALESCE(?, url),
+      status = COALESCE(?, status)
+    WHERE id = ?
+  `).run(
+    name?.trim() || null, description !== undefined ? description.trim() : null,
+    logo !== undefined ? logo : null, url !== undefined ? url.trim() : null,
+    ['Active', 'Paused'].includes(status) ? status : null, req.params.id
+  );
+  res.json({ integration: db.prepare('SELECT * FROM custom_integrations WHERE id = ?').get(req.params.id) });
+});
+
+// Company Branding (logo + name) is served by branding.routes.js at /api/branding — its GET
+// is intentionally public (the Login page needs it pre-auth), so the Integrations screen's
+// "Company Branding" tile reads/writes that same endpoint rather than duplicating it here.
 
 export default router;

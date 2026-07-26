@@ -1141,6 +1141,20 @@ function migrate() {
       raw_line TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Self-service: Super Admin adds their own integration entries beyond the 5 built-in
+    -- ones (any third-party tool, with its own logo/icon for recognizability) — never
+    -- deleted, only paused, matching the custom_modules convention.
+    CREATE TABLE IF NOT EXISTS custom_integrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      description TEXT,
+      logo TEXT,
+      url TEXT,
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
   // Google Calendar sync target: which Training Session event (if any) a session has already
   // been pushed as, so re-saving a session never creates a duplicate calendar entry.

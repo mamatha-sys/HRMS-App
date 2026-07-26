@@ -6,7 +6,9 @@ const KEY_FEATURES = [
   { key: 'biometric', label: 'Biometric Device Integration (eSSL)' },
   { key: 'webhooks', label: 'Slack & Microsoft Teams Alerts' },
   { key: 'calendar', label: 'Calendar Sync (Google)' },
-  { key: 'payroll-export', label: 'Payroll Bank-Transfer Export' }
+  { key: 'payroll-export', label: 'Payroll Bank-Transfer Export' },
+  { key: 'custom', label: 'Custom Integrations (Add Your Own)' },
+  { key: 'branding', label: 'Company Branding (Logo & Name)' }
 ];
 
 export default function Integrations() {
@@ -22,6 +24,8 @@ export default function Integrations() {
   if (screen === 'webhooks') return <WebhooksScreen onBack={() => { load(); setScreen('dashboard'); }} />;
   if (screen === 'calendar') return <CalendarScreen onBack={() => { load(); setScreen('dashboard'); }} />;
   if (screen === 'payroll-export') return <PayrollExportScreen onBack={() => setScreen('dashboard')} />;
+  if (screen === 'custom') return <CustomIntegrationsScreen onBack={() => { load(); setScreen('dashboard'); }} />;
+  if (screen === 'branding') return <BrandingScreen onBack={() => { load(); setScreen('dashboard'); }} />;
 
   const s = overview?.status;
   return (
@@ -41,6 +45,7 @@ export default function Integrations() {
             <StatusPill label="Slack" ok={s.slack} />
             <StatusPill label="Teams" ok={s.teams} />
             <StatusPill label="Google Calendar" ok={s.calendarConnected} />
+            <StatusPill label={`Custom Integrations (${s.customIntegrations})`} ok={s.customIntegrations > 0} />
           </div>
         </div>
       )}
@@ -379,6 +384,179 @@ function PayrollExportScreen({ onBack }) {
         <div>
           <button className="primary" onClick={download}>Export CSV</button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+const MAX_LOGO_BYTES = 1 * 1024 * 1024;
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// ---------- Custom Integrations (add your own, beyond the 5 built-in ones) ----------
+function CustomIntegrationsScreen({ onBack }) {
+  const [integrations, setIntegrations] = useState([]);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ name: '', description: '', url: '', logo: '' });
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState({ name: '', description: '', url: '' });
+
+  function load() { api.get('/integrations/custom').then((r) => setIntegrations(r.data.integrations)).catch(() => setError('Could not load custom integrations.')); }
+  useEffect(load, []);
+
+  async function handleLogo(e, setter, current) {
+    const file = e.target.files?.[0]; if (!file) return;
+    if (file.size > MAX_LOGO_BYTES) { setError('Logo is too large (max 1 MB).'); return; }
+    const dataUrl = await readFileAsDataUrl(file);
+    setter({ ...current, logo: dataUrl });
+  }
+
+  async function add(e) {
+    e.preventDefault(); setError('');
+    if (!form.name.trim()) { setError('Name is required.'); return; }
+    try {
+      await api.post('/integrations/custom', form);
+      setForm({ name: '', description: '', url: '', logo: '' });
+      setShowForm(false);
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not add integration.'); }
+  }
+
+  function startEdit(i) {
+    setEditingId(i.id);
+    setEditForm({ name: i.name, description: i.description || '', url: i.url || '' });
+  }
+  async function saveEdit(id) {
+    setError('');
+    try { await api.put(`/integrations/custom/${id}`, editForm); setEditingId(null); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
+  async function toggleStatus(i) {
+    setError('');
+    try { await api.put(`/integrations/custom/${i.id}`, { status: i.status === 'Active' ? 'Paused' : 'Active' }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Integrations</button>
+      <h1>Custom Integrations</h1>
+      <div className="subtitle">Add your own integration entries for any third-party tool not built in — give each one its own logo so it's easy to recognize.</div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        {integrations.length === 0 && <div className="empty">No custom integrations added yet.</div>}
+        {integrations.map((i) => (
+          <div key={i.id} className="rec-row" style={{ opacity: i.status === 'Paused' ? 0.6 : 1, alignItems: 'flex-start' }}>
+            {editingId === i.id ? (
+              <>
+                <span style={{ flex: 1 }}>
+                  <input autoFocus value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} style={{ marginBottom: 6 }} />
+                  <input placeholder="Description" value={editForm.description} onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} style={{ marginBottom: 6 }} />
+                  <input placeholder="Link / webhook URL" value={editForm.url} onChange={(e) => setEditForm({ ...editForm, url: e.target.value })} />
+                </span>
+                <span className="row" style={{ gap: 6 }}>
+                  <button className="primary" onClick={() => saveEdit(i.id)}>Save</button>
+                  <button onClick={() => setEditingId(null)}>Cancel</button>
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="row" style={{ gap: 10, alignItems: 'center' }}>
+                  {i.logo ? <img src={i.logo} alt="" style={{ width: 32, height: 32, objectFit: 'contain', borderRadius: 6 }} /> : <span className="dot" />}
+                  <span>
+                    <strong>{i.name}</strong>
+                    {i.description && <div className="feature-meta">{i.description}</div>}
+                    {i.url && <div className="feature-meta"><a href={i.url} target="_blank" rel="noreferrer">{i.url}</a></div>}
+                  </span>
+                </span>
+                <span className="row" style={{ gap: 6 }}>
+                  <span className={'status-tag ' + (i.status === 'Active' ? 'present' : 'locked')}>{i.status}</span>
+                  <button onClick={() => startEdit(i)}>Edit</button>
+                  <button onClick={() => toggleStatus(i)}>{i.status === 'Active' ? 'Pause' : 'Resume'}</button>
+                </span>
+              </>
+            )}
+          </div>
+        ))}
+
+        {showForm ? (
+          <form onSubmit={add} style={{ marginTop: 10, borderTop: '1px solid #EEF0F3', paddingTop: 10 }}>
+            <label className="field-label">Name *</label>
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required style={{ marginBottom: 10 }} />
+            <label className="field-label">Description</label>
+            <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ marginBottom: 10 }} />
+            <label className="field-label">Link / webhook URL</label>
+            <input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} style={{ marginBottom: 10 }} />
+            <label className="field-label">Logo</label>
+            <div className="row" style={{ alignItems: 'center', gap: 10, marginBottom: 10 }}>
+              {form.logo && <img src={form.logo} alt="" style={{ width: 40, height: 40, objectFit: 'contain', borderRadius: 6 }} />}
+              <input type="file" accept="image/*" onChange={(e) => handleLogo(e, setForm, form)} />
+            </div>
+            <div className="row">
+              <button className="primary" type="submit">+ Add Integration</button>
+              <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+            </div>
+          </form>
+        ) : (
+          <button className="primary" style={{ marginTop: 10 }} onClick={() => setShowForm(true)}>+ Add Custom Integration</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- Company Branding (logo + name) ----------
+function BrandingScreen({ onBack }) {
+  const [form, setForm] = useState({ company_name: '', company_logo: '' });
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { api.get('/branding').then((r) => setForm({ company_name: r.data.company_name || '', company_logo: r.data.company_logo || '' })).catch(() => {}); }, []);
+
+  async function handleLogo(e) {
+    const file = e.target.files?.[0]; if (!file) return;
+    if (file.size > MAX_LOGO_BYTES) { setError('Logo is too large (max 1 MB).'); return; }
+    const dataUrl = await readFileAsDataUrl(file);
+    setForm((f) => ({ ...f, company_logo: dataUrl }));
+  }
+
+  async function save(e) {
+    e.preventDefault(); setError(''); setSaved(false);
+    try { await api.put('/branding', form); setSaved(true); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
+  async function removeLogo() {
+    setForm((f) => ({ ...f, company_logo: '' }));
+  }
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Integrations</button>
+      <h1>Company Branding</h1>
+      <div className="subtitle">Your own company logo &amp; name, shown on the Login page and in the app header for everyone.</div>
+      {error && <div className="banner error">{error}</div>}
+      {saved && <div className="banner" style={{ background: '#E4F5EC', color: '#1E8E5A' }}>Saved.</div>}
+
+      <div className="card">
+        <form onSubmit={save}>
+          <label className="field-label">Company name</label>
+          <input placeholder="HRMS" value={form.company_name} onChange={(e) => setForm({ ...form, company_name: e.target.value })} style={{ marginBottom: 10 }} />
+          <label className="field-label">Logo</label>
+          <div className="row" style={{ alignItems: 'center', gap: 10, marginBottom: 10 }}>
+            {form.company_logo && <img src={form.company_logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain', borderRadius: 6, background: '#fff', border: '1px solid #EEF0F3' }} />}
+            <input type="file" accept="image/*" onChange={handleLogo} />
+            {form.company_logo && <button type="button" onClick={removeLogo}>Remove logo</button>}
+          </div>
+          <button className="primary" type="submit">Save</button>
+        </form>
       </div>
     </div>
   );

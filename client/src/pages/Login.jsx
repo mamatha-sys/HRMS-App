@@ -23,6 +23,9 @@ export default function Login() {
   const [videoInfo, setVideoInfo] = useState('');
   const [faceMismatch, setFaceMismatch] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [branding, setBranding] = useState(null);
+
+  useEffect(() => { api.get('/branding').then((r) => setBranding(r.data)).catch(() => {}); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,7 +120,10 @@ export default function Login() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <div className="login-brand">HRMS</div>
+        <div className="login-brand">
+          {branding?.company_logo && <img src={branding.company_logo} alt="" className="brand-logo" />}
+          {branding?.company_name || 'HRMS'}
+        </div>
         <div className="login-subtitle">Sign in with email, password &amp; face verification</div>
 
         {error && <div className="banner error">{error}</div>}
