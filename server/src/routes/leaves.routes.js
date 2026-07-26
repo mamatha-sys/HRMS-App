@@ -1,14 +1,15 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '08' (Leave Management).
+const isHR = (role) => canModuleAdmin(role, '08');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function activeTypes() { return db.prepare('SELECT * FROM leave_types WHERE active = 1 ORDER BY id').all(); }
@@ -211,7 +212,10 @@ function restoreBalanceForLeave(leave) {
 
 function decideCancel(finalStatus) {
   return (req, res) => {
-    if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+    // Feature-level gate: cancellation decisions are part of the 'Leave Approval' feature —
+    // a role needs the specific Approve/Reject action granted, not just module-level access.
+    const action = finalStatus === 'Approved' ? 'Approve' : 'Reject';
+    if (!canFeatureAction(req.user.role, '08', 'Leave Approval', action)) return res.status(403).json({ error: 'Insufficient permissions' });
     const c = db.prepare('SELECT * FROM leave_cancellations WHERE id = ?').get(req.params.id);
     if (!c) return res.status(404).json({ error: 'Cancellation request not found' });
     if (c.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });

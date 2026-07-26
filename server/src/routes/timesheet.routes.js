@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '21' (Timesheet).
+const isHR = (role) => canModuleAdmin(role, '21');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function withDetails(rows) {
@@ -51,7 +52,8 @@ router.get('/overview', (req, res) => {
 
 function decide(finalStatus) {
   return (req, res) => {
-    if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+    // Feature-level gate: this is exactly the 'Timesheet Approval' feature.
+    if (!canFeatureAction(req.user.role, '21', 'Timesheet Approval', 'Approve')) return res.status(403).json({ error: 'Insufficient permissions' });
     const entry = db.prepare('SELECT * FROM timesheet_entries WHERE id = ?').get(req.params.id);
     if (!entry) return res.status(404).json({ error: 'Entry not found' });
     if (entry.status !== 'Pending') return res.status(400).json({ error: 'This entry has already been decided' });

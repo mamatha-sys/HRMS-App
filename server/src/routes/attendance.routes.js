@@ -1,14 +1,15 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '07' (Attendance & Time Tracking).
+const isHR = (role) => canModuleAdmin(role, '07');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const SCOPE_BANNER = {

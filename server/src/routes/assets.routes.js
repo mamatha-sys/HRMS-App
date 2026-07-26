@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '12' (Asset Management).
+const isHR = (role) => canModuleAdmin(role, '12');
 // Final approval authority — assets added by a Manager/Assistant Manager go through this
 // role's sign-off before they can be assigned (the "Asset Approval" feature).
 const APPROVAL_AUTHORITY = ['super_admin', 'hr_admin'];
@@ -199,7 +200,8 @@ router.put('/:id/pause', (req, res) => {
 // Company rule: an asset cannot be assigned to more than one active employee at a time — a
 // currently-assigned asset must be returned first before it can be reassigned.
 router.put('/:id/assign', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Feature-level gate: this is exactly the 'Asset Allocation' feature.
+  if (!canFeatureAction(req.user.role, '12', 'Asset Allocation', 'Assign')) return res.status(403).json({ error: 'Insufficient permissions' });
   const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Asset not found' });
   if (asset.approval_status !== 'Approved') return res.status(400).json({ error: 'This asset is awaiting approval and cannot be assigned yet.' });

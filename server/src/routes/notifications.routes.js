@@ -1,13 +1,12 @@
 import { Router } from 'express';
 import db from '../db.js';
-import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
+import { requireAuth } from '../middleware/auth.middleware.js';
+import { requireModule } from '../utils/rbac.js';
 import { sendNotification } from '../utils/notify.js';
 import { recentDeliveries } from '../utils/channels.js';
 
 const router = Router();
 router.use(requireAuth);
-
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 
 router.get('/', (req, res) => {
   const employee = db.prepare('SELECT * FROM employees WHERE user_id = ?').get(req.user.sub);
@@ -24,7 +23,7 @@ router.get('/', (req, res) => {
 });
 
 // Data the HR compose form needs: department list + employee picker.
-router.get('/compose-options', requireRole(...HR_ROLES), (req, res) => {
+router.get('/compose-options', requireModule('14'), (req, res) => {
   // Sourced from employees' actual department field (not the departments master list) — a
   // department can be "Paused" there for hiring/org-structure purposes while still having real
   // employees in it, and only departments with real people are useful to target here.
@@ -35,11 +34,11 @@ router.get('/compose-options', requireRole(...HR_ROLES), (req, res) => {
 
 // Log of every real Email/SMS/WhatsApp send attempt, across both Notifications and
 // Announcements — the "Notification Log" view.
-router.get('/deliveries', requireRole(...HR_ROLES), (req, res) => {
+router.get('/deliveries', requireModule('14'), (req, res) => {
   res.json({ deliveries: recentDeliveries(50) });
 });
 
-router.post('/', requireRole(...HR_ROLES), async (req, res) => {
+router.post('/', requireModule('14'), async (req, res) => {
   const { title, message, target_role, target_department, employee_ids, channels } = req.body || {};
   if (!title || !message) return res.status(400).json({ error: 'title and message are required' });
   const role = ['all', 'super_admin', 'manager', 'employee'].includes(target_role) ? target_role : 'all';

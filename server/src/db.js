@@ -1304,6 +1304,101 @@ function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  migratePermissionCatalog();
+}
+
+// The original permission-matrix catalog (perm_modules/perm_features) only covered the first
+// 11 modules built in this app. Every module added since (Helpdesk through Disciplinary) was
+// missing from Manage Roles entirely. This adds them, idempotently (guarded per-module-name so
+// re-running is always safe), with default grants chosen to exactly preserve today's real
+// behavior: super_admin/hr_admin/manager/assistant_manager (the roles every one of these
+// modules' HR_ROLES arrays already includes) get full access; stl/tl/employee get baseline
+// View — nothing changes for anyone until Super Admin actively edits the matrix. Only
+// HR/admin-facing features are catalogued here (never an employee's own self-service actions
+// like applying for leave or logging their own hours) — matching how the original 11 modules
+// were scoped, and so the matrix can never be used to accidentally lock an employee out of
+// their own self-service screens.
+function migratePermissionCatalog() {
+  const NEW_MODULES = [
+    { name: 'Helpdesk', items: [
+      'Ticket Creation, Assignment & Categorization', 'SLA Tracking & Status', 'Ticket Resolution, Closure & Reopening',
+      'Internal Notes, Attachments & Screenshots', 'Knowledge Base', 'Auto Routing & Email Notifications',
+      'Ticket Escalation', 'CSAT / Customer Satisfaction Feedback', 'Helpdesk Dashboard, Reports & Analytics'
+    ]},
+    { name: 'Announcements', items: [
+      'Post Announcement', 'Department / Individual Targeting', 'Multi-Channel Delivery (Email/SMS/WhatsApp)', 'Notification Log'
+    ]},
+    { name: 'Expense & Travel Claims', items: [
+      'Expense Claim Approval Chain', 'Reimbursement Processing', 'Expense Reports'
+    ]},
+    { name: 'Employee Engagement Surveys', items: [
+      'Build & Manage Survey', 'Activate / Deactivate Survey', 'Survey Results & Analytics'
+    ]},
+    { name: 'Document Management', items: [
+      'Upload & Manage Company Documents', 'Mandatory Acknowledgment Tracking', 'Document Library'
+    ]},
+    { name: 'Shift & Roster', items: [
+      'Shift Pattern Management', 'Roster Assignment', 'Shift Swap Approval'
+    ]},
+    { name: 'Rewards & Recognition', items: [
+      'Recognition Feed & Leaderboard', 'Recognition Analytics'
+    ]},
+    { name: 'Project & Resource Management', items: [
+      'Project Catalog & Assignment', 'Resource Allocation Overview'
+    ]},
+    { name: 'Timesheet', items: [
+      'Timesheet Approval', 'Timesheet Reports', 'Task Assignment (My Tasks)'
+    ]},
+    { name: 'Disciplinary Action Tracking', items: [
+      'Case Log & Timeline', 'Case Resolution'
+    ]}
+  ];
+  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager', 'assistant_manager'];
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+
+  const roles = db.prepare('SELECT id, key FROM roles').all();
+  if (!roles.length) return; // fresh DB — seed() will run and cover the original 11; this
+                              // migration only needs to backfill an already-seeded live DB.
+
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM perm_modules').get().m;
+  const insertModule = db.prepare('INSERT INTO perm_modules (code, name, sort_order) VALUES (?, ?, ?)');
+  const insertFeature = db.prepare('INSERT INTO perm_features (module_id, category, name, sort_order) VALUES (?, ?, ?, ?)');
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+
+  NEW_MODULES.forEach((m, i) => {
+    if (db.prepare('SELECT 1 FROM perm_modules WHERE name = ?').get(m.name)) return; // already added
+    const code = String(13 + i).padStart(2, '0');
+    const moduleId = insertModule.run(code, m.name, maxSort + 1 + i).lastInsertRowid;
+    m.items.forEach((item, fi) => {
+      const featureId = insertFeature.run(moduleId, 'Core Records & Day-to-Day Operations', item, fi).lastInsertRowid;
+      roles.forEach((r) => {
+        if (FULL_ACCESS_ROLES.includes(r.key)) ACTIONS.forEach((a) => insertGrant.run(r.id, featureId, a));
+        else insertGrant.run(r.id, featureId, 'View');
+      });
+    });
+  });
+
+  migrateManagerFullAccess();
+}
+
+// The original 11-module seed() only ever gave 'super_admin'/'hr_admin' the full action set,
+// with every other role (including manager/assistant_manager) getting 'View' only. But every
+// route file's real isHR() gate has always treated manager/assistant_manager as full HR access
+// alongside super_admin/hr_admin — so their permission-matrix rows never matched their actual
+// live behavior. Backfill them to full access on every feature (idempotent INSERT OR IGNORE)
+// so turning on feature-level enforcement doesn't newly lock out access these roles already have.
+function migrateManagerFullAccess() {
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+  const roleIds = db.prepare("SELECT id FROM roles WHERE key IN ('manager', 'assistant_manager')").all().map((r) => r.id);
+  if (!roleIds.length) return;
+  const featureIds = db.prepare('SELECT id FROM perm_features').all().map((f) => f.id);
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+  roleIds.forEach((roleId) => {
+    featureIds.forEach((featureId) => {
+      ACTIONS.forEach((a) => insertGrant.run(roleId, featureId, a));
+    });
+  });
 }
 
 // One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a

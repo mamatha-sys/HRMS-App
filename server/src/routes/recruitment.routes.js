@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import db, { ONBOARDING_TASK_DEFAULTS, OFFBOARDING_TASK_DEFAULTS } from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '05' (Recruitment Management).
+const isHR = (role) => canModuleAdmin(role, '05');
 
 const SCOPE_BANNER = {
   super_admin: 'Full Access — create & approve requisitions, manage postings, configure workflow, final hiring approval, onboarding through offboarding.',

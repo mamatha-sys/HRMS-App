@@ -1,13 +1,16 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
 // "HR" = anyone who can administer employee records / approve the onboarding workflow.
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Module-level access is real, dynamic RBAC via Manage Roles (server/src/utils/rbac.js) —
+// Super Admin always passes; every other role must have been granted at least one permission
+// on module '02' (Employee Management), or every HR-admin action here is hidden/blocked.
+const isHR = (role) => canModuleAdmin(role, '02');
 function requireHR(req, res, next) {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   next();

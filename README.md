@@ -126,15 +126,15 @@ A dedicated module connecting the HRMS to real external systems, with a status d
 
 None of the external integrations invent credentials — Twilio/SMTP/Slack/Teams/Google all require you to supply your own real account details (see `server/.env.example` and the Integrations screen itself); every one fails safely with a clear reason logged instead of crashing when left unconfigured.
 
-Role access is strictly layered: **Super Admin has full, unrestricted access everywhere** (every module, every admin screen, read-only-safe on its own role); **HR Admin** and **Manager/Assistant Manager** get the operational HR screens (Attendance/Leave/Payroll/Employee Management) but are blocked from Super-Admin-only configuration (Manage Roles, Configurations, adding Leave Types) — verified via direct API checks.
+Role access is strictly layered: **Super Admin has full, unrestricted access everywhere** (every module, every admin screen, read-only-safe on its own role); **HR Admin** and **Manager/Assistant Manager** get the operational HR screens (Attendance/Leave/Payroll/Employee Management) but are blocked from Super-Admin-only configuration (Manage Roles, Configurations, adding Leave Types) — verified via direct API checks. See **Role model & enforcement** below for how this is now dynamically driven by the Manage Roles permission matrix, not hardcoded.
 
 ### Admin (Super Admin only)
 
 - **Configurations** — customize the Dashboard: toggle which cards/charts/widgets are shown. Persisted server-side; applies to everyone's dashboard.
-- **Manage Roles** — a full **Role Catalog → Edit Access → Configure** flow:
+- **Manage Roles** — a full **Role Catalog → Edit Access → Configure** flow, now backing *real, dynamically-enforced* RBAC (see **Role model & enforcement** below):
   - **Role Catalog** — 7 roles (Super Admin, HR Admin, Manager, Assistant Manager, Senior Team Lead, Team Lead, Employee) each with a data-scope description; **+ Create Role** adds new ones.
-  - **Edit Access** — per role, a data-scope banner plus the module list (Dashboard Management, Employee Management, Organization, Recruitment, Onboarding, Attendance, Leave, Payroll, PMS, LMS, Asset Management).
-  - **Configure** — a feature × action permission matrix: each feature (grouped by category) has checkboxes for the 12 actions (View, Create, Edit, Delete, Approve, Reject, Assign, Import, Export, Download, Print, Manage). Toggles persist immediately. Super Admin's matrix is read-only (always full access).
+  - **Edit Access** — per role, a data-scope banner plus all 21 system modules (Dashboard, Employee Management, Organization Structure, Recruitment, Onboarding, Attendance, Leave, Payroll, PMS, LMS, Asset Management, Helpdesk, Announcements, Expense & Travel Claims, Engagement Surveys, Document Management, Shift & Roster, Rewards & Recognition, Project & Resource Management, Timesheet, Disciplinary Action Tracking), each showing how many of its features have at least one action granted.
+  - **Configure** — a feature × action permission matrix: each feature (grouped by category) has checkboxes for the 12 actions (View, Create, Edit, Delete, Approve, Reject, Assign, Import, Export, Download, Print, Manage). Toggles persist immediately and take effect immediately — no restart, no redeploy. Super Admin's matrix is read-only (always full access).
 
 Admin screens (in the sidebar for Super Admin, plus reachable from dashboard Quick Actions):
 - **Configurations** — toggle which dashboard widgets are visible.
@@ -151,7 +151,16 @@ Other screens (reachable from Quick Actions):
 
 ## Role model & enforcement
 
-Roles are a real database table (7 seeded roles, extensible via **+ Create Role**). Login accepts any role key. **Enforced today:** Super Admin = full access; the Employee Management field masking; approve/reject gated to decider roles; module/admin route guards. The granular feature×action matrix in **Manage Roles** is fully persisted, editable configuration — the two live modules (Dashboard, Employee Management) are wired to it where meaningful, while the catalog modules that don't yet have their own screens (Payroll, LMS, etc.) store their grants as configuration for when those modules are built.
+Roles are a real database table (7 seeded roles, extensible via **+ Create Role**). Login accepts any role key.
+
+The Manage Roles permission matrix (`perm_modules` / `perm_features` / `role_permissions`) drives **real, dynamic role-based access control** across every one of the app's 21 modules — not just Dashboard and Employee Management:
+
+- **Module-level gating** — every module's HR/admin routes (`server/src/routes/*.routes.js`) check `canModuleAdmin(role, moduleCode)` (`server/src/utils/rbac.js`): true if the role has any action *beyond plain View* granted on any feature in that module. This mirrors what "HR access to this module" always meant in practice, and lets Super Admin dynamically revoke or grant it per role without touching code.
+- **Feature-level gating** — specific high-value admin actions (Leave cancellation approve/reject, Payroll Run, Asset Allocation/assign, Ticket Escalation, Timesheet Approval, Shift Swap Approval, Expense Reimbursement, Survey Activate/Deactivate, Disciplinary Case Resolution, Department Vacancy approval, and more) check `canFeatureAction(role, moduleCode, featureName, action)` for that exact feature + action, giving the granularity the matrix UI displays.
+- **Sidebar visibility** — `GET /api/my-access` returns the calling user's full permission map; the Sidebar (`client/src/components/Sidebar.jsx`) fetches it and hides any module the role has zero access to (not even View). A revoked module disappears from the menu **and** its API returns 403 — verified end-to-end with a real Team Lead account: revoking Asset Management removed it from both the sidebar and `/api/assets/*`, while granting `Approve` on the Leave Approval feature immediately unlocked `/api/leaves/cancellations` for that same role, with no server restart.
+- **Deliberately out of scope** — this governs HR/admin actions only. An employee's own baseline self-service (applying for their own leave, logging their own timesheet hours, raising their own ticket, viewing their own payslip, etc.) is intrinsic to every authenticated account and is never gated by the matrix, so Super Admin can't accidentally lock employees out of the app for themselves. The pre-existing **sequential approval chain** (Leave/Attendance-regularization/Expense approvals, governed by `roles.sort_order` in Organization Structure) and **field-level masking** (`field_permissions`, e.g. Bank Details/Identity Documents) are separate, unaffected systems.
+- **Safe by default** — every role's starting grants exactly reproduce the app's pre-matrix behavior (Super Admin/HR Admin/Manager/Assistant Manager get full access; Senior Team Lead/Team Lead/Employee get View-only) — so this system changes nothing for any existing user until Super Admin actively edits a role's access in Manage Roles.
+- Super Admin/Organization Structure/Configurations/Manage Roles/User Management/Integrations remain Super-Admin-only infrastructure and are deliberately not part of the assignable module catalog.
 
 ## Attendance & payroll data
 

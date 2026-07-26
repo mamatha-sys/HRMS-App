@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -8,8 +9,8 @@ router.use(requireAuth);
 // Sensitive HR data: only HR roles manage/see the full list; an employee may only ever see
 // their own cases (read-only), never another employee's — same privacy rule as the PIP flag
 // in Performance Management.
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '22' (Disciplinary Action Tracking).
+const isHR = (role) => canModuleAdmin(role, '22');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function withEmployee(rows) {
@@ -58,7 +59,8 @@ router.post('/:id/notes', (req, res) => {
 });
 
 router.put('/:id', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Feature-level gate: updating status/resolution is exactly the 'Case Resolution' feature.
+  if (!canFeatureAction(req.user.role, '22', 'Case Resolution', 'Manage')) return res.status(403).json({ error: 'Insufficient permissions' });
   const c = db.prepare('SELECT * FROM disciplinary_cases WHERE id = ?').get(req.params.id);
   if (!c) return res.status(404).json({ error: 'Case not found' });
   const { status, resolution_notes } = req.body || {};

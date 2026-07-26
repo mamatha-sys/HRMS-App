@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '16' (Employee Engagement Surveys).
+const isHR = (role) => canModuleAdmin(role, '16');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function questionsOf(surveyId) {
@@ -38,7 +39,8 @@ router.post('/', (req, res) => {
 
 // Activate / close a survey.
 router.put('/:id', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Feature-level gate: this is exactly the 'Activate / Deactivate Survey' feature.
+  if (!canFeatureAction(req.user.role, '16', 'Activate / Deactivate Survey', 'Manage')) return res.status(403).json({ error: 'Insufficient permissions' });
   const survey = db.prepare('SELECT * FROM surveys WHERE id = ?').get(req.params.id);
   if (!survey) return res.status(404).json({ error: 'Survey not found' });
   const status = ['Draft', 'Active', 'Closed'].includes(req.body?.status) ? req.body.status : survey.status;

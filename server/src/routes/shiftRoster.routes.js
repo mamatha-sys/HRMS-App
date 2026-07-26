@@ -1,13 +1,14 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { bottomRole } from '../utils/chain.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '18' (Shift & Roster).
+const isHR = (role) => canModuleAdmin(role, '18');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 router.get('/shifts', (req, res) => {
@@ -98,7 +99,8 @@ router.get('/swap-requests', (req, res) => {
 
 function decideSwap(finalStatus) {
   return (req, res) => {
-    if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+    // Feature-level gate: this is exactly the 'Shift Swap Approval' feature.
+    if (!canFeatureAction(req.user.role, '18', 'Shift Swap Approval', 'Approve')) return res.status(403).json({ error: 'Insufficient permissions' });
     const swap = db.prepare('SELECT * FROM shift_swap_requests WHERE id = ?').get(req.params.id);
     if (!swap) return res.status(404).json({ error: 'Swap request not found' });
     if (swap.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });

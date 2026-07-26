@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { notifyAll, employeesForTarget } from '../utils/notify.js';
 import { dispatchChannels, recentDeliveries } from '../utils/channels.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
@@ -8,8 +9,8 @@ import { notifyWebhooks } from '../utils/webhooks.js';
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '14' (Announcements).
+const isHR = (role) => canModuleAdmin(role, '14');
 
 function withRecipients(rows) {
   return rows.map((a) => ({

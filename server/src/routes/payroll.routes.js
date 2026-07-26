@@ -1,12 +1,13 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
+import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
-const isHR = (role) => HR_ROLES.includes(role);
+// Dynamic RBAC via Manage Roles — module '09' (Payroll Management).
+const isHR = (role) => canModuleAdmin(role, '09');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const SCOPE_BANNER = {
@@ -144,7 +145,8 @@ function lateDeductionFor(employeeId, month, gross) {
 // period). Automatically deducts half a day's pay per late arrival beyond the free monthly
 // allowance (company rule), shown as its own line item on the payslip.
 router.post('/run', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Feature-level gate: this is exactly the 'Payroll Run' feature.
+  if (!canFeatureAction(req.user.role, '09', 'Payroll Run', 'Manage')) return res.status(403).json({ error: 'Insufficient permissions' });
   const { month } = req.body || {};
   if (!/^\d{4}-\d{2}$/.test(month || '')) return res.status(400).json({ error: 'month is required in YYYY-MM format' });
   const [y, m] = month.split('-');

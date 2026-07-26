@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
+import { canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 
 const router = Router();
 router.use(requireAuth);
-
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 
 // Job requisitions: everything except already-rejected ones.
 router.get('/', (req, res) => {
@@ -41,7 +40,8 @@ router.put('/:id', requireRole('super_admin', 'manager'), (req, res) => {
 
 // Approve / reject a pending requisition.
 router.put('/:id/decide', (req, res) => {
-  if (!HR_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  // Feature-level gate: this is exactly the 'Department Vacancies' feature.
+  if (!canFeatureAction(req.user.role, '05', 'Department Vacancies', 'Approve')) return res.status(403).json({ error: 'Insufficient permissions' });
   const position = db.prepare('SELECT * FROM positions WHERE id = ?').get(req.params.id);
   if (!position) return res.status(404).json({ error: 'Position not found' });
   if (position.approval_status !== 'Pending Approval') return res.status(400).json({ error: 'This requisition has already been decided.' });
@@ -53,7 +53,7 @@ router.put('/:id/decide', (req, res) => {
 
 // Set which job boards an approved requisition is posted live on.
 router.put('/:id/posting', (req, res) => {
-  if (!HR_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canModuleAdmin(req.user.role, '05')) return res.status(403).json({ error: 'Insufficient permissions' });
   const position = db.prepare('SELECT * FROM positions WHERE id = ?').get(req.params.id);
   if (!position) return res.status(404).json({ error: 'Position not found' });
   if (position.approval_status !== 'Approved') return res.status(400).json({ error: 'Only an approved requisition can be posted.' });

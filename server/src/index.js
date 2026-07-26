@@ -37,6 +37,7 @@ import recognitionRoutes from './routes/recognition.routes.js';
 import projectsRoutes from './routes/projects.routes.js';
 import timesheetRoutes from './routes/timesheet.routes.js';
 import disciplinaryRoutes from './routes/disciplinary.routes.js';
+import myAccessRoutes from './routes/myAccess.routes.js';
 
 const app = express();
 app.use(cors());
@@ -80,6 +81,7 @@ app.use('/api/recognition', recognitionRoutes);
 app.use('/api/projects', projectsRoutes);
 app.use('/api/timesheet', timesheetRoutes);
 app.use('/api/disciplinary', disciplinaryRoutes);
+app.use('/api/my-access', myAccessRoutes);
 
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {
