@@ -1245,6 +1245,37 @@ function migrate() {
     );
   `);
 
+  // --- Timesheet > My Tasks: real project task management. A task is normally on its
+  // creator's own list, but a manager/HR ("higher authority") can assign it straight to a
+  // specific employee via assigned_to_employee_id, so it shows up on that employee's own
+  // My Tasks list instead. ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      assigned_to_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      task_name TEXT NOT NULL,
+      description TEXT,
+      sub_task_name TEXT,
+      status TEXT NOT NULL DEFAULT 'Not Started' CHECK (status IN ('Not Started','In Progress','Completed','On Hold')),
+      start_date TEXT NOT NULL,
+      end_date TEXT,
+      is_dependent INTEGER NOT NULL DEFAULT 0,
+      depends_on_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS project_task_updates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,
+      author_name TEXT NOT NULL,
+      comment TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
   // --- Disciplinary Action Tracking: HR-only case log against an employee, with a timeline
   // of notes. An employee may see only their own cases (never another's), matching the
   // PIP-flag privacy pattern already used in Performance Management. ---
