@@ -12,7 +12,7 @@ const EMPTY_FORM = {
   employee_code: '', name: '', email: '', phone: '', photo: '', date_of_birth: '',
   emergency_contact_name: '', emergency_contact_relation: '', emergency_contact_number: '',
   address_street: '', address_city: '', address_state: '', address_country: '', address_pincode: '',
-  department: '', branch: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
+  department: '', branch: '', team_id: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
   shift: 'General (9:00 AM – 6:00 PM)',
   bank_name: '', bank_account_number: '', ifsc_code: '', education: '', experience: '', skills: '', documents: []
 };
@@ -42,6 +42,7 @@ export default function Employees() {
   const [employees, setEmployees] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [branches, setBranches] = useState([]);
+  const [teams, setTeams] = useState([]);
   const [assignableUsers, setAssignableUsers] = useState([]);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -65,6 +66,7 @@ export default function Employees() {
     if (!canHR) return;
     api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {});
     api.get('/org/branches').then((r) => setBranches(r.data.branches)).catch(() => {});
+    api.get('/org/teams').then((r) => setTeams(r.data.teams)).catch(() => {});
     api.get('/employees/assignable-users').then((r) => setAssignableUsers(r.data.users)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canHR]);
@@ -211,7 +213,7 @@ export default function Employees() {
                 <div className="note" style={{ marginTop: 8 }}>After saving, assign the draft to an employee so they can fill their own details.</div>
               </>
             ) : (
-              <FullEmployeeFields form={form} setForm={setForm} field={field} departments={departments} branches={branches}
+              <FullEmployeeFields form={form} setForm={setForm} field={field} departments={departments} branches={branches} teams={teams}
                 handlePhoto={handlePhoto} handleAddDocuments={handleAddDocuments} renameDocument={renameDocument} removeDocument={removeDocument} hr />
             )}
             <div className="row" style={{ marginTop: 14 }}>
@@ -294,7 +296,7 @@ export default function Employees() {
 }
 
 // ---------- Shared full-fields form ----------
-function FullEmployeeFields({ form, setForm, field, departments, branches, handlePhoto, handleAddDocuments, renameDocument, removeDocument, hr }) {
+function FullEmployeeFields({ form, setForm, field, departments, branches, teams, handlePhoto, handleAddDocuments, renameDocument, removeDocument, hr }) {
   return (
     <>
       <div className="section-label" style={{ paddingLeft: 0 }}>Personal information</div>
@@ -338,7 +340,7 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, handl
           <div className="grid2">
             <div>
               <label className="field-label">Department</label>
-              <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} required>
+              <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value, team_id: '' })} required>
                 <option value="">Select department</option>
                 {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
               </select>
@@ -350,6 +352,19 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, handl
                 {branches.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
               </select>
             </div>
+            {(() => {
+              const teamsForDept = teams.filter((t) => t.department_name === form.department);
+              if (teamsForDept.length === 0) return null;
+              return (
+                <div>
+                  <label className="field-label">Team <span className="note">(optional)</span></label>
+                  <select value={form.team_id || ''} onChange={(e) => setForm({ ...form, team_id: e.target.value ? Number(e.target.value) : '' })}>
+                    <option value="">No team</option>
+                    {teamsForDept.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                  </select>
+                </div>
+              );
+            })()}
             {field('designation', 'Designation')}
             {field('date_of_joining', 'Date of joining', 'date')}
             {field('reporting_manager', 'Reporting manager')}

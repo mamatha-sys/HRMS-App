@@ -54,6 +54,42 @@ router.put('/:id', (req, res) => {
   res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id)) });
 });
 
+// STL/TL supervisor scope: which departments (STL) or teams (TL) this specific person is
+// allowed to see/act on in Attendance, Leave and Approvals — see server/src/utils/scope.js.
+// Keyed by the user's linked employee record, since department_id/team_id live on employees.
+router.get('/:id/scope', (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const employee = db.prepare('SELECT id FROM employees WHERE user_id = ?').get(user.id);
+  if (!employee) return res.json({ departmentIds: [], teamIds: [] });
+  const rows = db.prepare('SELECT department_id, team_id FROM supervisor_scopes WHERE employee_id = ?').all(employee.id);
+  res.json({
+    departmentIds: rows.filter((r) => r.department_id).map((r) => r.department_id),
+    teamIds: rows.filter((r) => r.team_id).map((r) => r.team_id)
+  });
+});
+
+router.put('/:id/scope', (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const employee = db.prepare('SELECT id FROM employees WHERE user_id = ?').get(user.id);
+  if (!employee) return res.status(400).json({ error: 'This user has no linked employee record — link one in Employee Management first.' });
+
+  const departmentIds = Array.isArray(req.body?.departmentIds) ? req.body.departmentIds.filter((id) => Number.isInteger(id)) : [];
+  const teamIds = Array.isArray(req.body?.teamIds) ? req.body.teamIds.filter((id) => Number.isInteger(id)) : [];
+
+  const replace = db.transaction(() => {
+    db.prepare('DELETE FROM supervisor_scopes WHERE employee_id = ?').run(employee.id);
+    const insDept = db.prepare('INSERT INTO supervisor_scopes (employee_id, department_id) VALUES (?, ?)');
+    const insTeam = db.prepare('INSERT INTO supervisor_scopes (employee_id, team_id) VALUES (?, ?)');
+    departmentIds.forEach((id) => insDept.run(employee.id, id));
+    teamIds.forEach((id) => insTeam.run(employee.id, id));
+  });
+  replace();
+
+  res.json({ departmentIds, teamIds });
+});
+
 router.put('/:id/reset-face', (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });

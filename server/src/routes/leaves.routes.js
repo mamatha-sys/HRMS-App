@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
+import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
 
@@ -61,7 +62,7 @@ function daysBetween(from, to) {
   return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 
-const empOf = (id) => db.prepare('SELECT name, department FROM employees WHERE id = ?').get(id) || {};
+const empOf = (id) => db.prepare('SELECT name, department, team_id FROM employees WHERE id = ?').get(id) || {};
 const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
 const withName = (rows) => rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name, current_stage_name: roleNameOf(r.current_stage_role_id) }));
 
@@ -75,13 +76,20 @@ const SCOPE_BANNER = {
 // HR overview: KPIs + approval chain + leave types + on-leave-by-department.
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const myEmpId = myEmployee(req.user.sub)?.id;
 
-  const pending = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Pending'").get().c;
-  const approvedMtd = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Approved' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").get().c;
-  const rejectedMtd = db.prepare("SELECT COUNT(*) c FROM leaves WHERE status = 'Rejected' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").get().c;
-  const onLeaveToday = db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND cancelled = 0 AND date('now') BETWEEN from_date AND to_date").all();
+  // For a scoped role (stl/tl), every KPI/widget below is derived from filtered row sets
+  // (not raw SQL COUNTs) so the numbers reflect only their assigned departments/teams.
+  const withEmp = (rows) => rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
 
-  const chainList = withName(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC LIMIT 8").all())
+  const pendingRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending'").all()), req.user.role, myEmpId);
+  const approvedMtdRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
+  const rejectedMtdRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Rejected' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
+  const onLeaveToday = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND cancelled = 0 AND date('now') BETWEEN from_date AND to_date").all()), req.user.role, myEmpId);
+
+  const chainList = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC").all()), req.user.role, myEmpId)
+    .slice(0, 8)
+    .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, current_stage_name: roleNameOf(l.current_stage_role_id) }))
     .map((l) => ({ ...l, waiting_on: l.current_stage_name || bottomRole()?.name }));
 
   const byDept = {};
@@ -92,14 +100,17 @@ router.get('/overview', (req, res) => {
     (byDept[dept] = byDept[dept] || []).push({ name: e.name, type: l.type, from_date: l.from_date, to_date: l.to_date, reason: l.reason });
   });
 
-  const cancellationCount = db.prepare("SELECT COUNT(*) c FROM leave_cancellations WHERE status = 'Pending'").get().c;
+  const cancellationCount = filterToScope(
+    withEmp(db.prepare("SELECT lc.id, l.employee_id FROM leave_cancellations lc JOIN leaves l ON l.id = lc.leave_id WHERE lc.status = 'Pending'").all()),
+    req.user.role, myEmpId
+  ).length;
 
   res.json({
     banner: SCOPE_BANNER[req.user.role],
     kpis: [
-      { label: 'Pending Requests', value: pending, color: 'blue' },
-      { label: 'Approved (MTD)', value: approvedMtd, color: 'green' },
-      { label: 'Rejected (MTD)', value: rejectedMtd, color: 'red' },
+      { label: 'Pending Requests', value: pendingRows.length, color: 'blue' },
+      { label: 'Approved (MTD)', value: approvedMtdRows.length, color: 'green' },
+      { label: 'Rejected (MTD)', value: rejectedMtdRows.length, color: 'red' },
       { label: 'Employees on Leave Today', value: onLeaveToday.length, color: 'gold' },
       { label: 'Cancellation Requests', value: cancellationCount, color: 'gold' }
     ],
@@ -152,7 +163,10 @@ router.put('/types/:id/pause', (req, res) => {
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
-  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const employees = filterToScope(
+    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  );
   const balances = employees.map((e) => {
     const values = {};
     types.forEach((t) => { values[t.id] = t.unpaid ? daysTakenThisYear(e.id, t.id) : balanceOf(e.id, t.id); });
@@ -168,7 +182,10 @@ router.get('/reports', (req, res) => {
 router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
-  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const employees = filterToScope(
+    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  );
   const header = ['code', 'name', 'department', ...types.map((t) => t.unpaid ? `${t.code} (days used)` : t.code)];
   const rows = employees.map((e) => [e.employee_code, e.name, e.department, ...types.map((t) => t.unpaid ? daysTakenThisYear(e.id, t.id) : balanceOf(e.id, t.id))].join(','));
   const csv = [header.join(','), ...rows].join('\n');
@@ -183,7 +200,9 @@ router.get('/balance-history', (req, res) => {
     const rows = employeeId
       ? db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(employeeId)
       : db.prepare('SELECT * FROM leave_balance_history ORDER BY created_at DESC LIMIT 100').all();
-    return res.json({ history: rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
+    const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
+    const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+    return res.json({ history: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ history: [] });
@@ -198,7 +217,9 @@ router.get('/cancellations', (req, res) => {
     FROM leave_cancellations lc JOIN leaves l ON l.id = lc.leave_id
     WHERE lc.status = 'Pending' ORDER BY lc.created_at DESC
   `).all();
-  res.json({ cancellations: rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
+  const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
+  const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+  res.json({ cancellations: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
 });
 
 function restoreBalanceForLeave(leave) {
@@ -220,6 +241,10 @@ function decideCancel(finalStatus) {
     if (!c) return res.status(404).json({ error: 'Cancellation request not found' });
     if (c.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(c.leave_id);
+    if (isScopedRole(req.user.role)) {
+      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
+      if (!isEmployeeInScope(scope, empOf(leave.employee_id))) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+    }
 
     if (finalStatus === 'Approved') {
       restoreBalanceForLeave(leave);
@@ -238,7 +263,9 @@ router.post('/cancellations/:id/reject', decideCancel('Rejected'));
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
     const rows = db.prepare("SELECT * FROM leaves ORDER BY (status='Pending') DESC, created_at DESC").all();
-    return res.json({ leaves: withName(rows) });
+    const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
+    const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+    return res.json({ leaves: withName(scoped) });
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ leaves: [], balances: [] });
@@ -308,6 +335,16 @@ function decide(finalStatus) {
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
     if (!leave) return res.status(404).json({ error: 'Leave request not found' });
     if (leave.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
+
+    // A Senior Team Lead/Team Lead may only act on requests from employees within their
+    // assigned departments/teams — even though the chain says it's their turn — unlike every
+    // other HR-tier role in the chain, whose reach stays company-wide.
+    if (isScopedRole(req.user.role)) {
+      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
+      if (!isEmployeeInScope(scope, empOf(leave.employee_id))) {
+        return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+      }
+    }
 
     const result = evaluateDecision(req.user.role, leave.current_stage_role_id, finalStatus === 'Rejected');
     if (result.error) return res.status(403).json({ error: result.error });

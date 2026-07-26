@@ -1306,6 +1306,38 @@ function migrate() {
   `);
 
   migratePermissionCatalog();
+  migrateTeamsAndScopes();
+}
+
+// Sub-department "teams" (e.g. Education's Team-A/Team-B), an optional team_id on each
+// employee, and a supervisor_scopes table recording which specific departments (STL) or
+// teams (TL) a given employee — not role, since two different people can hold the same
+// 'stl'/'tl' role with different scopes — is allowed to see/act on. Deliberately not
+// auto-seeded with any Team-A/Team-B rows: departments here are the user's own live data,
+// so Super Admin creates teams and assigns scopes explicitly via the UI.
+function migrateTeamsAndScopes() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS teams (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(department_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS supervisor_scopes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+      team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      CHECK ((department_id IS NOT NULL) != (team_id IS NOT NULL))
+    );
+  `);
+
+  const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
+  if (!empCols.includes('team_id')) db.exec('ALTER TABLE employees ADD COLUMN team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL');
 }
 
 // The original permission-matrix catalog (perm_modules/perm_features) only covered the first

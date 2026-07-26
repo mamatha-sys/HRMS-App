@@ -162,6 +162,14 @@ The Manage Roles permission matrix (`perm_modules` / `perm_features` / `role_per
 - **Safe by default** — every role's starting grants exactly reproduce the app's pre-matrix behavior (Super Admin/HR Admin/Manager/Assistant Manager get full access; Senior Team Lead/Team Lead/Employee get View-only) — so this system changes nothing for any existing user until Super Admin actively edits a role's access in Manage Roles.
 - Super Admin/Organization Structure/Configurations/Manage Roles/User Management/Integrations remain Super-Admin-only infrastructure and are deliberately not part of the assignable module catalog.
 
+### Team & Senior Team Lead / Team Lead scoping
+
+On top of the module/feature matrix above, **Senior Team Lead (STL)** and **Team Lead (TL)** get a further, per-person restriction to specific departments/teams — a Team-A TL can only see and act on Team-A's Attendance/Leave/Approvals, never Team-B's, and Super Admin can assign one STL to several whole departments (e.g. Education + Medical) while another STL covers only Non-IT:
+
+- **Teams** — a new sub-department unit (e.g. Education's Team-A / Team-B), managed in **Organization Structure** alongside Departments/Branches (`teams` table: name + parent department, Edit/Pause, never deleted-with-history). Employees optionally belong to one team (`employees.team_id`), assignable from the Employee form's Team dropdown once their department has any teams.
+- **Supervisor scope** — in **Role & User Management**, any user with the STL or TL role gets an **Edit scope** picker: check whole departments (STL — covers every team within, plus any teamless employee in that department) and/or specific teams (TL — covers only that team's members). Stored in `supervisor_scopes`, keyed to the person's employee record (not their role), since two different STLs can supervise different departments. Unassigned by default — an STL/TL with nothing checked sees nothing (fails closed, never falls back to company-wide).
+- **Enforcement** (`server/src/utils/scope.js`) — for Attendance, Leave, and the general Approvals queue: every HR list/report endpoint is filtered to the caller's scope when they're STL/TL (`filterToScope`); every mutating action (marking attendance, deciding a leave cancellation, and the shared sequential-chain `approve`/`reject` used by Leave, Attendance regularization, and the general Approvals queue) rejects with a clear error if the target employee falls outside that scope — even if the chain's role ordering says it's their turn. Every other role (Manager, HR Admin, Super Admin, etc.) is completely unaffected and stays company-wide, exactly as before.
+
 ## Attendance & payroll data
 
 The new dashboard KPIs are backed by real tables: `attendance` (today's Present/Absent per employee, seeded on first run) and `payroll_runs` (current payroll status). These are demo-seeded — there's no attendance-capture or payroll-processing UI yet.

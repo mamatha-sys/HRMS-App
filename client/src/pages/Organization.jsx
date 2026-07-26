@@ -8,17 +8,20 @@ export default function Organization() {
 
   const [departments, setDepartments] = useState([]);
   const [branches, setBranches] = useState([]);
+  const [teams, setTeams] = useState([]);
   const [error, setError] = useState('');
   const [newDeptName, setNewDeptName] = useState('');
   const [newDeptParent, setNewDeptParent] = useState('');
   const [newBranchName, setNewBranchName] = useState('');
   const [newBranchLocation, setNewBranchLocation] = useState('');
-  const [editing, setEditing] = useState(null); // { type:'dept'|'branch', id }
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamDept, setNewTeamDept] = useState('');
+  const [editing, setEditing] = useState(null); // { type:'dept'|'branch'|'team', id }
   const [editValue, setEditValue] = useState('');
 
   function load() {
-    Promise.all([api.get('/org/departments'), api.get('/org/branches')])
-      .then(([d, b]) => { setDepartments(d.data.departments); setBranches(b.data.branches); })
+    Promise.all([api.get('/org/departments'), api.get('/org/branches'), api.get('/org/teams')])
+      .then(([d, b, t]) => { setDepartments(d.data.departments); setBranches(b.data.branches); setTeams(t.data.teams); })
       .catch(() => setError('Could not load organization structure.'));
   }
   useEffect(load, []);
@@ -43,11 +46,23 @@ export default function Organization() {
     } catch (err) { setError(err.response?.data?.error || 'Could not add branch.'); }
   }
 
+  async function addTeam(e) {
+    e.preventDefault();
+    setError('');
+    try {
+      await api.post('/org/teams', { name: newTeamName, department_id: newTeamDept });
+      setNewTeamName(''); setNewTeamDept('');
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not add team.'); }
+  }
+
+  const typePath = { dept: 'departments', branch: 'branches', team: 'teams' };
+
   async function togglePause(type, item) {
     setError('');
     const next = item.status === 'Paused' ? 'Active' : 'Paused';
     try {
-      await api.put(`/org/${type === 'dept' ? 'departments' : 'branches'}/${item.id}`, { status: next });
+      await api.put(`/org/${typePath[type]}/${item.id}`, { status: next });
       load();
     } catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
   }
@@ -58,7 +73,7 @@ export default function Organization() {
     e.preventDefault();
     setError('');
     try {
-      await api.put(`/org/${editing.type === 'dept' ? 'departments' : 'branches'}/${editing.id}`, { name: editValue });
+      await api.put(`/org/${typePath[editing.type]}/${editing.id}`, { name: editValue });
       setEditing(null);
       load();
     } catch (err) { setError(err.response?.data?.error || 'Could not rename.'); }
@@ -159,6 +174,46 @@ export default function Organization() {
             </form>
           )}
         </div>
+      </div>
+
+      <div className="card" style={{ marginTop: 16 }}>
+        <div className="feature-name" style={{ marginBottom: 4 }}>Teams</div>
+        <div className="feature-meta" style={{ marginBottom: 10 }}>Sub-units within a department (e.g. Education's Team-A / Team-B). Used to scope a Team Lead's or Senior Team Lead's Attendance/Leave/Approvals access in User &amp; Role Management — see Manage Users.</div>
+        {departments.map((d) => {
+          const deptTeams = teams.filter((t) => t.department_id === d.id);
+          if (deptTeams.length === 0) return null;
+          return (
+            <div key={d.id} style={{ marginBottom: 10 }}>
+              <div style={{ fontWeight: 600, fontSize: 13, opacity: 0.8 }}>{d.name}</div>
+              {deptTeams.map((t) => (
+                <div key={t.id} className="rec-row" style={{ paddingLeft: 20, opacity: t.status === 'Paused' ? 0.6 : 1 }}>
+                  {isEditing('team', t.id) ? (
+                    <form onSubmit={saveEdit} className="row" style={{ flex: 1, marginBottom: 0 }}>
+                      <input value={editValue} onChange={(e) => setEditValue(e.target.value)} autoFocus />
+                      <button className="primary" type="submit">Save</button>
+                      <button type="button" onClick={() => setEditing(null)}>Cancel</button>
+                    </form>
+                  ) : (
+                    <span>└ {t.name}{statusTag(t)}<div className="feature-meta">Added {t.created_at?.slice(0, 10)}</div></span>
+                  )}
+                  {actions('team', t)}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+        {teams.length === 0 && <div className="empty">No teams yet.</div>}
+
+        {isSuperAdmin && (
+          <form onSubmit={addTeam} className="row" style={{ marginTop: 14 }}>
+            <input placeholder="Team name (e.g. Team-A)" value={newTeamName} onChange={(e) => setNewTeamName(e.target.value)} required />
+            <select value={newTeamDept} onChange={(e) => setNewTeamDept(e.target.value)} required>
+              <option value="">Under department...</option>
+              {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+            </select>
+            <button className="primary" type="submit">+ Add</button>
+          </form>
+        )}
       </div>
     </div>
   );

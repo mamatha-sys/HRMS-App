@@ -2,6 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
+import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate } from '../utils/attendanceCore.js';
 
@@ -25,12 +26,13 @@ router.get('/overview', (req, res) => {
   const date = req.query.date || today();
   const dept = req.query.department || null;
 
-  const rows = db.prepare(`
-    SELECT e.department, a.status, a.check_in_time, a.check_out_time, a.method, a.half_day_flag
+  let rows = db.prepare(`
+    SELECT e.department, e.team_id, a.status, a.check_in_time, a.check_out_time, a.method, a.half_day_flag
     FROM employees e
     LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = @date
     WHERE (@dept IS NULL OR e.department = @dept)
   `).all({ date, dept });
+  rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
 
   const present = rows.filter((r) => r.status === 'Present').length;
   const absent = rows.filter((r) => r.status === 'Absent').length;
@@ -74,7 +76,10 @@ router.get('/biometric-list', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const monthPrefix = db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
 
-  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const employees = filterToScope(
+    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  );
   const rows = employees.map((e) => {
     const last = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND check_in_time IS NOT NULL ORDER BY date DESC LIMIT 1').get(e.id);
     const monthRows = db.prepare("SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?").all(e.id, monthPrefix + '%');
@@ -97,7 +102,10 @@ router.get('/monthly-report', (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
   const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(?  || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
 
-  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const employees = filterToScope(
+    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  );
   const rows = employees.map((e) => {
     const marks = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     const present = marks.filter((m) => m.status === 'Present').length;
@@ -114,7 +122,10 @@ router.get('/monthly-report', (req, res) => {
 router.get('/monthly-report/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
-  const employees = db.prepare('SELECT id, employee_code, name, department FROM employees ORDER BY id').all();
+  const employees = filterToScope(
+    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  );
   const rows = employees.map((e) => {
     const marks = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     return {
@@ -136,13 +147,14 @@ router.get('/monthly-report/export', (req, res) => {
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
     const date = req.query.date || today();
-    const rows = db.prepare(`
-      SELECT e.id AS employee_id, e.employee_code, e.name, e.department,
+    let rows = db.prepare(`
+      SELECT e.id AS employee_id, e.employee_code, e.name, e.department, e.team_id,
              a.status, a.check_in_time, a.check_out_time, a.method, a.latitude, a.longitude, a.half_day_flag
       FROM employees e
       LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ?
       ORDER BY e.id
     `).all(date);
+    rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
     const present = rows.filter((r) => r.status === 'Present').length;
     const absent = rows.filter((r) => r.status === 'Absent').length;
     const onLeave = rows.filter((r) => r.status === 'Leave').length;
@@ -189,6 +201,11 @@ router.post('/mark', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { employee_id, date, status } = req.body || {};
   if (!employee_id || !['Present', 'Absent', 'Leave'].includes(status)) return res.status(400).json({ error: 'employee_id and a valid status are required' });
+  if (isScopedRole(req.user.role)) {
+    const target = db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(employee_id);
+    const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
+    if (!isEmployeeInScope(scope, target)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+  }
   const d = date || today();
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employee_id, d);
   if (existing) db.prepare('UPDATE attendance SET status = ? WHERE id = ?').run(status, existing.id);
@@ -200,10 +217,11 @@ router.post('/mark', (req, res) => {
 router.get('/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const date = req.query.date || today();
-  const rows = db.prepare(`
-    SELECT e.employee_code, e.name, e.department, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
+  let rows = db.prepare(`
+    SELECT e.employee_code, e.name, e.department, e.team_id, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
     FROM employees e LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ? ORDER BY e.id
   `).all(date);
+  rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
   const csv = ['code,name,department,status,check_in,check_out,method,half_day_cut',
     ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.status},${r.check_in},${r.check_out},${r.method},${r.half_day_flag ? 1 : 0}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');

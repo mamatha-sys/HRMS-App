@@ -23,7 +23,7 @@ const HR_EDITABLE_FIELDS = [
   'name', 'email', 'phone', 'photo', 'date_of_birth',
   'emergency_contact_name', 'emergency_contact_relation', 'emergency_contact_number',
   ...ADDRESS_FIELDS,
-  'department', 'branch', 'designation', 'date_of_joining', 'reporting_manager', 'status', 'shift',
+  'department', 'branch', 'team_id', 'designation', 'date_of_joining', 'reporting_manager', 'status', 'shift',
   'bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number',
   'education', 'experience', 'skills', 'documents'
 ];
@@ -47,6 +47,7 @@ function nextEmployeeCode() {
 }
 
 function serializeField(field, value) {
+  if (field === 'team_id') return value === '' || value == null ? null : Number(value);
   if (field !== 'documents') return value ?? null;
   if (Array.isArray(value)) return JSON.stringify(value);
   if (typeof value === 'string') return value || null;
@@ -77,14 +78,15 @@ function maskEmployee(emp, requester) {
 }
 
 const present = (emp, requester) => maskEmployee(hydrate(emp), requester);
-const getEmp = (id) => db.prepare('SELECT * FROM employees WHERE id = ?').get(id);
+const EMP_WITH_TEAM = 'SELECT e.*, t.name AS team_name FROM employees e LEFT JOIN teams t ON t.id = e.team_id';
+const getEmp = (id) => db.prepare(`${EMP_WITH_TEAM} WHERE e.id = ?`).get(id);
 
 router.get('/', (req, res) => {
   if (!isHR(req.user.role)) {
-    const rows = db.prepare('SELECT * FROM employees WHERE user_id = ?').all(req.user.sub);
+    const rows = db.prepare(`${EMP_WITH_TEAM} WHERE e.user_id = ?`).all(req.user.sub);
     return res.json({ employees: rows.map((r) => present(r, req.user)) });
   }
-  const rows = db.prepare('SELECT * FROM employees ORDER BY id').all();
+  const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
   res.json({ employees: rows.map((r) => present(r, req.user)) });
 });
 
