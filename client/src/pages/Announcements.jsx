@@ -2,7 +2,10 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Assistant Manager/STL/TL are limited to viewing the announcement feed (already scoped to
+// their own + assigned department(s)/team(s) server-side) — per Super Admin policy, no compose/
+// pin/delete/log actions here unless explicitly granted.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const CATEGORY_CLASS = { General: 'info', Policy: 'pending', Event: 'present', Holiday: 'present' };
 const CHANNELS = [
   { key: 'email', label: 'Email' },
@@ -13,7 +16,7 @@ const CHANNEL_LABEL = { email: 'Email', sms: 'SMS', whatsapp: 'WhatsApp' };
 
 export default function Announcements() {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('main'); // main | log
   const [announcements, setAnnouncements] = useState([]);
   const [error, setError] = useState('');
@@ -30,8 +33,8 @@ export default function Announcements() {
   function load() { api.get('/announcements').then((r) => setAnnouncements(r.data.announcements)).catch(() => setError('Could not load announcements.')); }
   useEffect(load, []);
   useEffect(() => {
-    if (isHR) api.get('/announcements/compose-options').then((r) => setOptions(r.data)).catch(() => {});
-  }, [isHR]);
+    if (canManage) api.get('/announcements/compose-options').then((r) => setOptions(r.data)).catch(() => {});
+  }, [canManage]);
 
   function loadDeliveries() { api.get('/announcements/deliveries').then((r) => setDeliveries(r.data.deliveries)).catch(() => {}); }
   useEffect(() => { if (screen === 'log') loadDeliveries(); }, [screen]);
@@ -97,11 +100,11 @@ export default function Announcements() {
           <h1>Announcements</h1>
           <div className="subtitle">Company-wide notice board.</div>
         </div>
-        {isHR && <button onClick={() => setScreen('log')}>Notification Log</button>}
+        {canManage && <button onClick={() => setScreen('log')}>Notification Log</button>}
       </div>
       {error && <div className="banner error">{error}</div>}
 
-      {isHR && (
+      {canManage && (
         <div className="card" style={{ marginBottom: 14 }}>
           {showForm ? (
             <form onSubmit={submit}>
@@ -171,10 +174,10 @@ export default function Announcements() {
             <div className="feature-meta" style={{ marginTop: 4 }}>{a.body}</div>
             <div className="feature-meta">
               By {a.posted_by} · {a.created_at.slice(0, 10)}
-              {isHR && a.target_department && ` · Sent to: ${a.target_department} dept`}
-              {isHR && a.recipient_names?.length > 0 && ` · Sent to: ${a.recipient_names.join(', ')}`}
+              {canManage && a.target_department && ` · Sent to: ${a.target_department} dept`}
+              {canManage && a.recipient_names?.length > 0 && ` · Sent to: ${a.recipient_names.join(', ')}`}
             </div>
-            {isHR && (
+            {canManage && (
               <div className="row" style={{ marginTop: 6, gap: 6 }}>
                 <button onClick={() => togglePin(a)}>{a.pinned ? 'Unpin' : 'Pin'}</button>
                 <button onClick={() => remove(a.id)}>Delete</button>

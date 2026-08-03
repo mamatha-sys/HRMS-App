@@ -2,12 +2,20 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
+import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
+import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
+import { autoCompleteOffboardingTask } from '../utils/offboarding.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '12' (Asset Management).
+// Dynamic RBAC via Manage Roles — module '12' (Asset Management). A Senior Team Lead/Team
+// Lead/Assistant Manager also passes — but ONLY for the read-only /overview below, which
+// explicitly scopes the asset list it returns; every write endpoint in this file (add/edit/
+// pause/assign/return/transfer/repair/dispose/audit/decide) still checks canModuleAdmin
+// directly, so scoped roles stay view-only here, matching Super Admin policy.
 const isHR = (role) => canModuleAdmin(role, '12');
+const canViewAssets = (role) => canModuleAdmin(role, '12') || isScopedRole(role);
 // Final approval authority — assets added by a Manager/Assistant Manager go through this
 // role's sign-off before they can be assigned (the "Asset Approval" feature).
 const APPROVAL_AUTHORITY = ['super_admin', 'hr_admin'];
@@ -21,7 +29,8 @@ const SCOPE_BANNER = {
 
 const KEY_FEATURES = [
   { key: 'inventory', label: 'Asset Inventory & Allocation', screen: 'dashboard' },
-  { key: 'transfer', label: 'Asset Transfer & Return', screen: 'transfer' },
+  { key: 'transfer', label: 'Asset Transfer', screen: 'transfer' },
+  { key: 'return', label: 'Asset Return', screen: 'return' },
   { key: 'maintenance', label: 'Asset Maintenance & Repair', screen: 'maintenance' },
   { key: 'warranty', label: 'Warranty Management', screen: 'newAsset' },
   { key: 'disposal', label: 'Asset Disposal & History', screen: 'disposal' },
@@ -36,24 +45,50 @@ const FIELD_ACCESS = [
 ];
 
 function withEmployee(a) {
-  const emp = a.assigned_employee_id ? db.prepare('SELECT name, employee_code, status FROM employees WHERE id = ?').get(a.assigned_employee_id) : null;
+  const emp = a.assigned_employee_id ? db.prepare('SELECT name, employee_code, status, department FROM employees WHERE id = ?').get(a.assigned_employee_id) : null;
   const history = db.prepare('SELECT * FROM asset_history WHERE asset_id = ? ORDER BY created_at DESC').all(a.id);
-  return { ...a, assigned_employee_name: emp?.name || null, assigned_employee_code: emp?.employee_code || null, history };
+  return { ...a, assigned_employee_name: emp?.name || null, assigned_employee_code: emp?.employee_code || null, assigned_employee_department: emp?.department || null, history };
 }
 function logHistory(assetId, action, detail) {
   db.prepare('INSERT INTO asset_history (asset_id, action, detail) VALUES (?, ?, ?)').run(assetId, action, detail || null);
 }
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
+// Asset Responsibility Rules: a single editable notice shown to every employee holding company
+// assets (and to HR admins) — reuses the `policies` table (category 'rule') like every other
+// company-wide policy text elsewhere in this app, storing the whole multi-line notice as one
+// row's value rather than inventing a new table for it.
+const RESPONSIBILITY_RULES_POLICY_NAME = 'Asset Responsibility Rules';
+const RESPONSIBILITY_RULES_DEFAULT = [
+  'You are responsible for the safekeeping, proper use, and condition of any asset assigned to you.',
+  'If an asset goes missing, is lost, or is stolen, report it immediately via "Report Damage" or to HR — do not wait.',
+  'The cost of a lost or willfully damaged asset may be recovered from you, including at final settlement.',
+  'Company assets are for official work use only — do not use them for unauthorized personal or third-party purposes.',
+  'All assigned assets must be returned before your last working day as part of offboarding.'
+].join('\n');
+
+function responsibilityRules() {
+  const row = db.prepare('SELECT value FROM policies WHERE name = ?').get(RESPONSIBILITY_RULES_POLICY_NAME);
+  return row?.value || RESPONSIBILITY_RULES_DEFAULT;
+}
+
 router.get('/overview', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const assets = db.prepare("SELECT * FROM assets WHERE status != 'Disposed' ORDER BY created_at DESC").all().map(withEmployee);
+  if (!canViewAssets(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const scoped = isScopedRole(req.user.role);
+  const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
+
+  let assets = db.prepare("SELECT * FROM assets WHERE status != 'Disposed' ORDER BY created_at DESC").all().map(withEmployee);
+  // An asset not currently assigned to anyone (In Store / Under Repair with no holder) can't be
+  // attributed to a department — fail closed (hide it) for a scoped role rather than showing an
+  // unattributed, unscoped record, matching the Recruitment precedent for unattributed candidates.
+  if (scoped) assets = assets.filter((a) => a.assigned_employee_department && scopeDeptNames.has(a.assigned_employee_department));
+
   const active = assets.filter((a) => a.active);
   const assigned = active.filter((a) => a.status === 'Assigned').length;
   const inStore = active.filter((a) => a.status === 'In Store').length;
 
   res.json({
-    banner: SCOPE_BANNER[req.user.role],
+    banner: scoped ? 'Team/organization assets — view your assigned department(s)/team(s) allocation only; no create, edit, transfer, or approval actions here.' : SCOPE_BANNER[req.user.role],
     kpis: [
       { label: 'Total Assets', value: active.length, color: 'blue' },
       { label: 'Assigned', value: assigned, color: 'green' },
@@ -63,6 +98,20 @@ router.get('/overview', (req, res) => {
     keyFeatures: KEY_FEATURES,
     fieldAccess: FIELD_ACCESS
   });
+});
+
+// Read by any authenticated user (both employee self-service and HR need to see it), edited by
+// Super Admin only.
+router.get('/responsibility-rules', (req, res) => res.json({ rules: responsibilityRules() }));
+
+router.put('/responsibility-rules', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can change the responsibility rules' });
+  const text = req.body?.rules;
+  if (!text || !text.trim()) return res.status(400).json({ error: 'rules text is required' });
+  const existing = db.prepare('SELECT id FROM policies WHERE name = ?').get(RESPONSIBILITY_RULES_POLICY_NAME);
+  if (existing) db.prepare('UPDATE policies SET value = ? WHERE id = ?').run(text.trim(), existing.id);
+  else db.prepare("INSERT INTO policies (category, name, value) VALUES ('rule', ?, ?)").run(RESPONSIBILITY_RULES_POLICY_NAME, text.trim());
+  res.json({ rules: responsibilityRules() });
 });
 
 // Self-service: assets currently assigned to me, plus my own request history.
@@ -131,8 +180,10 @@ router.put('/requests/:id/decide', (req, res) => {
   if (approve) {
     const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(request.asset_id);
     if (request.type === 'Return') {
+      const returningEmployeeId = asset.assigned_employee_id;
       db.prepare("UPDATE assets SET assigned_employee_id = NULL, status = 'In Store' WHERE id = ?").run(asset.id);
       logHistory(asset.id, 'Returned', `Return request approved by ${req.user.name}`);
+      autoCompleteOffboardingTask(returningEmployeeId, 'Return IT assets');
     } else if (request.type === 'Damage') {
       db.prepare("UPDATE assets SET status = 'Under Repair', assigned_employee_id = NULL WHERE id = ?").run(asset.id);
       logHistory(asset.id, 'Sent for Repair', `Damage report approved by ${req.user.name}`);
@@ -149,11 +200,11 @@ router.put('/requests/:id/decide', (req, res) => {
 // can't be assigned until Super Admin/HR Admin approves them.
 router.post('/', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { name, category, cost, warranty_expiry } = req.body || {};
+  const { name, category, cost, warranty_expiry, serial_number } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   const approvalStatus = APPROVAL_AUTHORITY.includes(req.user.role) ? 'Approved' : 'Pending Approval';
-  const info = db.prepare('INSERT INTO assets (name, category, cost, warranty_expiry, approval_status) VALUES (?, ?, ?, ?, ?)')
-    .run(name.trim(), category || null, cost != null && cost !== '' ? Math.max(0, parseInt(cost, 10) || 0) : null, warranty_expiry || null, approvalStatus);
+  const info = db.prepare('INSERT INTO assets (name, category, cost, warranty_expiry, serial_number, approval_status) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(name.trim(), category || null, cost != null && cost !== '' ? Math.max(0, parseInt(cost, 10) || 0) : null, warranty_expiry || null, serial_number?.trim() || null, approvalStatus);
   db.prepare('UPDATE assets SET asset_tag = ? WHERE id = ?').run('AST-' + String(info.lastInsertRowid).padStart(4, '0'), info.lastInsertRowid);
   logHistory(info.lastInsertRowid, 'Added', approvalStatus === 'Pending Approval' ? `Requested by ${req.user.name}, awaiting approval` : `Added by ${req.user.name}`);
   res.status(201).json({ asset: withEmployee(db.prepare('SELECT * FROM assets WHERE id = ?').get(info.lastInsertRowid)) });
@@ -176,11 +227,12 @@ router.put('/:id', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Asset not found' });
-  const { name, category, cost, warranty_expiry } = req.body || {};
-  db.prepare('UPDATE assets SET name = COALESCE(?, name), category = COALESCE(?, category), cost = ?, warranty_expiry = ? WHERE id = ?')
+  const { name, category, cost, warranty_expiry, serial_number } = req.body || {};
+  db.prepare('UPDATE assets SET name = COALESCE(?, name), category = COALESCE(?, category), cost = ?, warranty_expiry = ?, serial_number = ? WHERE id = ?')
     .run(name?.trim() || null, category || null,
       cost === undefined ? asset.cost : (cost === '' || cost == null ? null : Math.max(0, parseInt(cost, 10) || 0)),
       warranty_expiry === undefined ? asset.warranty_expiry : (warranty_expiry || null),
+      serial_number === undefined ? asset.serial_number : (serial_number?.trim() || null),
       req.params.id);
   logHistory(asset.id, 'Edited', `Updated by ${req.user.name}`);
   res.json({ asset: withEmployee(db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id)) });
@@ -211,6 +263,7 @@ router.put('/:id/assign', (req, res) => {
   if (!emp) return res.status(400).json({ error: 'A valid, active employee_id is required' });
   db.prepare("UPDATE assets SET assigned_employee_id = ?, status = 'Assigned' WHERE id = ?").run(emp.id, req.params.id);
   logHistory(asset.id, 'Assigned', `To ${emp.name} (${emp.employee_code}) by ${req.user.name}`);
+  autoCompleteOnboardingTask(emp.id, 'Assets assigned');
   res.json({ asset: withEmployee(db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id)) });
 });
 
@@ -218,9 +271,11 @@ router.put('/:id/return', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const asset = db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id);
   if (!asset) return res.status(404).json({ error: 'Asset not found' });
-  const fromName = asset.assigned_employee_id ? db.prepare('SELECT name FROM employees WHERE id = ?').get(asset.assigned_employee_id)?.name : null;
+  const returningEmployeeId = asset.assigned_employee_id;
+  const fromName = returningEmployeeId ? db.prepare('SELECT name FROM employees WHERE id = ?').get(returningEmployeeId)?.name : null;
   db.prepare("UPDATE assets SET assigned_employee_id = NULL, status = 'In Store' WHERE id = ?").run(req.params.id);
   logHistory(asset.id, 'Returned', `${fromName ? `From ${fromName}, ` : ''}by ${req.user.name}`);
+  autoCompleteOffboardingTask(returningEmployeeId, 'Return IT assets');
   res.json({ asset: withEmployee(db.prepare('SELECT * FROM assets WHERE id = ?').get(req.params.id)) });
 });
 

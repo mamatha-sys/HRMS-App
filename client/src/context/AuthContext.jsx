@@ -20,8 +20,8 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  async function login(email, password, faceDescriptor) {
-    const res = await api.post('/auth/login', { email, password, faceDescriptor });
+  async function login(email, password) {
+    const res = await api.post('/auth/login', { email, password });
     localStorage.setItem('hrms_token', res.data.token);
     setUser(res.data.user);
     return res.data;

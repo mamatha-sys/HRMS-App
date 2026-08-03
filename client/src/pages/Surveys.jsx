@@ -2,15 +2,26 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin dashboard only, no own responses.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own survey
+// response view (MySurveys) AND the company-wide dashboard below it, rather than one replacing
+// the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL are limited to viewing the company-wide (anonymized/aggregated)
+// survey dashboard — per Super Admin policy, no create/activate/close actions here unless
+// explicitly granted.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 
 export default function Surveys() {
   const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRSurveys /> : <MySurveys />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRSurveys />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) return (<><MySurveys compact /><HRSurveys compact sectionLabel="Company Surveys" /></>);
+  return <MySurveys />;
 }
 
 // Employee self-service: respond to active surveys (rating 1-5 per question + optional comment).
-function MySurveys() {
+function MySurveys({ compact }) {
   const [surveys, setSurveys] = useState([]);
   const [error, setError] = useState('');
   const [answering, setAnswering] = useState(null);
@@ -29,8 +40,8 @@ function MySurveys() {
 
   return (
     <div>
-      <h1>Employee Engagement Surveys</h1>
-      <div className="subtitle">Share your feedback — responses feed into an aggregated report only.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Surveys</div> : <h1>Employee Engagement Surveys</h1>}
+      {!compact && <div className="subtitle">Share your feedback — responses feed into an aggregated report only.</div>}
       {error && <div className="banner error">{error}</div>}
       {surveys.length === 0 && <div className="card"><div className="empty">No surveys are open right now.</div></div>}
       {surveys.map((s) => (
@@ -67,7 +78,9 @@ function MySurveys() {
   );
 }
 
-function HRSurveys() {
+function HRSurveys({ compact, sectionLabel }) {
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [surveys, setSurveys] = useState(null);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -129,31 +142,33 @@ function HRSurveys() {
 
   return (
     <div>
-      <h1>Employee Engagement Surveys</h1>
-      <div className="subtitle">Create pulse surveys and review aggregated results.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Surveys'}</div> : <h1>Employee Engagement Surveys</h1>}
+      {!compact && <div className="subtitle">Create pulse surveys and review aggregated results.</div>}
       {error && <div className="banner error">{error}</div>}
 
-      <div className="card" style={{ marginBottom: 14 }}>
-        {showForm ? (
-          <form onSubmit={submit}>
-            <label className="field-label">Title *</label>
-            <input value={title} onChange={(e) => setTitle(e.target.value)} required style={{ marginBottom: 10 }} />
-            <label className="field-label">Description</label>
-            <input value={description} onChange={(e) => setDescription(e.target.value)} style={{ marginBottom: 10 }} />
-            <label className="field-label">Questions (1–5 rating scale)</label>
-            {questions.map((q, i) => (
-              <input key={i} value={q} onChange={(e) => { const next = [...questions]; next[i] = e.target.value; setQuestions(next); }} placeholder={`Question ${i + 1}`} style={{ marginBottom: 8 }} />
-            ))}
-            <button type="button" onClick={() => setQuestions([...questions, ''])} style={{ marginBottom: 10 }}>+ Add Question</button>
-            <div className="row">
-              <button className="primary" type="submit">Create Survey</button>
-              <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
-            </div>
-          </form>
-        ) : (
-          <button className="primary" onClick={() => setShowForm(true)}>+ New Survey</button>
-        )}
-      </div>
+      {canManage && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          {showForm ? (
+            <form onSubmit={submit}>
+              <label className="field-label">Title *</label>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} required style={{ marginBottom: 10 }} />
+              <label className="field-label">Description</label>
+              <input value={description} onChange={(e) => setDescription(e.target.value)} style={{ marginBottom: 10 }} />
+              <label className="field-label">Questions (1–5 rating scale)</label>
+              {questions.map((q, i) => (
+                <input key={i} value={q} onChange={(e) => { const next = [...questions]; next[i] = e.target.value; setQuestions(next); }} placeholder={`Question ${i + 1}`} style={{ marginBottom: 8 }} />
+              ))}
+              <button type="button" onClick={() => setQuestions([...questions, ''])} style={{ marginBottom: 10 }}>+ Add Question</button>
+              <div className="row">
+                <button className="primary" type="submit">Create Survey</button>
+                <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+              </div>
+            </form>
+          ) : (
+            <button className="primary" onClick={() => setShowForm(true)}>+ New Survey</button>
+          )}
+        </div>
+      )}
 
       <div className="card">
         {!surveys && <div className="empty">Loading…</div>}
@@ -165,8 +180,8 @@ function HRSurveys() {
               <span className={'status-tag ' + (s.status === 'Active' ? 'present' : (s.status === 'Closed' ? 'absent' : 'info'))}>{s.status}</span>
             </div>
             <div className="row" style={{ marginTop: 6, gap: 6 }}>
-              {s.status === 'Draft' && <button onClick={() => setStatus(s.id, 'Active')}>Activate</button>}
-              {s.status === 'Active' && <button onClick={() => setStatus(s.id, 'Closed')}>Close</button>}
+              {canManage && s.status === 'Draft' && <button onClick={() => setStatus(s.id, 'Active')}>Activate</button>}
+              {canManage && s.status === 'Active' && <button onClick={() => setStatus(s.id, 'Closed')}>Close</button>}
               <button onClick={() => viewResults(s.id)}>View Results</button>
             </div>
           </div>

@@ -10,6 +10,7 @@ import VacanciesWidget from '../components/VacanciesWidget.jsx';
 import QuickActionsWidget from '../components/QuickActionsWidget.jsx';
 import RoleUserSummaryWidget from '../components/RoleUserSummaryWidget.jsx';
 import ApprovalsWidget from '../components/ApprovalsWidget.jsx';
+import MyAttendanceLeaveWidget from '../components/MyAttendanceLeaveWidget.jsx';
 
 const BANNERS = {
   super_admin: 'Full, unrestricted access — every widget below, organization-wide, no scope restriction.',
@@ -17,7 +18,11 @@ const BANNERS = {
   employee: 'You see only your own information — no organization-wide or team data on this screen.'
 };
 
-const DECIDER_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+const DECIDER_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// STL/TL already only ever see their own assigned department(s)/team(s) here — the
+// Department/Branch/Status filter bar has nothing else for them to filter into, so it's just
+// noise (and picking a department outside their scope would silently return nothing).
+const SCOPED_ROLES = ['stl', 'tl'];
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -29,6 +34,7 @@ export default function Dashboard() {
 
   const canManage = user?.role === 'super_admin' || user?.role === 'manager';
   const canDecide = DECIDER_ROLES.includes(user?.role);
+  const isScoped = SCOPED_ROLES.includes(user?.role);
 
   function load(f) {
     const params = {};
@@ -40,18 +46,30 @@ export default function Dashboard() {
 
   useEffect(() => { load(filters); }, [filters]);
   useEffect(() => {
-    if (user?.role === 'employee') return;
+    if (user?.role === 'employee' || isScoped) return;
     api.get('/org/departments').then((res) => setDepartments(res.data.departments)).catch(() => {});
     api.get('/org/branches').then((res) => setBranches(res.data.branches)).catch(() => {});
   }, [user]);
 
-  async function downloadCsv() {
-    const res = await api.get('/reports/employees.csv', { responseType: 'blob' });
-    const url = URL.createObjectURL(res.data);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'employees.csv'; a.click();
-    URL.revokeObjectURL(url);
-  }
+  // Changes made elsewhere (check in/out, approvals, a new ticket, etc.) only reach this page's
+  // own state on mount — if the Dashboard tab is left open and you make a change on another tab
+  // or come back to it later, it stays stale until you navigate away and back. Refetch the
+  // summary and force every widget below to remount (they each manage their own data) whenever
+  // this tab regains focus or becomes visible again, so it self-updates instead.
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    function refresh() {
+      load(filters);
+      setRefreshKey((k) => k + 1);
+    }
+    function onVisibility() { if (document.visibilityState === 'visible') refresh(); }
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [filters]);
 
   const vis = summary?.widgetVisibility || {};
   const show = (key) => vis[key] !== false;
@@ -67,24 +85,24 @@ export default function Dashboard() {
 
       {summary && summary.role !== 'employee' && (
         <>
-          <div className="filter-bar">
-            <select value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })}>
-              <option value="">All Departments</option>
-              {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
-            </select>
-            <select value={filters.branch} onChange={(e) => setFilters({ ...filters, branch: e.target.value })}>
-              <option value="">All Branches</option>
-              {branches.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
-            </select>
-            <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
-              <option value="">All Statuses</option>
-              <option value="Active">Active</option>
-              <option value="On Probation">On Probation</option>
-              <option value="Exited">Exited</option>
-            </select>
-            <div className="spacer" />
-            {canManage && <button className="primary" onClick={downloadCsv}>Export</button>}
-          </div>
+          {!isScoped && (
+            <div className="filter-bar">
+              <select value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })}>
+                <option value="">All Departments</option>
+                {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+              </select>
+              <select value={filters.branch} onChange={(e) => setFilters({ ...filters, branch: e.target.value })}>
+                <option value="">All Branches</option>
+                {branches.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+              </select>
+              <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+                <option value="">All Statuses</option>
+                <option value="Active">Active</option>
+                <option value="On Probation">On Probation</option>
+                <option value="Exited">Exited</option>
+              </select>
+            </div>
+          )}
 
           {show('kpis') && (
             <div className="kpi-row">
@@ -102,20 +120,23 @@ export default function Dashboard() {
               {show('growth_chart') && <LineChart title="Employee / Organization Growth" data={summary.growthTrend} exportFilename="growth.csv" />}
               {show('hiring_chart') && <BarChart title="New Hires by Year" data={summary.hiringTrend} exportFilename="hiring.csv" />}
               {show('department_chart') && <BarChart title="Department Strength & Distribution" data={summary.departmentBreakdown.map((d) => ({ label: d.department, value: d.count }))} exportFilename="departments.csv" />}
+              {summary.teamBreakdown && summary.teamBreakdown.length > 0 && (
+                <BarChart title="Team-wise Distribution" data={summary.teamBreakdown.map((t) => ({ label: t.team, value: t.count }))} exportFilename="teams.csv" />
+              )}
             </div>
             <div>
-              {show('approvals') && <ApprovalsWidget badge={1} canDecide={canDecide} />}
-              {show('tasks') && <TasksWidget badge={2} canAssignOthers={canManage} />}
+              {show('approvals') && <ApprovalsWidget key={'approvals' + refreshKey} badge={1} canDecide={canDecide} />}
+              {show('tasks') && <TasksWidget key={'tasks' + refreshKey} badge={2} canAssignOthers={canManage} />}
             </div>
             <div>
-              {show('notifications') && <NotificationsWidget badge={3} canCreate={canManage} />}
-              {show('calendar') && <EventsWidget badge={4} canCreate={canManage} />}
+              {show('notifications') && <NotificationsWidget key={'notifications' + refreshKey} badge={3} canCreate={canManage} />}
+              {show('calendar') && <EventsWidget key={'calendar' + refreshKey} badge={4} canCreate={canManage} />}
             </div>
           </div>
 
           <div className="dashboard-grid">
             {show('quick_actions') && <QuickActionsWidget badge={5} role={user?.role} />}
-            {show('vacancies') && <VacanciesWidget badge={6} />}
+            {show('vacancies') && <VacanciesWidget key={'vacancies' + refreshKey} badge={6} />}
             {show('role_user') && user?.role === 'super_admin' && <RoleUserSummaryWidget badge={7} usersCount={summary.usersCount} />}
           </div>
         </>
@@ -139,10 +160,12 @@ export default function Dashboard() {
             )}
           </div>
 
+          {summary.me && <MyAttendanceLeaveWidget key={'attendance' + refreshKey} />}
+
           <div className="dashboard-grid">
-            <TasksWidget badge={1} canAssignOthers={false} />
-            <NotificationsWidget badge={2} canCreate={false} />
-            <EventsWidget badge={3} canCreate={false} />
+            <TasksWidget key={'tasks' + refreshKey} badge={1} canAssignOthers={false} />
+            <NotificationsWidget key={'notifications' + refreshKey} badge={2} canCreate={false} />
+            <EventsWidget key={'calendar' + refreshKey} badge={3} canCreate={false} />
           </div>
         </>
       )}

@@ -3,7 +3,16 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin dashboard only, no own claims.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own claim
+// submission/tracking (MyExpenses) AND the company-wide dashboard below it, rather than one
+// replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL can view + approve claims for their assigned department/team, but
+// marking a claim reimbursed ("Reimbursement Processing") is a finance/manage action reserved
+// for these roles unless explicitly granted.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const STATUS_CLASS = { Pending: 'pending', Approved: 'present', Rejected: 'absent', Reimbursed: 'present' };
 
 function readFileAsDataUrl(file) {
@@ -17,11 +26,13 @@ function readFileAsDataUrl(file) {
 
 export default function Expenses() {
   const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRExpenses /> : <MyExpenses />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRExpenses />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) return (<><MyExpenses compact /><HRExpenses compact sectionLabel="Company Expense Claims" /></>);
+  return <MyExpenses />;
 }
 
 // Employee self-service: submit and track expense/travel claims.
-function MyExpenses() {
+function MyExpenses({ compact }) {
   const [claims, setClaims] = useState([]);
   const [chainLabel, setChainLabel] = useState('');
   const [error, setError] = useState('');
@@ -47,8 +58,8 @@ function MyExpenses() {
 
   return (
     <div>
-      <h1>Expense &amp; Travel Claims</h1>
-      <div className="subtitle">Submit a claim and track it through approval: {chainLabel}.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Expense Claims</div> : <h1>Expense &amp; Travel Claims</h1>}
+      {!compact && <div className="subtitle">Submit a claim and track it through approval: {chainLabel}.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -91,7 +102,9 @@ function MyExpenses() {
   );
 }
 
-function HRExpenses() {
+function HRExpenses({ compact, sectionLabel }) {
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [claims, setClaims] = useState(null);
   const [chainLabel, setChainLabel] = useState('');
   const [reports, setReports] = useState(null);
@@ -115,8 +128,8 @@ function HRExpenses() {
 
   return (
     <div>
-      <h1>Expense &amp; Travel Claims</h1>
-      <div className="subtitle">Approval chain: {chainLabel}.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Expense Claims'}</div> : <h1>Expense &amp; Travel Claims</h1>}
+      {!compact && <div className="subtitle">Approval chain: {chainLabel}.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="row" style={{ marginBottom: 14 }}>
@@ -166,7 +179,7 @@ function HRExpenses() {
                   </div>
                 </>
               )}
-              {c.status === 'Approved' && <button style={{ marginTop: 6 }} onClick={() => reimburse(c.id)}>Mark Reimbursed</button>}
+              {c.status === 'Approved' && canManage && <button style={{ marginTop: 6 }} onClick={() => reimburse(c.id)}>Mark Reimbursed</button>}
             </div>
           ))}
         </div>

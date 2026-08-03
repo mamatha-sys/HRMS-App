@@ -4,10 +4,10 @@ import { dispatchChannels } from './channels.js';
 // Send a notification to one specific employee (not a role broadcast) — e.g. "Your leave
 // request was approved". Shows up in that employee's own Notifications feed only. Internal
 // system-triggered notifications (approvals, resolutions, etc.) are always in-app only.
-export function notifyEmployee(employeeId, title, message) {
+export function notifyEmployee(employeeId, title, message, { priority, ticketId } = {}) {
   if (!employeeId) return;
-  db.prepare('INSERT INTO notifications (title, message, target_role, employee_id) VALUES (?, ?, ?, ?)')
-    .run(title, message, 'employee', employeeId);
+  db.prepare('INSERT INTO notifications (title, message, target_role, employee_id, priority, ticket_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(title, message, 'employee', employeeId, priority || null, ticketId || null);
 }
 
 // Broadcast to everyone — used for company-wide posts like meeting/event announcements.

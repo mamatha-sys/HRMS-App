@@ -29,14 +29,14 @@ function getTwilioClient() {
   return twilioClient;
 }
 
-async function sendEmail(to, subject, message) {
+export async function sendEmail(to, subject, message) {
   const transport = getMailTransport();
   if (!transport) throw new Error('Email is not configured — set EMAIL_SMTP_HOST/USER/PASS in server/.env');
   if (!to) throw new Error('This employee has no email on file');
   await transport.sendMail({ from: process.env.EMAIL_FROM || process.env.EMAIL_SMTP_USER, to, subject, text: message });
 }
 
-async function sendSms(to, title, message) {
+export async function sendSms(to, title, message) {
   const client = getTwilioClient();
   if (!client) throw new Error('SMS is not configured — set TWILIO_ACCOUNT_SID/AUTH_TOKEN/SMS_FROM in server/.env');
   if (!process.env.TWILIO_SMS_FROM) throw new Error('TWILIO_SMS_FROM is not set in server/.env');

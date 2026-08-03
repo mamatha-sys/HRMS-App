@@ -2,20 +2,37 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
-import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '08' (Leave Management).
-const isHR = (role) => canModuleAdmin(role, '08');
+// Dynamic RBAC via Manage Roles — module '08' (Leave Management). A Senior Team Lead/Team Lead
+// also passes: every isHR-gated route here already fetches-then-filters via filterToScope, and
+// leave-type management (add/edit/pause) is independently locked to Super Admin only just below
+// — so admitting scoped roles through this gate only narrows to their assigned departments/
+// teams, it never opens company-wide config actions.
+const isHR = (role) => canModuleAdmin(role, '08') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function activeTypes() { return db.prepare('SELECT * FROM leave_types WHERE active = 1 ORDER BY id').all(); }
 function allTypes() { return db.prepare('SELECT * FROM leave_types ORDER BY id').all(); }
 function typeById(id) { return db.prepare('SELECT * FROM leave_types WHERE id = ?').get(id); }
+
+function activeReasons() { return db.prepare('SELECT * FROM leave_approval_reasons WHERE active = 1 ORDER BY sort_order, id').all(); }
+function allReasons() { return db.prepare('SELECT * FROM leave_approval_reasons ORDER BY sort_order, id').all(); }
+// 4+ day leave requests must record which company-approved reason(s) justified the approval —
+// resolves the stored JSON array of leave_approval_reasons.id into their current labels.
+function reasonLabelsOf(approvalReasonIds) {
+  if (!approvalReasonIds) return null;
+  let ids;
+  try { ids = JSON.parse(approvalReasonIds); } catch { return null; }
+  if (!Array.isArray(ids) || !ids.length) return null;
+  const all = allReasons();
+  return ids.map((id) => all.find((r) => r.id === id)?.label).filter(Boolean);
+}
 
 function ensureBalances(employeeId) {
   const types = allTypes();
@@ -64,7 +81,22 @@ function daysBetween(from, to) {
 
 const empOf = (id) => db.prepare('SELECT name, department, team_id FROM employees WHERE id = ?').get(id) || {};
 const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
-const withName = (rows) => rows.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name, current_stage_name: roleNameOf(r.current_stage_role_id) }));
+// A department can be split into teams (e.g. Education's Team-A/Team-B) — surface which team
+// the requester belongs to wherever a request is listed, so an STL overseeing both teams (or
+// anyone above them in the chain) can tell them apart at a glance.
+const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
+const decidedByName = (userId) => (userId ? db.prepare('SELECT name FROM users WHERE id = ?').get(userId)?.name : null);
+const withName = (rows) => rows.map((r) => {
+  const e = empOf(r.employee_id);
+  return {
+    ...r,
+    employee_name: e.name,
+    team_name: teamNameOf(e.team_id),
+    current_stage_name: roleNameOf(r.current_stage_role_id),
+    decided_by_name: decidedByName(r.decided_by),
+    approval_reason_labels: reasonLabelsOf(r.approval_reason_ids)
+  };
+});
 
 const SCOPE_BANNER = {
   super_admin: 'Full, unrestricted access — configures Leave Types/Policy and every approval cap itself.',
@@ -89,15 +121,20 @@ router.get('/overview', (req, res) => {
 
   const chainList = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC").all()), req.user.role, myEmpId)
     .slice(0, 8)
-    .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, current_stage_name: roleNameOf(l.current_stage_role_id) }))
+    .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, team_name: teamNameOf(l.team_id), current_stage_name: roleNameOf(l.current_stage_role_id) }))
     .map((l) => ({ ...l, waiting_on: l.current_stage_name || bottomRole()?.name }));
 
   const byDept = {};
-  db.prepare('SELECT name FROM departments ORDER BY name').all().forEach((d) => { byDept[d.name] = []; });
+  let deptNames = db.prepare('SELECT name FROM departments ORDER BY name').all().map((d) => d.name);
+  if (isScopedRole(req.user.role)) {
+    const names = new Set(scopeDepartmentNames(getSupervisorScope(myEmpId)));
+    deptNames = deptNames.filter((n) => names.has(n));
+  }
+  deptNames.forEach((name) => { byDept[name] = []; });
   onLeaveToday.forEach((l) => {
     const e = empOf(l.employee_id);
     const dept = e.department || 'Unassigned';
-    (byDept[dept] = byDept[dept] || []).push({ name: e.name, type: l.type, from_date: l.from_date, to_date: l.to_date, reason: l.reason });
+    (byDept[dept] = byDept[dept] || []).push({ name: e.name, team_name: teamNameOf(e.team_id), type: l.type, from_date: l.from_date, to_date: l.to_date, reason: l.reason });
   });
 
   const cancellationCount = filterToScope(
@@ -157,6 +194,32 @@ router.put('/types/:id/pause', (req, res) => {
   if (!t) return res.status(404).json({ error: 'Leave type not found' });
   db.prepare('UPDATE leave_types SET active = ? WHERE id = ?').run(req.body?.active ? 1 : 0, req.params.id);
   res.json({ leaveType: db.prepare('SELECT * FROM leave_types WHERE id = ?').get(req.params.id) });
+});
+
+// --- Approval reasons: a fixed catalog an approver picks from when approving a 4+ day leave
+// request (see decide() below). Read by anyone authed; add/edit/pause by Super Admin only —
+// same catalog+active-toggle shape as leave types.
+router.get('/approval-reasons', (req, res) => res.json({ reasons: allReasons() }));
+
+router.post('/approval-reasons', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can add approval reasons' });
+  const { label } = req.body || {};
+  if (!label || !label.trim()) return res.status(400).json({ error: 'label is required' });
+  try {
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM leave_approval_reasons').get().m;
+    db.prepare('INSERT INTO leave_approval_reasons (label, sort_order) VALUES (?, ?)').run(label.trim(), maxOrder + 1);
+    res.status(201).json({ reasons: allReasons() });
+  } catch { res.status(409).json({ error: 'This reason already exists' }); }
+});
+
+router.put('/approval-reasons/:id', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can edit approval reasons' });
+  const r = db.prepare('SELECT * FROM leave_approval_reasons WHERE id = ?').get(req.params.id);
+  if (!r) return res.status(404).json({ error: 'Reason not found' });
+  const { label, active } = req.body || {};
+  db.prepare('UPDATE leave_approval_reasons SET label = COALESCE(?, label), active = ? WHERE id = ?')
+    .run(label?.trim() || null, active === undefined ? r.active : (active ? 1 : 0), req.params.id);
+  res.json({ reason: db.prepare('SELECT * FROM leave_approval_reasons WHERE id = ?').get(req.params.id) });
 });
 
 // --- Reports: per-type balances table + full balance-change history ---
@@ -219,7 +282,7 @@ router.get('/cancellations', (req, res) => {
   `).all();
   const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
   const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
-  res.json({ cancellations: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
+  res.json({ cancellations: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name, team_name: teamNameOf(r.team_id) })) });
 });
 
 function restoreBalanceForLeave(leave) {
@@ -277,6 +340,20 @@ router.get('/balance', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   res.json({ balances: balancesFor(me.id) });
+});
+
+// Always "my own" requests + balances + balance history, regardless of role — a Senior Team
+// Lead/Team Lead is an employee too and needs their own record here, not the team-wide list
+// that GET / and /balance-history above return for them once isHR admits scoped roles.
+router.get('/mine', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  // chainLabel is a plain "Role → Role → Role" string, not sensitive — returned here (not just
+  // from /overview, which is HR-only) so a plain employee's ChainStepper can actually render
+  // instead of silently failing to load it.
+  if (!me) return res.json({ leaves: [], balances: [], history: [], chainLabel: approvalChainLabel() });
+  const rows = db.prepare('SELECT * FROM leaves WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
+  const history = db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
+  res.json({ leaves: withName(rows), balances: balancesFor(me.id), history, chainLabel: approvalChainLabel() });
 });
 
 router.post('/', (req, res) => {
@@ -357,6 +434,26 @@ function decide(finalStatus) {
       });
     }
 
+    // Company rule: approving a 4+ day request requires the approver to pick at least one reason
+    // from the Super-Admin-managed catalog (e.g. "Medical Emergency") — a Super Admin is exempt,
+    // same as they're exempt from max_leave_approval_days above, since they're the system
+    // administrator of this workflow rather than a participant in it. Reasons accumulate across
+    // every stage of the chain (not just whichever approval happens to finalize the request) —
+    // with Super Admin unpaused/top-of-chain by default, they're often the one who finalizes, so
+    // capturing only the finalizing approval's reason would silently lose the STL/Assistant
+    // Manager/Manager reason that was actually required and given earlier in the chain.
+    let reasonIds = null;
+    const existingReasonIds = leave.approval_reason_ids ? (JSON.parse(leave.approval_reason_ids) || []) : [];
+    if (finalStatus === 'Approved' && leave.days >= 4 && req.user.role !== 'super_admin') {
+      const submitted = Array.isArray(req.body?.reason_ids) ? req.body.reason_ids.map((id) => parseInt(id, 10)).filter(Number.isFinite) : [];
+      const valid = new Set(activeReasons().map((r) => r.id));
+      reasonIds = submitted.filter((id) => valid.has(id));
+      if (!reasonIds.length) {
+        return res.status(400).json({ error: `Approving a ${leave.days}-day leave request requires selecting at least one reason.` });
+      }
+    }
+    const mergedReasonIds = reasonIds ? [...new Set([...existingReasonIds, ...reasonIds])] : existingReasonIds;
+
     if (result.finalized) {
       if (finalStatus === 'Approved') {
         const lt = leave.leave_type_id ? typeById(leave.leave_type_id) : null;
@@ -367,14 +464,16 @@ function decide(finalStatus) {
           setBalance(leave.employee_id, lt.id, newBal);
           logBalanceHistory(leave.employee_id, leave.type, -leave.days, newBal, `Leave approved (${leave.from_date} to ${leave.to_date})`, req.user.sub);
         }
-        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL WHERE id = ?').run('Approved', req.user.sub, leave.id);
+        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL, approval_reason_ids = ? WHERE id = ?')
+          .run('Approved', req.user.sub, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, leave.id);
         notifyEmployee(leave.employee_id, 'Leave approved', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was approved.`);
       } else {
         db.prepare('UPDATE leaves SET status = ?, decided_by = ? WHERE id = ?').run('Rejected', req.user.sub, leave.id);
         notifyEmployee(leave.employee_id, 'Leave rejected', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was rejected.`);
       }
     } else {
-      db.prepare('UPDATE leaves SET current_stage_role_id = ? WHERE id = ?').run(result.stageRoleId, leave.id);
+      db.prepare('UPDATE leaves SET current_stage_role_id = ?, approval_reason_ids = ? WHERE id = ?')
+        .run(result.stageRoleId, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, leave.id);
     }
     res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
   };

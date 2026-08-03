@@ -2,21 +2,29 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
+import { isScopedRole } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '16' (Employee Engagement Surveys).
+// Dynamic RBAC via Manage Roles — module '16' (Employee Engagement Surveys). Every write
+// endpoint below (create/activate/close) still checks isHR directly, so an Assistant Manager/
+// STL/TL stays view-only, matching Super Admin policy. Survey results here have no department
+// dimension worth slicing on: they're intentionally anonymized, aggregated across every
+// respondent (even for full HR/Super Admin — there's no per-department breakdown anywhere in
+// this file), so unlike other modules there is nothing to filter down for a scoped role — they
+// just get the same read-only aggregate view as everyone above them, via canView below.
 const isHR = (role) => canModuleAdmin(role, '16');
+const canView = (role) => isHR(role) || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 function questionsOf(surveyId) {
   return db.prepare('SELECT * FROM survey_questions WHERE survey_id = ? ORDER BY sort_order').all(surveyId);
 }
 
-// HR: every survey with response counts.
+// HR (+ view-only for scoped Assistant Manager/STL/TL): every survey with response counts.
 router.get('/', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canView(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const surveys = db.prepare('SELECT * FROM surveys ORDER BY created_at DESC').all().map((s) => ({
     ...s,
     questions: questionsOf(s.id),
@@ -48,9 +56,10 @@ router.put('/:id', (req, res) => {
   res.json({ survey: db.prepare('SELECT * FROM surveys WHERE id = ?').get(req.params.id) });
 });
 
-// HR: aggregated per-question average rating + all free-text comments.
+// HR (+ view-only for scoped Assistant Manager/STL/TL): aggregated per-question average rating
+// + all free-text comments.
 router.get('/:id/results', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canView(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const survey = db.prepare('SELECT * FROM surveys WHERE id = ?').get(req.params.id);
   if (!survey) return res.status(404).json({ error: 'Survey not found' });
   const questions = questionsOf(survey.id).map((q) => {

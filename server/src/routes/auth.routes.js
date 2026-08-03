@@ -1,9 +1,10 @@
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
-import { isValidDescriptor, euclideanDistance, FACE_MATCH_THRESHOLD } from '../utils/face.js';
+import { sendEmail } from '../utils/channels.js';
 
 const router = Router();
 
@@ -16,7 +17,7 @@ function signToken(user) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role, faceEnrolled: !!user.face_descriptor };
+  return { id: user.id, name: user.name, email: user.email, role: user.role };
 }
 
 router.post('/register', (req, res) => {
@@ -41,7 +42,7 @@ router.post('/register', (req, res) => {
 });
 
 router.post('/login', (req, res) => {
-  const { email, password, faceDescriptor } = req.body || {};
+  const { email, password } = req.body || {};
   if (!email || !password) {
     return res.status(400).json({ error: 'email and password are required' });
   }
@@ -54,43 +55,47 @@ router.post('/login', (req, res) => {
     return res.status(403).json({ error: 'This account has been deactivated. Contact your administrator.' });
   }
 
-  if (!isValidDescriptor(faceDescriptor)) {
-    return res.status(400).json({ error: 'Face capture is required to sign in.' });
-  }
-
-  if (!user.face_descriptor) {
-    // First successful login enrolls this face as the reference for future logins.
-    db.prepare('UPDATE users SET face_descriptor = ? WHERE id = ?').run(JSON.stringify(faceDescriptor), user.id);
-    const token = signToken(user);
-    return res.json({ token, user: { ...publicUser(user), faceEnrolled: true }, faceJustEnrolled: true });
-  }
-
-  const stored = JSON.parse(user.face_descriptor);
-  const distance = euclideanDistance(stored, faceDescriptor);
-  if (distance > FACE_MATCH_THRESHOLD) {
-    return res.status(401).json({ error: 'Face verification failed — this does not match the enrolled face for this account.' });
-  }
-
   const token = signToken(user);
   res.json({ token, user: publicUser(user) });
 });
 
-// Password-authenticated self-service recovery for a mismatched/bad face enrollment —
-// clears the stored reference so the next successful login re-enrolls fresh.
-router.post('/reset-face', (req, res) => {
-  const { email, password } = req.body || {};
-  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+// Forgot password — always responds the same way whether or not the email is registered, so
+// the response itself can never be used to enumerate which emails have an account.
+router.post('/forgot-password', async (req, res) => {
+  const email = req.body?.email?.trim();
+  if (!email) return res.status(400).json({ error: 'Email is required' });
 
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return res.status(401).json({ error: 'Invalid email or password' });
+  if (user) {
+    const token = crypto.randomBytes(32).toString('hex');
+    const expires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    db.prepare('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?').run(token, expires, user.id);
+    const resetLink = `${process.env.CLIENT_URL || 'http://localhost:5173'}/reset-password?token=${token}`;
+    try {
+      await sendEmail(user.email, 'Reset your password',
+        `Hi ${user.name},\n\nUse this link to reset your password (valid for 30 minutes):\n${resetLink}\n\nIf you didn't request this, you can ignore this email.`);
+    } catch (err) {
+      // No SMTP configured in this environment (or the send failed) — never let that surface to
+      // the caller (would leak whether the email exists); log the link so it's still reachable.
+      console.log(`[forgot-password] Could not email ${user.email} (${err.message}). Reset link: ${resetLink}`);
+    }
   }
-  if (!user.active) {
-    return res.status(403).json({ error: 'This account has been deactivated. Contact your administrator.' });
+  res.json({ message: 'If that email is registered, a password reset link has been sent.' });
+});
+
+router.post('/reset-password', (req, res) => {
+  const { token, password } = req.body || {};
+  if (!token || !password) return res.status(400).json({ error: 'Token and new password are required' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  const user = db.prepare('SELECT * FROM users WHERE reset_token = ?').get(token);
+  if (!user || !user.reset_token_expires || new Date(user.reset_token_expires) < new Date()) {
+    return res.status(400).json({ error: 'This reset link is invalid or has expired. Request a new one.' });
   }
 
-  db.prepare('UPDATE users SET face_descriptor = NULL WHERE id = ?').run(user.id);
-  res.json({ ok: true });
+  db.prepare('UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?')
+    .run(bcrypt.hashSync(password, 10), user.id);
+  res.json({ message: 'Password updated — you can now sign in with your new password.' });
 });
 
 router.get('/me', requireAuth, (req, res) => {

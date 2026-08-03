@@ -147,6 +147,17 @@ db.exec(`
   // entry) were requested for this notification.
   if (!notificationCols.includes('target_department')) db.exec('ALTER TABLE notifications ADD COLUMN target_department TEXT');
   if (!notificationCols.includes('channels')) db.exec("ALTER TABLE notifications ADD COLUMN channels TEXT NOT NULL DEFAULT 'in_app'");
+  // Optional urgency tag (Low/Medium/High/Critical) — set on Helpdesk-ticket-related
+  // notifications so the main Dashboard's Alerts & Notifications widget can show the same
+  // green/yellow/orange/red badge the Helpdesk module itself uses. NULL for every other kind
+  // of notification (leave/expense/announcement, etc.), which render with no badge as before.
+  if (!notificationCols.includes('priority')) db.exec('ALTER TABLE notifications ADD COLUMN priority TEXT');
+  // Links a Helpdesk-ticket-related notification back to its ticket, so the notification feed
+  // can drop it once that ticket is Resolved/Closed — matching the Helpdesk dashboard's own
+  // "resolved tickets drop off the list" behavior instead of leaving a stale urgent-looking
+  // alert around after the thing it was about is already handled.
+  if (!notificationCols.includes('ticket_id')) db.exec('ALTER TABLE notifications ADD COLUMN ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL');
+  migrateNotificationsTargetRole();
 
   // --- Multi-channel delivery log: every Email/SMS/WhatsApp send attempt for a Notification
   // or Announcement, one row per (recipient, channel) — this is the "Notification Log" the
@@ -583,9 +594,25 @@ function migrate() {
       annual_quota INTEGER NOT NULL DEFAULT 0,
       unpaid INTEGER NOT NULL DEFAULT 0
     );
+
+    -- Approving a 4+ day leave requires picking at least one reason from this Super-Admin-managed
+    -- checkbox catalog (e.g. "Medical Emergency", "Family Function") — same catalog+active-toggle
+    -- shape as leave_types/salary_components/employee_custom_fields.
+    CREATE TABLE IF NOT EXISTS leave_approval_reasons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL UNIQUE,
+      active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    );
   `);
   const lt = db.prepare('PRAGMA table_info(leave_types)').all().map((c) => c.name);
   if (!lt.includes('active')) db.exec('ALTER TABLE leave_types ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+
+  if (db.prepare('SELECT COUNT(*) AS c FROM leave_approval_reasons').get().c === 0) {
+    const insReason = db.prepare('INSERT INTO leave_approval_reasons (label, sort_order) VALUES (?, ?)');
+    ['Medical Emergency', 'Family Function / Event', 'Personal Reasons', 'Approved per Company Policy', 'Other']
+      .forEach((label, i) => insReason.run(label, i));
+  }
 
   const apr = db.prepare('PRAGMA table_info(approvals)').all().map((c) => c.name);
   if (!apr.includes('current_stage_role_id')) {
@@ -605,10 +632,19 @@ function migrate() {
   const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
   if (!empCols.includes('shift')) db.exec("ALTER TABLE employees ADD COLUMN shift TEXT NOT NULL DEFAULT 'General (9:00 AM – 6:00 PM)'");
 
+  // email is UNIQUE — a stored empty string (rather than NULL) collides with every other blank
+  // email and blocks creating any further employee with no email. Normalize any that slipped in
+  // before the create/edit routes started treating '' as "not provided".
+  db.prepare("UPDATE employees SET email = NULL WHERE email = ''").run();
+
   // Half_day_flag marks a late check-in beyond the month's free-late allowance (company rule:
   // 2 free late arrivals/month, configurable via the "Free late arrivals per month" policy).
   const attCols = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
   if (!attCols.includes('half_day_flag')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_flag INTEGER NOT NULL DEFAULT 0');
+  // Tracks whether the employee has already been alerted about THIS row being a missed
+  // check-out or missing check-in, so the sweep in attendanceCore.js only ever notifies once
+  // per gap instead of re-notifying every time they open Attendance or check in again.
+  if (!attCols.includes('alert_sent')) db.exec('ALTER TABLE attendance ADD COLUMN alert_sent INTEGER NOT NULL DEFAULT 0');
 
   const payCols = db.prepare('PRAGMA table_info(payslips)').all().map((c) => c.name);
   if (!payCols.includes('late_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN late_deduction INTEGER NOT NULL DEFAULT 0');
@@ -621,6 +657,9 @@ function migrate() {
   if (!lv.includes('current_stage_role_id')) db.exec('ALTER TABLE leaves ADD COLUMN current_stage_role_id INTEGER REFERENCES roles(id)');
   if (!lv.includes('cancel_requested')) db.exec('ALTER TABLE leaves ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0');
   if (!lv.includes('cancelled')) db.exec('ALTER TABLE leaves ADD COLUMN cancelled INTEGER NOT NULL DEFAULT 0');
+  // JSON array of leave_approval_reasons.id — only populated when a 4+ day request is approved
+  // (see leaves.routes.js decide()); shorter requests never need one.
+  if (!lv.includes('approval_reason_ids')) db.exec('ALTER TABLE leaves ADD COLUMN approval_reason_ids TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS leave_cancellations (
@@ -647,7 +686,7 @@ function migrate() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       key TEXT NOT NULL UNIQUE,
       label TEXT NOT NULL,
-      type TEXT NOT NULL CHECK (type IN ('earning','deduction')),
+      type TEXT NOT NULL CHECK (type IN ('earning','deduction','employer_cost')),
       active INTEGER NOT NULL DEFAULT 1,
       sort_order INTEGER NOT NULL DEFAULT 0
     );
@@ -664,6 +703,40 @@ function migrate() {
       leave_type_id INTEGER NOT NULL REFERENCES leave_types(id) ON DELETE CASCADE,
       balance INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (employee_id, leave_type_id)
+    );
+
+    -- Employee Management custom fields: Super Admin can add a new field to the Employee form at
+    -- any time (label + type); once added it shows up on every employee's record for HR/the
+    -- employee to fill in, same "catalog + per-record value" pattern as Payroll's salary components.
+    CREATE TABLE IF NOT EXISTS employee_custom_fields (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      label TEXT NOT NULL,
+      field_type TEXT NOT NULL DEFAULT 'text' CHECK (field_type IN ('text','number','date')),
+      section TEXT NOT NULL DEFAULT 'personal' CHECK (section IN ('personal','address','emergency','employment','bank','education')),
+      active INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS employee_custom_field_values (
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      field_id INTEGER NOT NULL REFERENCES employee_custom_fields(id) ON DELETE CASCADE,
+      value TEXT,
+      PRIMARY KEY (employee_id, field_id)
+    );
+
+    -- Built-in field labels/visibility: unlike employee_custom_fields (a brand-new field Super
+    -- Admin defines from scratch), this only ever stores OVERRIDES on top of the fixed set of
+    -- built-in fields (Name, Employee ID, Address, etc.) hardcoded into the form — a row here
+    -- means "rename to this label" and/or "hide from the form"; no row means use the default.
+    -- Data/columns are never dropped — hiding is a form-rendering concern only, per Super Admin
+    -- policy (a handful of load-bearing fields — see PROTECTED_FIELD_KEYS in employees.routes.js
+    -- — can never be hidden, only renamed, since Payroll/Attendance/RBAC/Reports depend on them).
+    CREATE TABLE IF NOT EXISTS employee_field_config (
+      field_key TEXT PRIMARY KEY,
+      label TEXT,
+      hidden INTEGER NOT NULL DEFAULT 0
     );
   `);
 
@@ -770,6 +843,26 @@ function migrate() {
     insRound.run('Offer', 3, 0);
     insRound.run('Hired', 4, 1);
   }
+
+  // Candidate source catalog — same add/pause shape as interview_rounds, so "where did this
+  // candidate come from" is a first-class, filterable field instead of overloaded text in
+  // `candidates.panel`. 'Referral' is looked up by name in POST /refer to auto-tag referred
+  // candidates, so it must always exist — never delete it, only pause other entries if unused.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS candidate_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL UNIQUE,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      paused INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  if (db.prepare('SELECT COUNT(*) AS c FROM candidate_sources').get().c === 0) {
+    const insSource = db.prepare('INSERT INTO candidate_sources (label, sort_order) VALUES (?, ?)');
+    ['Referral', 'Naukri', 'LinkedIn', 'Company Careers Page', 'Indeed', 'Campus Hiring', 'Walk-in', 'Other']
+      .forEach((label, i) => insSource.run(label, i));
+  }
+
   migrateCandidatesTable();
 
   // --- Onboarding / offboarding checklists: named responsibilities per new hire / exit,
@@ -826,6 +919,7 @@ function migrate() {
   const enrCols = db.prepare('PRAGMA table_info(course_enrollments)').all().map((c) => c.name);
   if (!enrCols.includes('score')) db.exec('ALTER TABLE course_enrollments ADD COLUMN score INTEGER');
   if (!enrCols.includes('certificate_issued')) db.exec('ALTER TABLE course_enrollments ADD COLUMN certificate_issued INTEGER NOT NULL DEFAULT 0');
+  if (!enrCols.includes('certified_at')) db.exec('ALTER TABLE course_enrollments ADD COLUMN certified_at TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS course_materials (
@@ -836,12 +930,30 @@ function migrate() {
       data_url TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Materials are view-only by default (no download/copy path). An employee can ask Super
+    -- Admin/HR Admin to lift that for one specific file/video; approval is per material, per
+    -- employee — same Pending/Approved/Rejected request pattern as asset_requests.
+    CREATE TABLE IF NOT EXISTS material_download_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      material_id INTEGER NOT NULL REFERENCES course_materials(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      reason TEXT,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      decided_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      decided_at TEXT
+    );
   `);
 
   // --- Asset Management Key Features: pause/resume (retire without deleting), warranty,
   // a barcode-style tracking tag, a full action history log, a Disposed status, and a
   // Pending-Approval gate for assets added by non-final-authority roles.
   migrateAssetsTable();
+  // Manufacturer/vendor serial number — distinct from the internal asset_tag (which this app
+  // generates itself, e.g. "AST-0001"); serial_number is whatever's printed on the physical unit.
+  const assetCols = db.prepare('PRAGMA table_info(assets)').all().map((c) => c.name);
+  if (!assetCols.includes('serial_number')) db.exec('ALTER TABLE assets ADD COLUMN serial_number TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS asset_history (
@@ -973,6 +1085,11 @@ function migrate() {
     );
   `);
   migrateTicketsTable();
+  // Tracks when a ticket was last auto-escalated (see runAutoEscalations in helpdesk.routes.js)
+  // so the 24-hour unresolved-ticket check knows where its next 24-hour window starts, distinct
+  // from created_at (which stays fixed) and from manual escalation (which doesn't touch this).
+  const ticketCols = db.prepare('PRAGMA table_info(tickets)').all().map((c) => c.name);
+  if (!ticketCols.includes('last_escalated_at')) db.exec('ALTER TABLE tickets ADD COLUMN last_escalated_at TEXT');
   const ticketCommentCols = db.prepare('PRAGMA table_info(ticket_comments)').all().map((c) => c.name);
   if (!ticketCommentCols.includes('internal')) db.exec('ALTER TABLE ticket_comments ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
   if (!ticketCommentCols.includes('attachment_data_url')) db.exec('ALTER TABLE ticket_comments ADD COLUMN attachment_data_url TEXT');
@@ -1069,6 +1186,7 @@ function migrate() {
       category TEXT NOT NULL DEFAULT 'Policy' CHECK (category IN ('Policy','Handbook','Form','Other')),
       file_data_url TEXT NOT NULL,
       mandatory INTEGER NOT NULL DEFAULT 0,
+      published INTEGER NOT NULL DEFAULT 1,
       uploaded_by TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -1307,6 +1425,56 @@ function migrate() {
 
   migratePermissionCatalog();
   migrateTeamsAndScopes();
+  migratePayrollFormula();
+}
+
+// Package formula: Gross = Basic + HRA + Bonus + Special Allowance; Deductions = PF + PT + Bonus
+// (Bonus is part of the package — counted in Gross — but withheld from this month's payout, so
+// it's shown again as its own line in Deductions; net effect on take-home is zero, purely for
+// payslip transparency). Also retires Conveyance/TDS and a stray test component ("eds") that
+// aren't part of that formula — safe because every employee's amount on all three is still 0.
+function migratePayrollFormula() {
+  const compCols = db.prepare('PRAGMA table_info(salary_components)').all().map((c) => c.name);
+  if (!compCols.includes('withheld')) db.exec('ALTER TABLE salary_components ADD COLUMN withheld INTEGER NOT NULL DEFAULT 0');
+
+  if (!db.prepare("SELECT 1 FROM salary_components WHERE key = 'bonus'").get()) {
+    const bonusId = db.prepare("INSERT INTO salary_components (key, label, type, withheld, sort_order) VALUES ('bonus', 'Bonus', 'earning', 1, 2)").run().lastInsertRowid;
+    const ins = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, 0)');
+    db.prepare('SELECT id FROM employees').all().forEach((e) => ins.run(e.id, bonusId));
+  }
+
+  db.prepare("UPDATE salary_components SET active = 0 WHERE key IN ('conveyance','tds','eds') AND active = 1").run();
+
+  // CTC also includes employer-side costs (Employer PF, Gratuity) that sit outside Gross/
+  // Deductions/Net entirely — they're what the company pays on top, not part of the employee's
+  // own earnings or deductions. The original 'type' CHECK only allowed earning/deduction, so
+  // this needs a table rebuild (SQLite can't ALTER a CHECK constraint in place).
+  const typeCheckSql = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'salary_components'").get().sql;
+  if (!typeCheckSql.includes('employer_cost')) {
+    db.exec(`
+      CREATE TABLE salary_components_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('earning','deduction','employer_cost')),
+        active INTEGER NOT NULL DEFAULT 1,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        withheld INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO salary_components_new SELECT * FROM salary_components;
+      DROP TABLE salary_components;
+      ALTER TABLE salary_components_new RENAME TO salary_components;
+    `);
+  }
+
+  if (!db.prepare("SELECT 1 FROM salary_components WHERE key = 'employer_pf'").get()) {
+    const maxOrder = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM salary_components').get().m;
+    const insC = db.prepare('INSERT INTO salary_components (key, label, type, sort_order) VALUES (?, ?, ?, ?)');
+    const employerPfId = insC.run('employer_pf', 'Employer PF', 'employer_cost', maxOrder + 1).lastInsertRowid;
+    const gratuityId = insC.run('gratuity', 'Gratuity', 'employer_cost', maxOrder + 2).lastInsertRowid;
+    const ins = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, 0)');
+    db.prepare('SELECT id FROM employees').all().forEach((e) => { ins.run(e.id, employerPfId); ins.run(e.id, gratuityId); });
+  }
 }
 
 // Sub-department "teams" (e.g. Education's Team-A/Team-B), an optional team_id on each
@@ -1338,6 +1506,124 @@ function migrateTeamsAndScopes() {
 
   const empCols = db.prepare('PRAGMA table_info(employees)').all().map((c) => c.name);
   if (!empCols.includes('team_id')) db.exec('ALTER TABLE employees ADD COLUMN team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL');
+
+  // Fresher vs Experienced — lets the Employee form show only the relevant fields/document
+  // names for each (e.g. no "Experience Letter" document option for a Fresher).
+  if (!empCols.includes('employment_type')) db.exec('ALTER TABLE employees ADD COLUMN employment_type TEXT');
+
+  // Pay Type — separate from Fresher/Experienced above: which payroll formula applies.
+  // 'Stipend' interns get a fixed ₹10,000/month with no components at all; 'Package' employees
+  // use the normal Basic/HRA/etc. salary-components breakdown. Defaults to 'Package' so every
+  // existing employee keeps today's behavior.
+  if (!empCols.includes('pay_type')) db.exec("ALTER TABLE employees ADD COLUMN pay_type TEXT NOT NULL DEFAULT 'Package' CHECK (pay_type IN ('Package','Stipend'))");
+
+  // CTC-driven salary structure: HR enters one CTC figure and the server splits it into
+  // Basic/HRA/Bonus/Special Allowance/PF/PT/Employer PF/Gratuity per the configured percentages
+  // (see payroll.routes.js splitCtc()) — replaces manually typing each component amount.
+  // Storing the CTC itself (not just the derived component amounts) lets the structure be
+  // re-displayed and re-split later without asking HR to re-enter it.
+  if (!empCols.includes('ctc')) db.exec('ALTER TABLE employees ADD COLUMN ctc INTEGER');
+
+  // Custom fields now belong to a real form section (Personal/Address/Emergency/Employment/
+  // Bank/Education) instead of always landing in one lumped "Additional information" block.
+  const customFieldCols = db.prepare('PRAGMA table_info(employee_custom_fields)').all().map((c) => c.name);
+  if (!customFieldCols.includes('section')) db.exec("ALTER TABLE employee_custom_fields ADD COLUMN section TEXT NOT NULL DEFAULT 'personal' CHECK (section IN ('personal','address','emergency','employment','bank','education'))");
+
+  // Forgot-password: a one-time token + expiry stored on the account, cleared once used or
+  // once a new token is issued (issuing a fresh one implicitly invalidates any older link).
+  const userCols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+  if (!userCols.includes('reset_token')) db.exec('ALTER TABLE users ADD COLUMN reset_token TEXT');
+  if (!userCols.includes('reset_token_expires')) db.exec('ALTER TABLE users ADD COLUMN reset_token_expires TEXT');
+
+  // Finer-grained address (building/door/floor/landmark alongside the existing street/city/
+  // state/country/pincode) + phone OTP verification (India: 10-digit mobile, +91 assumed).
+  if (!empCols.includes('address_building_no')) db.exec('ALTER TABLE employees ADD COLUMN address_building_no TEXT');
+  if (!empCols.includes('address_door_no')) db.exec('ALTER TABLE employees ADD COLUMN address_door_no TEXT');
+  if (!empCols.includes('address_floor_no')) db.exec('ALTER TABLE employees ADD COLUMN address_floor_no TEXT');
+  if (!empCols.includes('address_landmark')) db.exec('ALTER TABLE employees ADD COLUMN address_landmark TEXT');
+  if (!empCols.includes('phone_verified')) db.exec('ALTER TABLE employees ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0');
+  if (!empCols.includes('phone_otp_code')) db.exec('ALTER TABLE employees ADD COLUMN phone_otp_code TEXT');
+  if (!empCols.includes('phone_otp_expires')) db.exec('ALTER TABLE employees ADD COLUMN phone_otp_expires TEXT');
+
+  // Statutory identifiers shown on a real payslip alongside the existing PAN number.
+  if (!empCols.includes('uan_number')) db.exec('ALTER TABLE employees ADD COLUMN uan_number TEXT');
+  if (!empCols.includes('pf_number')) db.exec('ALTER TABLE employees ADD COLUMN pf_number TEXT');
+  if (!empCols.includes('esi_number')) db.exec('ALTER TABLE employees ADD COLUMN esi_number TEXT');
+
+  // Address redesign: Address Type (Current/Permanent) + Line 1/Line 2 + District replace the
+  // old door/building/floor/street/landmark breakdown (city/state/country/pincode are reused
+  // as-is, just relabeled in the UI). Existing data is folded into the new fields once so
+  // nothing already filled in is lost — door/building/floor -> Line 1, street/landmark -> Line 2.
+  if (!empCols.includes('address_type')) db.exec('ALTER TABLE employees ADD COLUMN address_type TEXT');
+  if (!empCols.includes('address_line1')) {
+    db.exec('ALTER TABLE employees ADD COLUMN address_line1 TEXT');
+    db.exec('ALTER TABLE employees ADD COLUMN address_line2 TEXT');
+    db.prepare('SELECT id, address_door_no, address_building_no, address_floor_no, address_street, address_landmark FROM employees').all().forEach((e) => {
+      const line1 = [e.address_door_no, e.address_building_no, e.address_floor_no && `Floor ${e.address_floor_no}`].filter(Boolean).join(', ');
+      const line2 = [e.address_street, e.address_landmark && `Near ${e.address_landmark}`].filter(Boolean).join(', ');
+      if (line1 || line2) {
+        db.prepare('UPDATE employees SET address_line1 = ?, address_line2 = ? WHERE id = ?').run(line1 || null, line2 || null, e.id);
+      }
+    });
+  }
+  if (!empCols.includes('address_district')) db.exec('ALTER TABLE employees ADD COLUMN address_district TEXT');
+
+  // A proper payslip needs: the calendar month (for computing that period's Days Worked/LOP from
+  // attendance), an explicit Loss-of-Pay day count + the pay it cost them, and a frozen snapshot
+  // of the itemized earning/deduction lines at the moment payroll ran — salary_components can
+  // change later, but an already-issued payslip must keep showing what was actually paid then.
+  const payCols2 = db.prepare('PRAGMA table_info(payslips)').all().map((c) => c.name);
+  if (!payCols2.includes('month')) db.exec('ALTER TABLE payslips ADD COLUMN month TEXT');
+  if (!payCols2.includes('days_worked')) db.exec('ALTER TABLE payslips ADD COLUMN days_worked INTEGER');
+  if (!payCols2.includes('lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN lop_days INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('lop_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN lop_deduction INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('lines_json')) db.exec('ALTER TABLE payslips ADD COLUMN lines_json TEXT');
+
+  // Super Admin can give recognition without being linked to an employee record (a true
+  // system-administrator login often isn't tied to one) — from_employee_id has to become
+  // nullable for that, which SQLite only allows via a table rebuild.
+  const recogCol = db.prepare('PRAGMA table_info(recognitions)').all().find((c) => c.name === 'from_employee_id');
+  if (recogCol && recogCol.notnull) {
+    db.exec(`
+      CREATE TABLE recognitions_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+        to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        award_type TEXT NOT NULL CHECK (award_type IN ('Employee of the Month','Spot Award','Team Player','Innovation Award','Above & Beyond')),
+        message TEXT NOT NULL,
+        points INTEGER NOT NULL DEFAULT 10,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO recognitions_new SELECT * FROM recognitions;
+      DROP TABLE recognitions;
+      ALTER TABLE recognitions_new RENAME TO recognitions;
+    `);
+  }
+
+  // Employee self-service Recruitment: refer a candidate (tracked on the same candidates row
+  // used by the HR pipeline) and submit a resignation (creates the same exits row HR's own
+  // "Add Exit" flow creates, just self-initiated — with a reason, which HR-created exits never
+  // needed since HR already knows why).
+  const candCols = db.prepare('PRAGMA table_info(candidates)').all().map((c) => c.name);
+  if (!candCols.includes('referred_by_employee_id')) db.exec('ALTER TABLE candidates ADD COLUMN referred_by_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL');
+  if (!candCols.includes('source_id')) db.exec('ALTER TABLE candidates ADD COLUMN source_id INTEGER REFERENCES candidate_sources(id)');
+  const exitCols = db.prepare('PRAGMA table_info(exits)').all().map((c) => c.name);
+  if (!exitCols.includes('reason')) db.exec('ALTER TABLE exits ADD COLUMN reason TEXT');
+
+  // New Hires now link to a real employee record (nullable, for backward compat with any row
+  // created before this migration) — required going forward so onboarding can be driven by real
+  // cross-module signals (Documents/Employees/Assets — see server/src/utils/onboarding.js)
+  // instead of HR manually ticking every checklist item. `completed_at` drives the 2-day
+  // auto-archive of a finished onboarding record (see /overview's newHires filter).
+  const newHireCols = db.prepare('PRAGMA table_info(new_hires)').all().map((c) => c.name);
+  if (!newHireCols.includes('employee_id')) db.exec('ALTER TABLE new_hires ADD COLUMN employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL');
+  if (!newHireCols.includes('completed_at')) db.exec('ALTER TABLE new_hires ADD COLUMN completed_at TEXT');
+
+  // Documents used to be visible to every employee unconditionally. Default existing/new rows to
+  // published=1 so nothing already-visible silently disappears — HR now has the option to hide
+  // specific ones instead of everything being forced into one state.
+  const docCols = db.prepare('PRAGMA table_info(company_documents)').all().map((c) => c.name);
+  if (!docCols.includes('published')) db.exec('ALTER TABLE company_documents ADD COLUMN published INTEGER NOT NULL DEFAULT 1');
 }
 
 // The original permission-matrix catalog (perm_modules/perm_features) only covered the first
@@ -1368,7 +1654,7 @@ function migratePermissionCatalog() {
       'Build & Manage Survey', 'Activate / Deactivate Survey', 'Survey Results & Analytics'
     ]},
     { name: 'Document Management', items: [
-      'Upload & Manage Company Documents', 'Mandatory Acknowledgment Tracking', 'Document Library'
+      'Upload & Manage Company Documents', 'Mandatory Acknowledgment Tracking', 'Document Library', 'Publish / Hide from Employees'
     ]},
     { name: 'Shift & Roster', items: [
       'Shift Pattern Management', 'Roster Assignment', 'Shift Swap Approval'
@@ -1386,7 +1672,7 @@ function migratePermissionCatalog() {
       'Case Log & Timeline', 'Case Resolution'
     ]}
   ];
-  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager', 'assistant_manager'];
+  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager'];
   const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
 
   const roles = db.prepare('SELECT id, key FROM roles').all();
@@ -1412,17 +1698,47 @@ function migratePermissionCatalog() {
   });
 
   migrateManagerFullAccess();
+  migrateDocumentPublishFeature();
+}
+
+// Document Management gained a distinct "Publish / Hide from Employees" permission after go-live
+// (documents were visible to every employee unconditionally) — added as its own feature, not
+// folded into the existing 'Upload & Manage Company Documents' grant, so Super Admin can grant or
+// revoke just the publish/hide capability independently via Manage Roles. Runs after the
+// NEW_MODULES loop above, which — since Document Management already exists on a live DB — would
+// otherwise skip adding this new item entirely (its "already added" check is module-level, not
+// per-feature).
+function migrateDocumentPublishFeature() {
+  const mod = db.prepare("SELECT id FROM perm_modules WHERE code = '17'").get();
+  if (!mod) return; // Document Management not seeded yet — the NEW_MODULES loop above will cover it
+  if (db.prepare('SELECT 1 FROM perm_features WHERE module_id = ? AND name = ?').get(mod.id, 'Publish / Hide from Employees')) return;
+
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager'];
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM perm_features WHERE module_id = ?').get(mod.id).m;
+  const featureId = db.prepare('INSERT INTO perm_features (module_id, category, name, sort_order) VALUES (?, ?, ?, ?)')
+    .run(mod.id, 'Core Records & Day-to-Day Operations', 'Publish / Hide from Employees', maxSort + 1).lastInsertRowid;
+  const roles = db.prepare('SELECT id, key FROM roles').all();
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+  roles.forEach((r) => {
+    if (FULL_ACCESS_ROLES.includes(r.key)) ACTIONS.forEach((a) => insertGrant.run(r.id, featureId, a));
+    else insertGrant.run(r.id, featureId, 'View');
+  });
 }
 
 // The original 11-module seed() only ever gave 'super_admin'/'hr_admin' the full action set,
-// with every other role (including manager/assistant_manager) getting 'View' only. But every
-// route file's real isHR() gate has always treated manager/assistant_manager as full HR access
-// alongside super_admin/hr_admin — so their permission-matrix rows never matched their actual
-// live behavior. Backfill them to full access on every feature (idempotent INSERT OR IGNORE)
-// so turning on feature-level enforcement doesn't newly lock out access these roles already have.
+// with every other role (including manager) getting 'View' only. But every route file's real
+// isHR() gate has always treated manager as full HR access alongside super_admin/hr_admin — so
+// its permission-matrix rows never matched its actual live behavior. Backfill it to full access
+// on every feature (idempotent INSERT OR IGNORE) so turning on feature-level enforcement doesn't
+// newly lock out access this role already has.
+// NOTE: assistant_manager was deliberately removed from this backfill — per Super Admin policy,
+// Assistant Manager/STL/TL are limited to View + workflow-approval actions only across every
+// module (05-18, Payroll excepted), unless Super Admin explicitly grants more in Manage Roles.
+// Re-adding it here would silently undo that on every server restart.
 function migrateManagerFullAccess() {
   const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
-  const roleIds = db.prepare("SELECT id FROM roles WHERE key IN ('manager', 'assistant_manager')").all().map((r) => r.id);
+  const roleIds = db.prepare("SELECT id FROM roles WHERE key IN ('manager')").all().map((r) => r.id);
   if (!roleIds.length) return;
   const featureIds = db.prepare('SELECT id FROM perm_features').all().map((f) => f.id);
   const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
@@ -1577,6 +1893,43 @@ function migrateTicketsTable() {
     db.prepare('SELECT * FROM tickets').all().forEach((r) => insert.run(r));
     db.exec('DROP TABLE tickets');
     db.exec('ALTER TABLE tickets_new RENAME TO tickets');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// One-time rebuild: the original notifications.target_role CHECK only allowed
+// ('all','super_admin','manager','employee') — too narrow once Helpdesk needed a 'staff'
+// broadcast (every role except plain employee, for operational alerts a regular employee
+// shouldn't see about someone else's ticket). Preserves every existing column/row by rebuilding
+// against whatever the live table's current column set already is (it's grown several ALTER-
+// added columns over time — employee_id, target_department, channels, priority, ticket_id).
+function migrateNotificationsTargetRole() {
+  const info = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='notifications'").get();
+  if (!info || info.sql.includes("'staff'")) return;
+
+  const colNames = db.prepare('PRAGMA table_info(notifications)').all().map((c) => c.name);
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE notifications_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','staff','super_admin','manager','hr_admin','assistant_manager','stl','tl','employee')),
+        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+        target_department TEXT,
+        channels TEXT NOT NULL DEFAULT 'in_app',
+        priority TEXT,
+        ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL
+      );
+    `);
+    const cols = colNames.join(', ');
+    db.exec(`INSERT INTO notifications_new (${cols}) SELECT ${cols} FROM notifications`);
+    db.exec('DROP TABLE notifications');
+    db.exec('ALTER TABLE notifications_new RENAME TO notifications');
   });
   rebuild();
   db.pragma('foreign_keys = ON');
@@ -1885,17 +2238,63 @@ function seedModuleData() {
     insAsset.run('Dell Latitude 5440', 'Laptop', null, 'Under Repair', 78000);
   }
 
-  // Backfill the onboarding/offboarding checklist for any new_hire/exit row that doesn't
-  // have one yet (first run after this migration, or a row created before it).
+  // Backfill the onboarding checklist for any new_hire row that doesn't have one yet (first run
+  // after this migration, or a row created before it) ...
   const insOnTask = db.prepare('INSERT INTO onboarding_tasks (new_hire_id, task_name, sort_order) VALUES (?, ?, ?)');
   db.prepare('SELECT id FROM new_hires').all().forEach((h) => {
     if (db.prepare('SELECT COUNT(*) c FROM onboarding_tasks WHERE new_hire_id = ?').get(h.id).c > 0) return;
     ONBOARDING_TASK_DEFAULTS.forEach((t, i) => insOnTask.run(h.id, t, i));
   });
+
+  // ... and re-sync every EXISTING checklist whenever ONBOARDING_TASK_DEFAULTS itself changes
+  // (a renamed step, a newly added one like 'Assets assigned', or just a reordering) — otherwise
+  // a new_hire row created before this migration is permanently stuck on the old names/order.
+  // Renames preserve whatever was already checked under the old name.
+  const ONBOARDING_TASK_RENAMES = { 'Meet reporting manager': 'Reporting manager assigned' };
+  const defaultsSet = new Set(ONBOARDING_TASK_DEFAULTS);
+  db.prepare('SELECT id, employee_id FROM new_hires').all().forEach((h) => {
+    const existing = db.prepare('SELECT * FROM onboarding_tasks WHERE new_hire_id = ? ORDER BY sort_order').all(h.id);
+    const inSync = existing.length === ONBOARDING_TASK_DEFAULTS.length
+      && ONBOARDING_TASK_DEFAULTS.every((name, i) => existing[i]?.task_name === name);
+    if (inSync) return;
+
+    Object.entries(ONBOARDING_TASK_RENAMES).forEach(([oldName, newName]) => {
+      db.prepare('UPDATE onboarding_tasks SET task_name = ? WHERE new_hire_id = ? AND task_name = ?').run(newName, h.id, oldName);
+    });
+    const haveNames = new Set(db.prepare('SELECT task_name FROM onboarding_tasks WHERE new_hire_id = ?').all(h.id).map((t) => t.task_name));
+    ONBOARDING_TASK_DEFAULTS.forEach((name, i) => { if (!haveNames.has(name)) insOnTask.run(h.id, name, i); });
+    const stale = [...haveNames].filter((n) => !defaultsSet.has(n));
+    if (stale.length) {
+      const placeholders = stale.map(() => '?').join(',');
+      db.prepare(`DELETE FROM onboarding_tasks WHERE new_hire_id = ? AND task_name IN (${placeholders})`).run(h.id, ...stale);
+    }
+    const updSort = db.prepare('UPDATE onboarding_tasks SET sort_order = ? WHERE new_hire_id = ? AND task_name = ?');
+    ONBOARDING_TASK_DEFAULTS.forEach((name, i) => updSort.run(i, h.id, name));
+
+    // A newly-added task (e.g. 'Assets assigned') may already be true for a linked employee.
+    if (h.employee_id && db.prepare('SELECT id FROM assets WHERE assigned_employee_id = ?').get(h.employee_id)) {
+      db.prepare("UPDATE onboarding_tasks SET completed = 1 WHERE new_hire_id = ? AND task_name = 'Assets assigned' AND completed = 0").run(h.id);
+    }
+
+    const tasksNow = db.prepare('SELECT completed FROM onboarding_tasks WHERE new_hire_id = ?').all(h.id);
+    const pct = tasksNow.length ? Math.round((tasksNow.filter((t) => t.completed).length / tasksNow.length) * 100) : 0;
+    db.prepare("UPDATE new_hires SET onboarding_pct = ?, completed_at = CASE WHEN ? = 100 THEN COALESCE(completed_at, datetime('now')) ELSE NULL END WHERE id = ?").run(pct, pct, h.id);
+  });
   const insOffTask = db.prepare('INSERT INTO offboarding_tasks (exit_id, task_name, sort_order) VALUES (?, ?, ?)');
   db.prepare('SELECT id FROM exits').all().forEach((x) => {
     if (db.prepare('SELECT COUNT(*) c FROM offboarding_tasks WHERE exit_id = ?').get(x.id).c > 0) return;
     OFFBOARDING_TASK_DEFAULTS.forEach((t, i) => insOffTask.run(x.id, t, i));
+  });
+  // Re-sync every EXISTING exit's checklist order whenever OFFBOARDING_TASK_DEFAULTS itself gets
+  // reordered — same fix as onboarding's sync above, just simpler since no task was renamed or
+  // added here, only reordered.
+  const offboardingUpdSort = db.prepare('UPDATE offboarding_tasks SET sort_order = ? WHERE exit_id = ? AND task_name = ?');
+  db.prepare('SELECT id FROM exits').all().forEach((x) => {
+    const existing = db.prepare('SELECT * FROM offboarding_tasks WHERE exit_id = ? ORDER BY sort_order').all(x.id);
+    const inSync = existing.length === OFFBOARDING_TASK_DEFAULTS.length
+      && OFFBOARDING_TASK_DEFAULTS.every((name, i) => existing[i]?.task_name === name);
+    if (inSync) return;
+    OFFBOARDING_TASK_DEFAULTS.forEach((name, i) => offboardingUpdSort.run(i, x.id, name));
   });
 
   // --- Helpdesk / Grievance Ticketing demo data. ---
@@ -2031,11 +2430,19 @@ function seedModuleData() {
   // real HR data and should only ever contain genuine cases HR raises themselves. ---
 }
 
+// Company-specified onboarding sequence. 'Documents submitted', 'Reporting manager assigned',
+// and 'Assets assigned' auto-check themselves from real actions in Documents/Employees/Assets
+// (see server/src/utils/onboarding.js) — HR can still tick any of them manually as a fallback.
 export const ONBOARDING_TASK_DEFAULTS = [
-  'Offer letter signed', 'IT & workstation setup', 'Orientation session completed', 'Documents submitted', 'Meet reporting manager'
+  'Orientation session completed', 'Documents submitted', 'Offer letter signed', 'Reporting manager assigned', 'IT & workstation setup', 'Assets assigned'
 ];
+// Company-specified offboarding sequence. 'Return IT assets' auto-checks itself when the asset
+// actually gets returned in Asset Management (see server/src/utils/offboarding.js) — HR can
+// still tick it manually as a fallback. The other three have no existing system of record in
+// this app to hook into (no knowledge-transfer log, no finance-clearance tracker, no exit-
+// interview scheduler), so they stay manual checkboxes for now.
 export const OFFBOARDING_TASK_DEFAULTS = [
-  'Return IT assets', 'Knowledge transfer completed', 'Finance clearance (dues/loans)', 'HR exit interview'
+  'Knowledge transfer completed', 'Finance clearance (dues/loans)', 'HR exit interview', 'Return IT assets'
 ];
 
 migrate();

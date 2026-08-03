@@ -6,12 +6,22 @@ const router = Router();
 router.use(requireAuth);
 
 router.get('/', (req, res) => {
-  const rows = db.prepare(`
-    SELECT t.*, u.name AS assigned_to_name
-    FROM tasks t JOIN users u ON u.id = t.assigned_to
-    WHERE t.assigned_to = ? OR t.created_by = ?
-    ORDER BY (t.status = 'Done'), t.due_date IS NULL, t.due_date ASC
-  `).all(req.user.sub, req.user.sub);
+  // Super Admin gets the same "full, unrestricted, organization-wide" view here as everywhere
+  // else in the app (Dashboard banner, Employee Management, etc.) — every employee's pending
+  // tasks, not just their own. Every other role stays scoped to tasks they're assigned to or
+  // created themselves.
+  const rows = req.user.role === 'super_admin'
+    ? db.prepare(`
+        SELECT t.*, u.name AS assigned_to_name
+        FROM tasks t JOIN users u ON u.id = t.assigned_to
+        ORDER BY (t.status = 'Done'), t.due_date IS NULL, t.due_date ASC
+      `).all()
+    : db.prepare(`
+        SELECT t.*, u.name AS assigned_to_name
+        FROM tasks t JOIN users u ON u.id = t.assigned_to
+        WHERE t.assigned_to = ? OR t.created_by = ?
+        ORDER BY (t.status = 'Done'), t.due_date IS NULL, t.due_date ASC
+      `).all(req.user.sub, req.user.sub);
   res.json({ tasks: rows });
 });
 

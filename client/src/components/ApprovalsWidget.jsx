@@ -33,7 +33,7 @@ export default function ApprovalsWidget({ canDecide, badge }) {
       {pending.length === 0 && <div className="empty">No pending approvals.</div>}
       {pending.map((a) => (
         <div key={a.id} className="rec-row">
-          <span>{a.type} — {a.requester}<div className="feature-meta">{a.detail}</div></span>
+          <span>{a.type} — {a.requester}{a.team_name && <span className="feature-meta"> ({a.team_name})</span>}<div className="feature-meta">{a.detail}</div></span>
           {canDecide && (
             <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
               <button className="btn-approve" onClick={() => decide(a.id, 'approve')}>Approve</button>

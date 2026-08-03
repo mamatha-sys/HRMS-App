@@ -125,4 +125,12 @@ router.delete('/teams/:id', requireRole('super_admin'), (req, res) => {
   res.status(204).send();
 });
 
+// The system Role Catalog (name only — no scope/counts/edit), for any authenticated user to
+// populate a Role picker (e.g. Employee Management's Add Employee form). Automatically reflects
+// whatever Super Admin has added/renamed in Manage Roles, since it reads the same `roles` table.
+// The full catalog with edit/scope/user-counts stays Super-Admin-only via GET /api/roles.
+router.get('/roles', (req, res) => {
+  res.json({ roles: db.prepare('SELECT key, name FROM roles ORDER BY sort_order, id').all() });
+});
+
 export default router;

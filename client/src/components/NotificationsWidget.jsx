@@ -6,6 +6,9 @@ const CHANNELS = [
   { key: 'sms', label: 'SMS' },
   { key: 'whatsapp', label: 'WhatsApp' }
 ];
+// Mirrors the Helpdesk module's urgency colors (green/yellow/orange/red) so a ticket-related
+// notification here carries the same at-a-glance priority as it does inside Helpdesk itself.
+const PRIORITY_CLASS = { Low: 'priority-low', Medium: 'priority-medium', High: 'priority-high', Critical: 'priority-critical' };
 
 export default function NotificationsWidget({ canCreate, badge }) {
   const [notifications, setNotifications] = useState([]);
@@ -125,7 +128,7 @@ export default function NotificationsWidget({ canCreate, badge }) {
       {notifications.map((n) => (
         <div key={n.id} className="rec-row">
           <span>
-            <strong>{n.title}</strong> — {n.message}
+            <strong>{n.title}</strong>{n.priority && <span className={'priority-badge ' + (PRIORITY_CLASS[n.priority] || 'priority-medium')} style={{ marginLeft: 6 }}>{n.priority}</span>} — {n.message}
             <div className="feature-meta">{n.created_at}</div>
           </span>
           {!n.is_read && <button onClick={() => markRead(n.id)}>Mark read</button>}

@@ -4,19 +4,22 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '15' (Expense & Travel Claims).
-const isHR = (role) => canModuleAdmin(role, '15');
+// Dynamic RBAC via Manage Roles — module '15' (Expense & Travel Claims). A Senior Team
+// Lead/Team Lead/Assistant Manager also passes: the read routes below fetch-then-filter via
+// filterToScope, so admitting them here only ever narrows to their assigned departments/teams.
+const isHR = (role) => canModuleAdmin(role, '15') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
 
 function withName(rows) {
   return rows.map((r) => {
-    const emp = db.prepare('SELECT name, employee_code FROM employees WHERE id = ?').get(r.employee_id);
-    return { ...r, employee_name: emp?.name, employee_code: emp?.employee_code, current_stage_name: roleNameOf(r.current_stage_role_id) };
+    const emp = db.prepare('SELECT name, employee_code, department, team_id FROM employees WHERE id = ?').get(r.employee_id);
+    return { ...r, employee_name: emp?.name, employee_code: emp?.employee_code, department: emp?.department, team_id: emp?.team_id, current_stage_name: roleNameOf(r.current_stage_role_id) };
   });
 }
 
@@ -44,7 +47,7 @@ router.post('/', (req, res) => {
 // HR/approvers: the pending (and recently decided) queue.
 router.get('/', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const claims = withName(db.prepare("SELECT * FROM expense_claims ORDER BY (status = 'Pending') DESC, created_at DESC").all());
+  const claims = filterToScope(withName(db.prepare("SELECT * FROM expense_claims ORDER BY (status = 'Pending') DESC, created_at DESC").all()), req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ claims, chainLabel: approvalChainLabel() });
 });
 
@@ -55,6 +58,15 @@ function decide(finalStatus) {
     const claim = db.prepare('SELECT * FROM expense_claims WHERE id = ?').get(req.params.id);
     if (!claim) return res.status(404).json({ error: 'Claim not found' });
     if (claim.status !== 'Pending') return res.status(400).json({ error: 'This claim has already been decided' });
+
+    // A Senior Team Lead/Team Lead/Assistant Manager may only act on claims from employees
+    // within their assigned departments/teams — even though the chain says it's their turn —
+    // unlike every other HR-tier role in the chain, whose reach stays company-wide.
+    if (isScopedRole(req.user.role)) {
+      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
+      const claimant = db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(claim.employee_id);
+      if (!isEmployeeInScope(scope, claimant)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+    }
 
     const result = evaluateDecision(req.user.role, claim.current_stage_role_id, finalStatus === 'Rejected');
     if (result.error) return res.status(403).json({ error: result.error });
@@ -85,7 +97,11 @@ router.put('/:id/reimburse', (req, res) => {
 
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const claims = db.prepare('SELECT * FROM expense_claims').all();
+  const enriched = db.prepare('SELECT * FROM expense_claims').all().map((c) => {
+    const emp = db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(c.employee_id);
+    return { ...c, department: emp?.department, team_id: emp?.team_id };
+  });
+  const claims = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
   const byCategory = {};
   claims.forEach((c) => {
     byCategory[c.category] = byCategory[c.category] || { category: c.category, count: 0, totalAmount: 0 };

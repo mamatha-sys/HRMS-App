@@ -12,7 +12,7 @@ const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = 
 function withNames(rows) {
   return rows.map((r) => ({
     ...r,
-    from_name: db.prepare('SELECT name FROM employees WHERE id = ?').get(r.from_employee_id)?.name,
+    from_name: r.from_employee_id ? db.prepare('SELECT name FROM employees WHERE id = ?').get(r.from_employee_id)?.name : 'Super Admin',
     to_name: db.prepare('SELECT name FROM employees WHERE id = ?').get(r.to_employee_id)?.name
   }));
 }
@@ -26,16 +26,25 @@ router.get('/feed', (req, res) => {
   });
 });
 
+// Giving recognition is a Super Admin/HR Admin/Manager-only action — a plain employee (and
+// Assistant Manager/STL/TL) can be recognized, and sees the leaderboard/feed like everyone
+// else, but doesn't get to nominate others themselves.
+const CAN_GIVE_ROLES = ['super_admin', 'hr_admin', 'manager'];
+
 router.post('/', (req, res) => {
+  if (!CAN_GIVE_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const me = myEmployee(req.user.sub);
-  if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
+  // Super Admin is a pure system-administrator account — it's allowed to give recognition even
+  // with no employee record of its own (from_employee_id is nullable for exactly this case).
+  // Every other give-capable role still needs a real linked employee to be attributed as "from".
+  if (!me && req.user.role !== 'super_admin') return res.status(400).json({ error: 'No employee record linked to your account.' });
   const { to_employee_id, award_type, message } = req.body || {};
   if (!to_employee_id) return res.status(400).json({ error: 'Choose who you\'re recognizing' });
-  if (Number(to_employee_id) === me.id) return res.status(400).json({ error: 'You cannot recognize yourself' });
+  if (me && Number(to_employee_id) === me.id) return res.status(400).json({ error: 'You cannot recognize yourself' });
   if (!AWARD_TYPES.includes(award_type)) return res.status(400).json({ error: 'A valid award type is required' });
   if (!message?.trim()) return res.status(400).json({ error: 'A message is required' });
   const info = db.prepare('INSERT INTO recognitions (from_employee_id, to_employee_id, award_type, message, points) VALUES (?, ?, ?, ?, ?)')
-    .run(me.id, to_employee_id, award_type, message.trim(), AWARD_POINTS[award_type] || 10);
+    .run(me ? me.id : null, to_employee_id, award_type, message.trim(), AWARD_POINTS[award_type] || 10);
   res.status(201).json({ recognition: withNames([db.prepare('SELECT * FROM recognitions WHERE id = ?').get(info.lastInsertRowid)])[0] });
 });
 

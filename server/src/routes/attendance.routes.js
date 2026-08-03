@@ -2,15 +2,20 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
-import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { isScopedRole, filterToScope } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
-import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate } from '../utils/attendanceCore.js';
+import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate, enabledMethods, isMethodEnabled, setMethodEnabled, notifyIfLate, notifyIfEarlyLogout, notifyAttendanceGaps } from '../utils/attendanceCore.js';
+import { isValidDescriptor, euclideanDistance, FACE_MATCH_THRESHOLD } from '../utils/face.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '07' (Attendance & Time Tracking).
-const isHR = (role) => canModuleAdmin(role, '07');
+// Dynamic RBAC via Manage Roles — module '07' (Attendance & Time Tracking). A Senior Team
+// Lead/Team Lead/Assistant Manager also passes: every READ route below already fetches-then-
+// filters via filterToScope, so admitting them here only ever narrows to their assigned
+// departments/teams, never widens to company-wide. Write actions (e.g. /mark) intentionally
+// check canModuleAdmin directly instead of this isHR, so scoped roles stay view/approval-only.
+const isHR = (role) => canModuleAdmin(role, '07') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const SCOPE_BANNER = {
@@ -51,8 +56,18 @@ router.get('/overview', (req, res) => {
   });
 
   const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
-  const regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' ORDER BY (status='Pending') DESC, created_at DESC LIMIT 10")
-    .all().map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
+  // The `approvals` table records the requester by name only (no employee_id/department column)
+  // — same convention as approvals.routes.js. Enrich with the requester's department/team so a
+  // scoped STL/TL only ever sees regularization requests from their own assigned people here too.
+  const employeeByName = (name) => db.prepare('SELECT department, team_id FROM employees WHERE name = ?').get(name);
+  // A department can be split into teams (e.g. Education's Team-A/Team-B) — surface which team
+  // the requester belongs to so an STL overseeing both teams can tell them apart at a glance.
+  const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
+  let regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' ORDER BY (status='Pending') DESC, created_at DESC")
+    .all().map((r) => ({ ...r, ...(employeeByName(r.requester) || {}) }));
+  regularizations = filterToScope(regularizations, req.user.role, myEmployee(req.user.sub)?.id)
+    .slice(0, 10)
+    .map((r) => ({ ...r, team_name: teamNameOf(r.team_id), current_stage_name: roleNameOf(r.current_stage_role_id) }));
 
   res.json({
     date,
@@ -170,21 +185,95 @@ router.get('/', (req, res) => {
   res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel() });
 });
 
+// Always "my own" recent history + regularizations, regardless of role — a Senior Team Lead/
+// Team Lead is an employee too and needs their own record here, not the company/team-wide grid
+// that GET / above returns for them once isHR admits scoped roles.
+router.get('/mine', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.json({ rows: [], me: null });
+  notifyAttendanceGaps(me.id); // catches a missed checkout/check-in even on days they don't check in again
+  const rows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? ORDER BY date DESC LIMIT 30').all(me.id);
+  const todays = rows.find((r) => r.date === today()) || null;
+  const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
+  // Whoever actually decided this (approvals.decided_by is just a users.id) — resolved to their
+  // account name so the employee can see e.g. "Approved by Priya Manager", not just a status tag.
+  const decidedByName = (userId) => (userId ? db.prepare('SELECT name FROM users WHERE id = ?').get(userId)?.name : null);
+  const regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' AND requester = ? ORDER BY created_at DESC").all(me.name)
+    .map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id), decided_by_name: decidedByName(r.decided_by) }));
+
+  // This month's own Present/Late/Half-day-cut/Missing-punch counts + attendance % — same formula
+  // as the HR-only monthly report (present ÷ days in month), just scoped to the calling employee.
+  const month = today().slice(0, 7);
+  const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(? || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
+  const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(me.id, month + '%');
+  const summary = {
+    month,
+    present: monthRows.filter((m) => m.status === 'Present').length,
+    absent: monthRows.filter((m) => m.status === 'Absent').length,
+    late: monthRows.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length,
+    halfDayCut: monthRows.filter((m) => m.half_day_flag).length,
+    missingPunch: monthRows.filter((m) => m.status === 'Present' && !m.check_in_time).length,
+    attendancePct: daysInMonth > 0 ? Math.round((monthRows.filter((m) => m.status === 'Present').length / daysInMonth) * 100) : 0
+  };
+
+  res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel(), summary });
+});
+
 const upsertToday = (employeeId, patch) => upsertAttendanceForDate(employeeId, today(), patch);
 
 function validCoord(v) { return typeof v === 'number' && Number.isFinite(v); }
 
+// Both selectable methods (Web Check-in, Mobile App) require a live face-verification capture —
+// first successful check-in enrolls the employee's face on their login account (same account
+// doing the check-in), every check-in after that must match it. This is a separate enrollment
+// from anything login-related; it just happens to reuse the same users.face_descriptor column.
 router.post('/check-in', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, today());
   if (existing?.check_in_time) return res.status(400).json({ error: 'Already checked in today at ' + existing.check_in_time });
-  const method = METHODS.includes(req.body?.method) ? req.body.method : 'Web Check-in';
+
+  const method = METHODS.includes(req.body?.method) ? req.body.method : METHODS[0];
+  if (!isMethodEnabled(method)) return res.status(400).json({ error: `${method} has been disabled by your administrator.` });
+
+  const faceDescriptor = req.body?.faceDescriptor;
+  if (!isValidDescriptor(faceDescriptor)) return res.status(400).json({ error: 'Face verification is required to check in.' });
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.sub);
+  let faceJustEnrolled = false;
+  if (!user.face_descriptor) {
+    db.prepare('UPDATE users SET face_descriptor = ? WHERE id = ?').run(JSON.stringify(faceDescriptor), user.id);
+    faceJustEnrolled = true;
+  } else {
+    const distance = euclideanDistance(JSON.parse(user.face_descriptor), faceDescriptor);
+    if (distance > FACE_MATCH_THRESHOLD) return res.status(401).json({ error: 'Face verification failed — this does not match your enrolled face.' });
+  }
+
   const latitude = validCoord(req.body?.latitude) ? req.body.latitude : null;
   const longitude = validCoord(req.body?.longitude) ? req.body.longitude : null;
   const attendance = upsertToday(me.id, { status: 'Present', check_in_time: nowTime(), method, latitude, longitude });
   recomputeLateFlags(me.id, today().slice(0, 7));
-  res.json({ attendance: db.prepare('SELECT * FROM attendance WHERE id = ?').get(attendance.id) });
+  notifyIfLate(me.id, attendance);
+  notifyAttendanceGaps(me.id); // e.g. yesterday's missed checkout, surfaced right when they check in again
+  res.json({ attendance: db.prepare('SELECT * FROM attendance WHERE id = ?').get(attendance.id), faceJustEnrolled });
+});
+
+// The check-in dropdown's options — only methods Super Admin has left enabled.
+router.get('/methods', (req, res) => {
+  res.json({ methods: enabledMethods() });
+});
+
+// Super Admin: every method with its enabled state, for the admin toggle screen.
+router.get('/methods/all', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ methods: METHODS.map((m) => ({ method: m, enabled: isMethodEnabled(m) })) });
+});
+
+router.put('/methods/:method', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Insufficient permissions' });
+  const method = decodeURIComponent(req.params.method);
+  if (!METHODS.includes(method)) return res.status(404).json({ error: 'Unknown check-in method' });
+  setMethodEnabled(method, !!req.body?.enabled);
+  res.json({ methods: METHODS.map((m) => ({ method: m, enabled: isMethodEnabled(m) })) });
 });
 
 router.post('/check-out', (req, res) => {
@@ -193,19 +282,18 @@ router.post('/check-out', (req, res) => {
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, today());
   if (!existing?.check_in_time) return res.status(400).json({ error: 'Check in first.' });
   if (existing.check_out_time) return res.status(400).json({ error: 'Already checked out at ' + existing.check_out_time });
-  res.json({ attendance: upsertToday(me.id, { check_out_time: nowTime() }) });
+  const attendance = upsertToday(me.id, { check_out_time: nowTime() });
+  notifyIfEarlyLogout(me.id, attendance);
+  res.json({ attendance });
 });
 
-// HR marks an employee's attendance for a date.
+// HR marks an employee's attendance for a date. Deliberately NOT admitting isScopedRole here —
+// marking attendance edits someone else's record, which is a step beyond the view + workflow-
+// approval access Assistant Manager/STL/TL are limited to; only a real Manage Roles grant opens it.
 router.post('/mark', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canModuleAdmin(req.user.role, '07')) return res.status(403).json({ error: 'Insufficient permissions' });
   const { employee_id, date, status } = req.body || {};
   if (!employee_id || !['Present', 'Absent', 'Leave'].includes(status)) return res.status(400).json({ error: 'employee_id and a valid status are required' });
-  if (isScopedRole(req.user.role)) {
-    const target = db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(employee_id);
-    const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-    if (!isEmployeeInScope(scope, target)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
-  }
   const d = date || today();
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employee_id, d);
   if (existing) db.prepare('UPDATE attendance SET status = ? WHERE id = ?').run(status, existing.id);

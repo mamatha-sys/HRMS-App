@@ -6,6 +6,7 @@ import { notifyWebhooks, recentWebhookDeliveries } from '../utils/webhooks.js';
 import { recentDeliveries } from '../utils/channels.js';
 import { processPunchLine, mapPunch } from '../utils/biometricPunch.js';
 import * as googleCalendar from '../utils/googleCalendar.js';
+import { listJobBoards, connectJobBoard, disconnectJobBoard, addJobBoard, jobBoardKeys } from '../utils/jobBoards.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,7 +22,8 @@ const KEY_FEATURES = [
   { key: 'calendar', label: 'Calendar Sync (Google)', screen: 'calendar' },
   { key: 'payroll-export', label: 'Payroll Bank-Transfer Export', screen: 'payroll-export' },
   { key: 'custom', label: 'Custom Integrations (Add Your Own)', screen: 'custom' },
-  { key: 'branding', label: 'Company Branding (Logo & Name)', screen: 'branding' }
+  { key: 'branding', label: 'Company Branding (Logo & Name)', screen: 'branding' },
+  { key: 'job-boards', label: 'Job Board Postings (Naukri, LinkedIn, Shine, Indeed)', screen: 'job-boards' }
 ];
 
 router.get('/overview', (req, res) => {
@@ -38,7 +40,8 @@ router.get('/overview', (req, res) => {
       slack: !!getSetting('slack_webhook_url'),
       teams: !!getSetting('teams_webhook_url'),
       calendarConnected: googleCalendar.isConnected(),
-      customIntegrations: customCount
+      customIntegrations: customCount,
+      jobBoardsConnected: listJobBoards().filter((b) => b.connected).length
     }
   });
 });
@@ -279,6 +282,41 @@ router.put('/custom/:id', (req, res) => {
     ['Active', 'Paused'].includes(status) ? status : null, req.params.id
   );
   res.json({ integration: db.prepare('SELECT * FROM custom_integrations WHERE id = ?').get(req.params.id) });
+});
+
+// ---------- Job Board Postings (Naukri/LinkedIn/Shine/Indeed) ----------
+// Which boards Super Admin has connected — read by anyone who can see Manage Posting
+// (Recruitment's checkboxes need to know which to grey out), changed by Super Admin only.
+router.get('/job-boards', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ boards: listJobBoards() });
+});
+
+// Connect (real employer API key / account ID required) or disconnect (empty credential) a board
+// — same "real config, not a bare flag" pattern as Calendar Sync / Webhooks in this file.
+router.put('/job-boards/:key', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!jobBoardKeys().includes(req.params.key)) return res.status(404).json({ error: 'Unknown job board' });
+  try {
+    const credential = (req.body?.credential || '').trim();
+    if (credential) connectJobBoard(req.params.key, credential);
+    else disconnectJobBoard(req.params.key);
+    res.json({ boards: listJobBoards() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Super Admin can extend the catalog beyond the 4 built-ins (e.g. a regional/niche portal) —
+// added boards start connected since they were added specifically to be used.
+router.post('/job-boards', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    addJobBoard(req.body?.label);
+    res.status(201).json({ boards: listJobBoards() });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Company Branding (logo + name) is served by branding.routes.js at /api/branding — its GET

@@ -7,13 +7,14 @@ import { getSettings, setSetting } from '../utils/integrationSettings.js';
 const router = Router();
 
 router.get('/', (req, res) => {
-  res.json(getSettings(['company_name', 'company_logo']));
+  res.json(getSettings(['company_name', 'company_logo', 'company_address']));
 });
 
 router.put('/', requireAuth, requireRole('super_admin'), (req, res) => {
-  const { company_name, company_logo } = req.body || {};
+  const { company_name, company_logo, company_address } = req.body || {};
   if (company_name !== undefined) setSetting('company_name', company_name || '');
   if (company_logo !== undefined) setSetting('company_logo', company_logo || '');
+  if (company_address !== undefined) setSetting('company_address', company_address || '');
   res.json({ ok: true });
 });
 

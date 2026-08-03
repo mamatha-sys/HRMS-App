@@ -2,20 +2,32 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own timesheet.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own timesheet
+// (EmployeeView) AND the company overview below it, rather than one replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL can view + approve their assigned department/team's logged hours.
+// Unlike Assistant Manager, STL/TL can also assign — and view — "My Tasks" for employees within
+// their own assigned department(s)/team(s) (a supervisory action, not company-wide management).
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
+const STL_TL_ROLES = ['stl', 'tl'];
 const STATUS_CLASS = { Pending: 'pending', Approved: 'present', Rejected: 'absent' };
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Timesheet() {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('main');
 
   if (screen === 'reports') return <ReportsScreen onBack={() => setScreen('main')} />;
-  return isHR ? <HRView onReports={() => setScreen('reports')} /> : <EmployeeView />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRView onReports={() => setScreen('reports')} />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
+    return (<><EmployeeView compact /><HRView compact sectionLabel="Company Timesheet" onReports={() => setScreen('reports')} /></>);
+  }
+  return <EmployeeView />;
 }
 
-function EmployeeView() {
+function EmployeeView({ compact }) {
   const [entries, setEntries] = useState([]);
   const [myProjects, setMyProjects] = useState([]);
   const [error, setError] = useState('');
@@ -37,8 +49,8 @@ function EmployeeView() {
 
   return (
     <div>
-      <h1>Timesheet</h1>
-      <div className="subtitle">Log hours against your assigned projects.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Timesheet</div> : <h1>Timesheet</h1>}
+      {!compact && <div className="subtitle">Log hours against your assigned projects.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -69,12 +81,17 @@ function EmployeeView() {
         ))}
       </div>
 
-      <MyTasksSection isHR={false} />
+      {!compact && <MyTasksSection isHR={false} />}
     </div>
   );
 }
 
-function HRView({ onReports }) {
+function HRView({ onReports, compact, sectionLabel }) {
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
+  // "Assign to others" in My Tasks: full managers assign company-wide; STL/TL assign within
+  // their own assigned department(s)/team(s) only (enforced server-side either way).
+  const canAssignTasks = canManage || STL_TL_ROLES.includes(user?.role);
   const [entries, setEntries] = useState([]);
   const [error, setError] = useState('');
 
@@ -90,8 +107,8 @@ function HRView({ onReports }) {
     <div>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <div>
-          <h1>Timesheet</h1>
-          <div className="subtitle">Review and approve logged hours.</div>
+          {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Timesheet'}</div> : <h1>Timesheet</h1>}
+          {!compact && <div className="subtitle">Review and approve logged hours.</div>}
         </div>
         <button onClick={onReports}>Reports</button>
       </div>
@@ -114,7 +131,7 @@ function HRView({ onReports }) {
         ))}
       </div>
 
-      <MyTasksSection isHR={true} />
+      <MyTasksSection isHR={canAssignTasks} />
     </div>
   );
 }
@@ -127,6 +144,7 @@ function MyTasksSection({ isHR }) {
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [updatesTaskId, setUpdatesTaskId] = useState(null);
+  const [editingTask, setEditingTask] = useState(null);
 
   function load() { api.get('/timesheet/tasks').then((r) => setTasks(r.data.tasks)).catch(() => setError('Could not load tasks.')); }
   useEffect(load, []);
@@ -150,11 +168,12 @@ function MyTasksSection({ isHR }) {
             <thead>
               <tr style={{ textAlign: 'left', borderBottom: '2px solid #EEF0F3' }}>
                 <th style={{ padding: '6px 8px' }}>Task</th>
+                <th style={{ padding: '6px 8px' }}>Assigned To</th>
                 <th style={{ padding: '6px 8px' }}>Sub Task Name</th>
                 <th style={{ padding: '6px 8px' }}>Status</th>
                 <th style={{ padding: '6px 8px' }}>Start Date</th>
                 <th style={{ padding: '6px 8px' }}>End Date</th>
-                <th style={{ padding: '6px 8px' }}>Updates</th>
+                <th style={{ padding: '6px 8px' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -166,6 +185,10 @@ function MyTasksSection({ isHR }) {
                     {t.created_by_name && <div className="feature-meta">Assigned by {t.created_by_name}</div>}
                     {t.is_dependent && t.depends_on_name && <div className="feature-meta">Depends on: {t.depends_on_name}</div>}
                   </td>
+                  <td style={{ padding: '6px 8px' }}>
+                    {t.assigned_to_name || '—'}
+                    {t.assigned_to_team_name && <div className="feature-meta">{t.assigned_to_team_name}</div>}
+                  </td>
                   <td style={{ padding: '6px 8px' }}>{t.sub_task_name || '—'}</td>
                   <td style={{ padding: '6px 8px' }}>
                     <select value={t.status} onChange={(e) => setStatus(t.id, e.target.value)}>
@@ -174,8 +197,9 @@ function MyTasksSection({ isHR }) {
                   </td>
                   <td style={{ padding: '6px 8px' }}>{t.start_date}</td>
                   <td style={{ padding: '6px 8px' }}>{t.end_date || '—'}</td>
-                  <td style={{ padding: '6px 8px' }}>
-                    <button onClick={() => setUpdatesTaskId(t.id)} title="Updates">💬</button>
+                  <td style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>
+                    <button onClick={() => setEditingTask(t)} title="Edit the full task">Edit</button>
+                    <button style={{ marginLeft: 4 }} onClick={() => setUpdatesTaskId(t.id)} title="Updates">💬</button>
                   </td>
                 </tr>
               ))}
@@ -185,6 +209,7 @@ function MyTasksSection({ isHR }) {
       )}
 
       {showModal && <NewTaskModal isHR={isHR} onClose={() => setShowModal(false)} onCreated={() => { setShowModal(false); load(); }} />}
+      {editingTask && <EditTaskModal task={editingTask} onClose={() => setEditingTask(null)} onSaved={() => { setEditingTask(null); load(); }} />}
       {updatesTaskId && <TaskUpdatesModal taskId={updatesTaskId} onClose={() => setUpdatesTaskId(null)} />}
     </div>
   );
@@ -290,6 +315,105 @@ function NewTaskModal({ isHR, onClose, onCreated }) {
           <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>
             <button type="button" onClick={onClose}>Cancel</button>
             <button className="primary" type="submit">+ Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// Full task edit — every field (not just status), pre-filled from the task. Reassigning who
+// it's for isn't part of this; that's the separate "assign" step in New Task.
+function EditTaskModal({ task, onClose, onSaved }) {
+  const [options, setOptions] = useState({ departments: [] });
+  const [existingTasks, setExistingTasks] = useState([]);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    department: task.department || '', task_name: task.task_name || '', description: task.description || '', sub_task_name: task.sub_task_name || '',
+    status: task.status, start_date: task.start_date, end_date: task.end_date || '',
+    is_dependent: !!task.is_dependent, depends_on_task_id: task.depends_on_task_id || ''
+  });
+
+  useEffect(() => {
+    api.get('/timesheet/tasks/options').then((r) => setOptions(r.data)).catch(() => {});
+    api.get('/timesheet/tasks').then((r) => setExistingTasks(r.data.tasks.filter((t) => t.id !== task.id))).catch(() => {});
+  }, []);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    if (!form.department) { setError('Select a department.'); return; }
+    if (!form.task_name.trim()) { setError('Task name is required.'); return; }
+    if (!form.start_date) { setError('Task start date is required.'); return; }
+    setSaving(true);
+    try { await api.put(`/timesheet/tasks/${task.id}`, form); onSaved(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save task.'); }
+    finally { setSaving(false); }
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-box" onClick={(e) => e.stopPropagation()}>
+        <div className="row" style={{ justifyContent: 'space-between', marginBottom: 14 }}>
+          <h2 style={{ margin: 0 }}>Edit Task{task.assigned_to_name ? ` — ${task.assigned_to_name}` : ''}</h2>
+          <button onClick={onClose}>✕</button>
+        </div>
+        {error && <div className="banner error">{error}</div>}
+        <form onSubmit={submit}>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Select Department *</label>
+              <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} required>
+                <option value="">-- Select Department --</option>
+                {options.departments.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Task Name *</label>
+              <input value={form.task_name} onChange={(e) => setForm({ ...form, task_name: e.target.value })} required />
+            </div>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Task Description</label>
+              <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            </div>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Sub Task Name</label>
+              <input value={form.sub_task_name} onChange={(e) => setForm({ ...form, sub_task_name: e.target.value })} />
+            </div>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Status *</label>
+              <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })} required>
+                {['Not Started', 'In Progress', 'Completed', 'On Hold'].map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div style={{ flex: '1 1 260px' }} />
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Task Start Date *</label>
+              <input type="date" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
+            </div>
+            <div style={{ flex: '1 1 260px' }}>
+              <label className="field-label">Task End Date</label>
+              <input type="date" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
+            </div>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <label className="field-label">Dependent Task</label>
+            <div className="row" style={{ gap: 6 }}>
+              <button type="button" className={!form.is_dependent ? 'primary' : ''} onClick={() => setForm({ ...form, is_dependent: false, depends_on_task_id: '' })}>No</button>
+              <button type="button" className={form.is_dependent ? 'primary' : ''} onClick={() => setForm({ ...form, is_dependent: true })}>Yes</button>
+            </div>
+            {form.is_dependent && (
+              <select value={form.depends_on_task_id} onChange={(e) => setForm({ ...form, depends_on_task_id: e.target.value })} style={{ marginTop: 8 }}>
+                <option value="">Depends on which task?</option>
+                {existingTasks.map((t) => <option key={t.id} value={t.id}>{t.task_name}</option>)}
+              </select>
+            )}
+          </div>
+
+          <div className="row" style={{ justifyContent: 'flex-end', marginTop: 18 }}>
+            <button type="button" onClick={onClose}>Cancel</button>
+            <button className="primary" type="submit" disabled={saving}>Save</button>
           </div>
         </form>
       </div>

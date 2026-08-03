@@ -4,12 +4,18 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { notifyEmployee } from '../utils/notify.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
+import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '13' (Helpdesk).
+// Dynamic RBAC via Manage Roles — module '13' (Helpdesk). A Senior Team Lead/Team Lead/
+// Assistant Manager also passes — but ONLY for the read-only /overview below, which explicitly
+// scopes the ticket list it returns; every write endpoint in this file (create/assign/resolve/
+// escalate/KB-manage/routing) still checks canModuleAdmin directly, so scoped roles stay
+// view-only here, matching Super Admin policy.
 const isHR = (role) => canModuleAdmin(role, '13');
+const canViewHelpdesk = (role) => canModuleAdmin(role, '13') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const CATEGORIES = ['IT', 'HR', 'Admin', 'Grievance', 'Facilities', 'Payroll', 'Other'];
@@ -20,14 +26,21 @@ const SLA_HOURS = { Critical: 1, High: 4, Medium: 24, Low: 72 };
 // many days even if the requester never explicitly confirms.
 const AUTO_CLOSE_DAYS = 3;
 
+// SQLite's datetime('now') and every UTC timestamp this file writes (toISOString()-derived) are
+// stored as UTC with no timezone marker (e.g. "2026-07-28 10:44:01"). Parsing that string with
+// `new Date(str.replace(' ', 'T'))` — no trailing Z — makes JS treat it as local time instead,
+// silently shifting every comparison by the server's UTC offset. Appending 'Z' fixes that.
+function parseUtc(str) {
+  return new Date(str.replace(' ', 'T') + 'Z');
+}
 function isBreached(t) {
   if (!t.sla_deadline || ['Resolved', 'Closed'].includes(t.status)) return false;
-  return new Date() > new Date(t.sla_deadline.replace(' ', 'T'));
+  return new Date() > parseUtc(t.sla_deadline);
 }
 function canClose(t) {
   if (t.requester_confirmed) return true;
   if (!t.resolved_at) return false;
-  const days = (Date.now() - new Date(t.resolved_at.replace(' ', 'T')).getTime()) / 86400000;
+  const days = (Date.now() - parseUtc(t.resolved_at).getTime()) / 86400000;
   return days >= AUTO_CLOSE_DAYS;
 }
 
@@ -51,12 +64,67 @@ function logComment(ticketId, authorName, comment, { internal, attachment_data_u
     .run(ticketId, authorName, comment, internal ? 1 : 0, attachment_data_url || null, attachment_name || null);
 }
 
+// Ticket Escalation (automatic 24h ratchet): independent of each priority's own SLA_HOURS
+// deadline above, any ticket that sits open/unresolved for a full 24 hours — measured from
+// creation, or from whenever it was last auto-escalated — has its priority bumped one level,
+// with no HR approval needed. This repeats every further 24 hours of continued non-resolution
+// until the ticket reaches Critical or is resolved/closed. There's no background scheduler in
+// this app, so this runs lazily at the top of every ticket-list read (Overview/My Tickets/
+// Escalations) — a bump lands the next time anyone loads one of those, not at the exact instant
+// 24h elapses.
+const AUTO_ESCALATE_HOURS = 24;
+function runAutoEscalations() {
+  const candidates = db.prepare("SELECT * FROM tickets WHERE status NOT IN ('Resolved','Closed') AND priority != 'Critical'").all();
+  const now = Date.now();
+  for (const t of candidates) {
+    let priority = t.priority;
+    let reference = parseUtc(t.last_escalated_at || t.created_at).getTime();
+    let bumped = false;
+    while (priority !== 'Critical' && (now - reference) >= AUTO_ESCALATE_HOURS * 3600000) {
+      priority = PRIORITIES[PRIORITIES.indexOf(priority) + 1];
+      reference += AUTO_ESCALATE_HOURS * 3600000;
+      bumped = true;
+    }
+    if (!bumped) continue;
+    const newDeadline = new Date(now + SLA_HOURS[priority] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+    const referenceStr = new Date(reference).toISOString().slice(0, 19).replace('T', ' ');
+    db.prepare('UPDATE tickets SET priority = ?, escalated = 1, sla_deadline = ?, last_escalated_at = ? WHERE id = ?')
+      .run(priority, newDeadline, referenceStr, t.id);
+    logComment(t.id, 'System', `Auto-escalated — unresolved for 24+ hours, priority raised to ${priority}.`, { internal: true });
+    const escDescSuffix = t.description?.trim() ? ` — "${t.description.trim()}"` : '';
+    notifyEmployee(t.employee_id, 'Ticket priority escalated', `Your ticket "${t.subject}" has been unresolved for over 24 hours and was automatically escalated to ${priority} priority.${escDescSuffix}`, { priority, ticketId: t.id });
+    // 'staff' (not 'all'): this is an operational alert about someone's ticket, not something a
+    // plain employee should see on their own dashboard for other people's tickets. Their own
+    // ticket already gets a personal notification via notifyEmployee above.
+    db.prepare('INSERT INTO notifications (title, message, target_role, priority, ticket_id) VALUES (?, ?, ?, ?, ?)')
+      .run('Helpdesk Ticket Auto-Escalated', `"${t.subject}" was unresolved for 24+ hours and auto-escalated to ${priority} priority.${escDescSuffix}`, 'staff', priority, t.id);
+    notifyWebhooks('Helpdesk Ticket Auto-Escalated', `Ticket #${t.id} "${t.subject}" auto-escalated to ${priority} priority after 24+ hours unresolved.`).catch(() => {});
+  }
+}
+
 // HR: dashboard of every ticket, with KPIs by status.
 router.get('/overview', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const tickets = db.prepare("SELECT * FROM tickets ORDER BY (status = 'Open') DESC, created_at DESC").all().map((t) => withDetails(t, { includeInternal: true }));
+  if (!canViewHelpdesk(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  runAutoEscalations();
+  const hr = isHR(req.user.role);
+  const scoped = isScopedRole(req.user.role);
+  const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
+
+  // Internal notes (Internal Notes, Attachments & Screenshots) stay HR-only — a scoped viewer
+  // sees the ticket and its public thread, but never internal-only comments.
+  let tickets = db.prepare("SELECT * FROM tickets ORDER BY (status = 'Open') DESC, created_at DESC").all().map((t) => withDetails(t, { includeInternal: hr }));
+  // Every ticket has a raiser (myEmployee() is required to create one), so unlike Assets/
+  // Recruitment there's no "unattributed" case here — a scoped role sees only tickets raised
+  // by an employee within their assigned department(s)/team(s).
+  if (scoped) {
+    tickets = tickets.filter((t) => {
+      const emp = db.prepare('SELECT department FROM employees WHERE id = ?').get(t.employee_id);
+      return emp?.department && scopeDeptNames.has(emp.department);
+    });
+  }
   const count = (s) => tickets.filter((t) => t.status === s).length;
   res.json({
+    banner: scoped ? 'Team/organization helpdesk — view your assigned department(s)/team(s) tickets only; no create, assign, resolve, or escalate actions here.' : undefined,
     kpis: [
       { label: 'Open', value: count('Open'), color: 'gold' },
       { label: 'In Progress', value: count('In Progress'), color: 'blue' },
@@ -72,6 +140,7 @@ router.get('/overview', (req, res) => {
 router.get('/my', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ tickets: [], categories: CATEGORIES, priorities: PRIORITIES });
+  runAutoEscalations();
   const tickets = db.prepare('SELECT * FROM tickets WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map((t) => withDetails(t));
   res.json({ tickets, categories: CATEGORIES, priorities: PRIORITIES });
 });
@@ -101,11 +170,18 @@ router.post('/', (req, res) => {
   const info = db.prepare('INSERT INTO tickets (employee_id, category, priority, subject, description, sla_deadline, assigned_to_employee_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(me.id, category, prio, subject.trim(), description || null, slaDeadline, routing?.assigned_to_employee_id || null);
 
-  if (routing) {
-    const assignee = db.prepare('SELECT name FROM employees WHERE id = ?').get(routing.assigned_to_employee_id);
-    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
-      .run('New Helpdesk Ticket', `"${subject.trim()}" (${category}) auto-routed to ${assignee?.name || 'a staff member'}.`, 'all');
-  }
+  // A dashboard alert fires for every new ticket, not just auto-routed ones — routing just
+  // changes who it says the ticket landed with. The ticket's own description rides along too,
+  // so the alert is useful on its own without a trip into Helpdesk to see what it's about.
+  const assignee = routing ? db.prepare('SELECT name FROM employees WHERE id = ?').get(routing.assigned_to_employee_id) : null;
+  const descSuffix = description?.trim() ? ` — "${description.trim()}"` : '';
+  const routedMsg = routing
+    ? `"${subject.trim()}" (${category}) auto-routed to ${assignee?.name || 'a staff member'}.${descSuffix}`
+    : `${me.name} raised a "${subject.trim()}" (${category}) ticket.${descSuffix}`;
+  // 'staff' (not 'all'): a plain employee shouldn't see a dashboard alert about someone else's
+  // ticket — only HR/admin/managerial roles need this operational visibility.
+  db.prepare('INSERT INTO notifications (title, message, target_role, priority, ticket_id) VALUES (?, ?, ?, ?, ?)')
+    .run('New Helpdesk Ticket', routedMsg, 'staff', prio, info.lastInsertRowid);
   notifyWebhooks('New Helpdesk Ticket', `${me.name} raised a ${prio} priority ${category} ticket: "${subject.trim()}"`).catch(() => {});
   res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(info.lastInsertRowid)) });
 });
@@ -188,6 +264,7 @@ router.post('/:id/comments', (req, res) => {
 // bumps its priority and flags it as escalated.
 router.get('/escalations/list', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  runAutoEscalations();
   const tickets = db.prepare("SELECT * FROM tickets WHERE status NOT IN ('Resolved','Closed')").all().map((t) => withDetails(t, { includeInternal: true })).filter((t) => t.slaBreached);
   res.json({ tickets });
 });

@@ -99,17 +99,6 @@ export default function UserManagement() {
     }
   }
 
-  async function resetFace(id) {
-    if (!window.confirm('Clear this user\'s enrolled face? Their next successful login will re-enroll a new one.')) return;
-    setError('');
-    try {
-      await api.put(`/users/${id}/reset-face`);
-      load();
-    } catch (err) {
-      setError(err.response?.data?.error || 'Could not reset face enrollment.');
-    }
-  }
-
   return (
     <div>
       <h1>Role &amp; User Management</h1>
@@ -148,7 +137,7 @@ export default function UserManagement() {
             <div className="row" style={{ marginTop: 12 }}>
               <button className="primary" type="submit">Create user</button>
             </div>
-            <div className="note" style={{ marginTop: 6 }}>The user signs in with this email + password; their face is enrolled on first login.</div>
+            <div className="note" style={{ marginTop: 6 }}>The user signs in with this email + password.</div>
           </form>
         </div>
       )}
@@ -162,7 +151,6 @@ export default function UserManagement() {
                 <th>Name</th>
                 <th>Email</th>
                 <th>Role</th>
-                <th>Face enrolled</th>
                 <th>Status</th>
                 <th>Scope</th>
                 <th>Actions</th>
@@ -179,7 +167,6 @@ export default function UserManagement() {
                         {roles.map((r) => <option key={r.key} value={r.key}>{r.name}</option>)}
                       </select>
                     </td>
-                    <td>{u.faceEnrolled ? 'Yes' : 'No'}</td>
                     <td><span className={'status-tag ' + (u.active ? 'present' : 'absent')}>{u.active ? 'Active' : 'Deactivated'}</span></td>
                     <td>
                       {SCOPED_ROLES.includes(u.role)
@@ -192,14 +179,11 @@ export default function UserManagement() {
                       <button disabled={u.id === currentUser.id} onClick={() => toggleActive(u)}>
                         {u.active ? 'Deactivate' : 'Reactivate'}
                       </button>
-                      {u.faceEnrolled && (
-                        <button style={{ marginLeft: 6 }} onClick={() => resetFace(u.id)}>Reset face</button>
-                      )}
                     </td>
                   </tr>
                   {scopeEditingId === u.id && (
                     <tr>
-                      <td colSpan={7}>
+                      <td colSpan={6}>
                         <div className="card" style={{ margin: '4px 0' }}>
                           <div className="feature-name" style={{ marginBottom: 6 }}>Assigned departments &amp; teams for {u.name}</div>
                           <div className="feature-meta" style={{ marginBottom: 10 }}>

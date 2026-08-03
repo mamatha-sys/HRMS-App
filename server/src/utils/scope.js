@@ -4,8 +4,11 @@ import db from '../db.js';
 // specific departments (STL) or teams (TL) Super Admin has assigned them in User Management,
 // rather than the company-wide access every other HR-tier role (manager/hr_admin/etc.) gets.
 // A single place to extend this list later if another role needs the same treatment.
+// Assistant Manager joined this list per Super Admin policy: Assistant Manager/STL/TL are all
+// limited to viewing their own + assigned department/team's records and performing workflow
+// approvals only — no create/edit/delete/configure/manage anywhere unless explicitly granted.
 export function isScopedRole(role) {
-  return role === 'stl' || role === 'tl';
+  return role === 'stl' || role === 'tl' || role === 'assistant_manager';
 }
 
 // The departments/teams a given employee (identified by their own employees.id, not user id)
@@ -43,4 +46,19 @@ export function filterToScope(rows, role, employeeId) {
   if (!isScopedRole(role)) return rows;
   const scope = getSupervisorScope(employeeId);
   return rows.filter((r) => isEmployeeInScope(scope, r));
+}
+
+// The full set of department NAMES this scope should be treated as covering — its direct
+// department-level grants, plus the parent department of every team-level grant. Needed for
+// content that's only ever targeted by department name (Notifications/Announcements have no
+// per-team targeting of their own), where a TL's team-level grant must still resolve to "their
+// team's department" to match anything.
+export function scopeDepartmentNames(scope) {
+  const names = new Set(scope.departmentNames);
+  if (scope.teamIds.length) {
+    const placeholders = scope.teamIds.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT DISTINCT d.name FROM teams t JOIN departments d ON d.id = t.department_id WHERE t.id IN (${placeholders})`).all(...scope.teamIds);
+    rows.forEach((r) => names.add(r.name));
+  }
+  return [...names];
 }

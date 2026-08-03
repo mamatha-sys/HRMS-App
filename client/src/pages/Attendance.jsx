@@ -1,10 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
+import { loadFaceModels, extractFaceDescriptor, detectFacePresence } from '../faceApi.js';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own check-in/out.
+const FULL_HR_ROLES = ['super_admin'];
+const SCOPED_ROLES = ['stl', 'tl'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own check-in/out
+// (MyAttendance) AND the overview below it (company-wide for the first three, scoped to their
+// assigned departments/teams for STL/TL), rather than one replacing the other.
+const SELF_AND_TEAM_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL can view + approve regularizations for their assigned department/
+// team, but marking someone else's attendance directly is an edit action reserved for these
+// roles (per Super Admin policy) unless explicitly granted.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const tag = (s) => s === 'Present' ? 'present' : s === 'Leave' ? 'info' : s === 'Absent' ? 'absent' : 'locked';
 
 function getLocation() {
@@ -20,32 +31,121 @@ function getLocation() {
 
 function mapLink(lat, lng) { return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`; }
 
-export default function Attendance() {
-  const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRAttendance /> : <MyAttendance />;
+// Web Check-in and Mobile App both require a live face capture before the check-in is accepted —
+// opens the camera, waits for a face in frame, and hands the extracted descriptor back to the
+// caller to submit alongside the check-in request. First successful check-in enrolls the
+// employee's face; every one after that must match it (enforced server-side).
+function FaceCheckInPanel({ onCapture, onCancel, submitting }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const detectLoopRef = useRef(null);
+  const [cameraStatus, setCameraStatus] = useState('loading'); // loading | ready | error
+  const [facePresent, setFacePresent] = useState(false);
+  const [error, setError] = useState('');
+  const [capturing, setCapturing] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function setup() {
+      try {
+        await loadFaceModels();
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' } });
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play(); }
+        setCameraStatus('ready');
+        detectLoopRef.current = setInterval(async () => {
+          if (cancelled || !videoRef.current) return;
+          setFacePresent(await detectFacePresence(videoRef.current));
+        }, 500);
+      } catch (err) {
+        setCameraStatus('error');
+        setError('Camera/model setup failed: ' + (err.message || 'permission denied or unsupported browser.'));
+      }
+    }
+    setup();
+    return () => {
+      cancelled = true;
+      if (detectLoopRef.current) clearInterval(detectLoopRef.current);
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  async function capture() {
+    setError(''); setCapturing(true);
+    const descriptor = await extractFaceDescriptor(videoRef.current);
+    setCapturing(false);
+    if (!descriptor) { setError('No face detected. Move closer, face the camera directly, and make sure the room is well lit.'); return; }
+    onCapture(descriptor);
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 10, maxWidth: 360 }}>
+      <div className="feature-name" style={{ marginBottom: 8 }}>Face Verification</div>
+      {error && <div className="banner error">{error}</div>}
+      <div className="camera-box">
+        <video ref={videoRef} muted playsInline className="camera-video" />
+        {cameraStatus === 'loading' && <div className="camera-overlay">Loading camera &amp; face models...</div>}
+        {cameraStatus === 'error' && <div className="camera-overlay">Camera unavailable</div>}
+        {cameraStatus === 'ready' && (
+          <div className={'face-indicator ' + (facePresent ? 'ok' : 'warn')}>{facePresent ? '✓ Face detected' : 'No face detected'}</div>
+        )}
+      </div>
+      <div className="row" style={{ marginTop: 8 }}>
+        <button className="primary" onClick={capture} disabled={cameraStatus !== 'ready' || capturing || submitting}>
+          {capturing || submitting ? 'Verifying...' : 'Capture & Check In'}
+        </button>
+        <button type="button" onClick={onCancel} disabled={capturing || submitting}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
-function MyAttendance() {
+export default function Attendance() {
+  const { user } = useAuth();
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRAttendance />;
+  if (SELF_AND_TEAM_ROLES.includes(user?.role)) {
+    const sectionLabel = SCOPED_ROLES.includes(user?.role) ? 'Team Attendance' : 'Company Attendance';
+    return (<><MyAttendance compact /><HRAttendance compact sectionLabel={sectionLabel} /></>);
+  }
+  return <MyAttendance />;
+}
+
+function MyAttendance({ compact }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
+  const [methods, setMethods] = useState(['Web Check-in']);
   const [method, setMethod] = useState('Web Check-in');
   const [locating, setLocating] = useState(false);
+  const [showFaceCapture, setShowFaceCapture] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [reg, setReg] = useState({ date: '', reason: '' });
   const [showReg, setShowReg] = useState(false);
 
-  function load() { api.get('/attendance').then((r) => setData(r.data)).catch(() => setError('Could not load attendance.')); }
+  function load() { api.get('/attendance/mine').then((r) => setData(r.data)).catch(() => setError('Could not load attendance.')); }
   useEffect(load, []);
+  useEffect(() => {
+    api.get('/attendance/methods').then((r) => {
+      setMethods(r.data.methods);
+      if (r.data.methods.length && !r.data.methods.includes(method)) setMethod(r.data.methods[0]);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  async function checkIn() {
+  function startCheckIn() { setError(''); setInfo(''); setShowFaceCapture(true); }
+
+  async function checkIn(faceDescriptor) {
     setError(''); setInfo(''); setLocating(true);
     const loc = await getLocation();
-    setLocating(false);
+    setLocating(false); setSubmitting(true);
     try {
-      await api.post('/attendance/check-in', { method, ...(loc || {}) });
-      setInfo(loc ? 'Checked in with location.' : 'Checked in (location unavailable).');
+      const r = await api.post('/attendance/check-in', { method, faceDescriptor, ...(loc || {}) });
+      setShowFaceCapture(false);
+      setInfo((r.data.faceJustEnrolled ? 'Face enrolled for check-in verification. ' : '') + (loc ? 'Checked in with location.' : 'Checked in (location unavailable).'));
       load();
     } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
+    finally { setSubmitting(false); }
   }
   async function checkOut() {
     setError(''); setInfo('');
@@ -59,12 +159,23 @@ function MyAttendance() {
   }
 
   const t = data?.today;
+  const s = data?.summary;
   return (
     <div>
-      <h1>Attendance</h1>
-      <div className="subtitle">Check in and out, and review your recent attendance.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Attendance</div> : <h1>Attendance</h1>}
+      {!compact && <div className="subtitle">Check in and out, and review your recent attendance.</div>}
       {error && <div className="banner error">{error}</div>}
       {info && <div className="banner info">{info}</div>}
+
+      {s && (
+        <div className="kpi-row">
+          <div className="kpi-card blue"><div className="kpi-label">Attendance % ({s.month})</div><div className="kpi-value">{s.attendancePct}%</div></div>
+          <div className="kpi-card green"><div className="kpi-label">Present</div><div className="kpi-value">{s.present}</div></div>
+          <div className="kpi-card gold"><div className="kpi-label">Late Arrivals</div><div className="kpi-value">{s.late}</div></div>
+          <div className="kpi-card red"><div className="kpi-label">Half-day Cut</div><div className="kpi-value">{s.halfDayCut}</div></div>
+          <div className="kpi-card gold"><div className="kpi-label">Missing Punch-in</div><div className="kpi-value">{s.missingPunch}</div></div>
+        </div>
+      )}
 
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>Today</div>
@@ -72,16 +183,24 @@ function MyAttendance() {
           <span>Status: <span className={'status-tag ' + tag(t?.status)}>{t?.status || 'Not marked'}</span></span>
           {t?.check_in_time && <span className="feature-meta">In: {t.check_in_time} ({t.method})</span>}
           {t?.check_out_time && <span className="feature-meta">Out: {t.check_out_time}</span>}
-          {t?.latitude != null && <a className="crumb" href={mapLink(t.latitude, t.longitude)} target="_blank" rel="noreferrer">📍 view location</a>}
+          {t?.latitude != null && (
+            <span className="feature-meta">
+              📍 {t.latitude.toFixed(5)}, {t.longitude.toFixed(5)}{' '}
+              <a className="crumb" href={mapLink(t.latitude, t.longitude)} target="_blank" rel="noreferrer">view on map</a>
+            </span>
+          )}
           <div style={{ flex: 1 }} />
-          <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time} style={{ width: 'auto' }}>
-            <option>Web Check-in</option><option>Mobile App</option><option>Biometric (Fingerprint)</option><option>Face Recognition</option>
+          <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time || showFaceCapture} style={{ width: 'auto' }}>
+            {methods.map((m) => <option key={m}>{m}</option>)}
           </select>
-          <button className="primary" onClick={checkIn} disabled={!!t?.check_in_time || locating}>{locating ? 'Locating...' : 'Check in'}</button>
+          <button className="primary" onClick={startCheckIn} disabled={!!t?.check_in_time || showFaceCapture}>Check in</button>
           <button onClick={checkOut} disabled={!t?.check_in_time || !!t?.check_out_time}>Check out</button>
           <button onClick={() => setShowReg((v) => !v)}>Regularize</button>
         </div>
-        <div className="note" style={{ marginTop: 6 }}>Check-in optionally captures your GPS location (browser will ask permission) for mobile/field attendance verification.</div>
+        <div className="note" style={{ marginTop: 6 }}>Check-in captures your GPS location (browser will ask permission) and requires a quick face verification.</div>
+        {showFaceCapture && (
+          <FaceCheckInPanel onCapture={checkIn} onCancel={() => setShowFaceCapture(false)} submitting={locating || submitting} />
+        )}
         {showReg && (
           <form onSubmit={submitReg} className="row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
             <input type="date" value={reg.date} onChange={(e) => setReg({ ...reg, date: e.target.value })} required />
@@ -101,6 +220,9 @@ function MyAttendance() {
               {r.status !== 'Pending' && <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : 'absent')}>{r.status}</span>}
             </div>
             {r.status === 'Pending' && <ChainStepper chainLabel={data.chainLabel} currentStageName={r.current_stage_name} status={r.status} />}
+            {r.status !== 'Pending' && r.decided_by_name && (
+              <div className="feature-meta">{r.status} by {r.decided_by_name}</div>
+            )}
           </div>
         ))}
       </div>
@@ -114,7 +236,9 @@ function MyAttendance() {
             <tbody>{data.rows.map((r) => (
               <tr key={r.id}>
                 <td>{r.date}</td><td><span className={'status-tag ' + tag(r.status)}>{r.status}</span></td><td>{r.check_in_time || '—'}</td><td>{r.check_out_time || '—'}</td><td>{r.method || '—'}</td>
-                <td>{r.latitude != null ? <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
+                <td>{r.latitude != null ? (
+                  <span className="feature-meta">{r.latitude.toFixed(5)}, {r.longitude.toFixed(5)} <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">map</a></span>
+                ) : '—'}</td>
               </tr>
             ))}</tbody>
           </table>
@@ -124,8 +248,10 @@ function MyAttendance() {
   );
 }
 
-function HRAttendance() {
+function HRAttendance({ compact, sectionLabel }) {
   const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
+  const isSuperAdmin = user?.role === 'super_admin';
   const [ov, setOv] = useState(null);
   const [grid, setGrid] = useState(null);
   const [date, setDate] = useState('');
@@ -133,7 +259,8 @@ function HRAttendance() {
   const [departments, setDepartments] = useState([]);
   const [error, setError] = useState('');
   const [showGrid, setShowGrid] = useState(false);
-  const [tab, setTab] = useState('dashboard'); // dashboard | biometric | reports
+  const [tab, setTab] = useState('dashboard'); // dashboard | biometric | reports | methods
+  const [checkInMethods, setCheckInMethods] = useState(null);
 
   function load(d, dp) {
     const params = {};
@@ -143,6 +270,8 @@ function HRAttendance() {
     api.get('/attendance', { params: d ? { date: d } : {} }).then((r) => setGrid(r.data)).catch(() => {});
   }
   useEffect(() => { load(); api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
+  function loadCheckInMethods() { api.get('/attendance/methods/all').then((r) => setCheckInMethods(r.data.methods)).catch(() => {}); }
+  useEffect(() => { if (tab === 'methods' && isSuperAdmin) loadCheckInMethods(); }, [tab, isSuperAdmin]);
 
   async function decide(id, verb) {
     try { await api.post(`/approvals/${id}/${verb}`); load(date, dept); } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
@@ -155,11 +284,16 @@ function HRAttendance() {
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a'); a.href = url; a.download = `attendance-${date}.csv`; a.click(); URL.revokeObjectURL(url);
   }
+  async function toggleCheckInMethod(m) {
+    setError('');
+    try { await api.put(`/attendance/methods/${encodeURIComponent(m.method)}`, { enabled: !m.enabled }); loadCheckInMethods(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
+  }
 
   return (
     <div>
-      <h1>Attendance</h1>
-      <div className="subtitle">Signed in as: <strong>{user?.name}</strong></div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Team Attendance'}</div> : <h1>Attendance</h1>}
+      {!compact && <div className="subtitle">Signed in as: <strong>{user?.name}</strong></div>}
       {ov?.banner && <div className="banner info">{ov.banner}</div>}
       {error && <div className="banner error">{error}</div>}
 
@@ -167,7 +301,27 @@ function HRAttendance() {
         <button className={tab === 'dashboard' ? 'primary' : ''} onClick={() => setTab('dashboard')}>Dashboard</button>
         <button className={tab === 'biometric' ? 'primary' : ''} onClick={() => setTab('biometric')}>Biometric Attendance List</button>
         <button className={tab === 'reports' ? 'primary' : ''} onClick={() => setTab('reports')}>Reports (Monthly)</button>
+        {isSuperAdmin && <button className={tab === 'methods' ? 'primary' : ''} onClick={() => setTab('methods')}>Check-in Methods</button>}
       </div>
+
+      {tab === 'methods' && isSuperAdmin && (
+        <div className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}>Check-in Methods</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>
+            Control which methods employees can pick when checking in. Both require a live face-verification capture. Biometric (Fingerprint) isn't listed here — it's pushed directly by registered devices (Integrations) and always shows up in the Biometric Attendance List / Reports.
+          </div>
+          {!checkInMethods && <div className="empty">Loading…</div>}
+          {checkInMethods && checkInMethods.map((m) => (
+            <div key={m.method} className="rec-row">
+              <span>{m.method}</span>
+              <span className="row" style={{ gap: 10, flexShrink: 0 }}>
+                <span className={'status-tag ' + (m.enabled ? 'present' : 'locked')}>{m.enabled ? 'Enabled' : 'Disabled'}</span>
+                <button onClick={() => toggleCheckInMethod(m)}>{m.enabled ? 'Disable' : 'Enable'}</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
 
       {tab === 'dashboard' && (
         <>
@@ -209,7 +363,7 @@ function HRAttendance() {
                 {ov.regularizations.map((r) => (
                   <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
                     <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-                      <span>{r.requester}<div className="feature-meta">{r.detail}</div></span>
+                      <span>{r.requester}{r.team_name && <span className="feature-meta"> ({r.team_name})</span>}<div className="feature-meta">{r.detail}</div></span>
                       {r.status === 'Pending' ? (
                         <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                           <button className="btn-approve" onClick={() => decide(r.id, 'approve')}>Approve</button>
@@ -223,16 +377,18 @@ function HRAttendance() {
               </div>
             )}
 
-            <div className="card">
-              <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">3</span>Quick Actions</div>
-              <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowGrid((v) => !v)}>
-                {showGrid ? '− Hide daily marking' : '+ Mark attendance (daily)'}
-              </button>
-              {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
-            </div>
+            {canManage && (
+              <div className="card">
+                <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">3</span>Quick Actions</div>
+                <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowGrid((v) => !v)}>
+                  {showGrid ? '− Hide daily marking' : '+ Mark attendance (daily)'}
+                </button>
+                {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
+              </div>
+            )}
           </div>
 
-          {showGrid && grid && (
+          {canManage && showGrid && grid && (
             <div className="card">
               <div className="feature-name" style={{ marginBottom: 8 }}>Daily marking — {date}</div>
               <table>

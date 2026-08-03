@@ -3,13 +3,23 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { bottomRole } from '../utils/chain.js';
+import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '18' (Shift & Roster).
+// Dynamic RBAC via Manage Roles — module '18' (Shift & Roster). A Senior Team Lead/Team Lead/
+// Assistant Manager also passes canView — but ONLY for the read-only /roster and /swap-requests
+// (company) list below, both of which explicitly scope what they return to the caller's
+// assigned department(s); every write endpoint (add/pause shift, assign roster, decide swap)
+// still checks canModuleAdmin (or the feature-level Shift Swap Approval grant) directly, so
+// scoped roles stay view-only here, matching Super Admin policy. Shift Swap Approval is not one
+// of the 4 workflow approvals (Leave/Attendance/Expense/Timesheet) Super Admin carved out for
+// these roles, so it stays blocked like every other manage action in this module.
 const isHR = (role) => canModuleAdmin(role, '18');
+const canView = (role) => canModuleAdmin(role, '18') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
+const employeeDepartment = (id) => db.prepare('SELECT department FROM employees WHERE id = ?').get(id)?.department;
 
 router.get('/shifts', (req, res) => {
   res.json({ shifts: db.prepare('SELECT * FROM shifts ORDER BY start_time').all() });
@@ -32,11 +42,12 @@ router.put('/shifts/:id', (req, res) => {
   res.json({ shift: db.prepare('SELECT * FROM shifts WHERE id = ?').get(req.params.id) });
 });
 
-// HR: roster for a given date, every employee + their assigned shift (if any).
+// HR (or a scoped role viewing their own department(s)): roster for a given date, every
+// in-scope employee + their assigned shift (if any).
 router.get('/roster', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canView(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const date = req.query.date || db.prepare("SELECT date('now') AS d").get().d;
-  const rows = db.prepare(`
+  let rows = db.prepare(`
     SELECT e.id AS employee_id, e.name, e.employee_code, e.department, ra.id AS assignment_id, s.id AS shift_id, s.name AS shift_name, s.start_time, s.end_time
     FROM employees e
     LEFT JOIN roster_assignments ra ON ra.employee_id = e.id AND ra.date = ?
@@ -44,6 +55,10 @@ router.get('/roster', (req, res) => {
     WHERE e.status = 'Active'
     ORDER BY e.name
   `).all(date);
+  if (isScopedRole(req.user.role)) {
+    const deptNames = new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id)));
+    rows = rows.filter((r) => deptNames.has(r.department));
+  }
   res.json({ date, rows });
 });
 
@@ -91,6 +106,12 @@ router.get('/swap-requests', (req, res) => {
   }));
   if (isHR(req.user.role)) {
     return res.json({ requests: withNames(db.prepare("SELECT * FROM shift_swap_requests ORDER BY (status='Pending') DESC, created_at DESC").all()) });
+  }
+  if (isScopedRole(req.user.role)) {
+    const deptNames = new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id)));
+    const rows = db.prepare("SELECT * FROM shift_swap_requests ORDER BY (status='Pending') DESC, created_at DESC").all()
+      .filter((r) => deptNames.has(employeeDepartment(r.requester_employee_id)));
+    return res.json({ requests: withNames(rows) });
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ requests: [] });

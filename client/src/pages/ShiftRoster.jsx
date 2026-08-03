@@ -2,16 +2,30 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own roster.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own roster
+// (EmployeeView) AND the company roster below it, rather than one replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL are limited to viewing their assigned department(s)' roster and
+// shift-swap requests — per Super Admin policy, no create/edit/pause/assign/approve actions
+// here unless explicitly granted. Shift Swap Approval is not one of the 4 workflow approvals
+// (Leave/Attendance/Expense/Timesheet) carved out for these roles, so it stays blocked too.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function ShiftRoster() {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
-  return isHR ? <HRView /> : <EmployeeView />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRView />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
+    return (<><EmployeeView compact /><HRView compact sectionLabel="Company Shift & Roster" /></>);
+  }
+  return <EmployeeView />;
 }
 
-function HRView() {
+function HRView({ compact, sectionLabel }) {
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [shifts, setShifts] = useState([]);
   const [date, setDate] = useState(today());
   const [rows, setRows] = useState([]);
@@ -48,8 +62,8 @@ function HRView() {
 
   return (
     <div>
-      <h1>Shift &amp; Roster</h1>
-      <div className="subtitle">Define shift patterns, assign employees per date, and manage shift-swap requests.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Shift & Roster'}</div> : <h1>Shift &amp; Roster</h1>}
+      {!compact && <div className="subtitle">Define shift patterns, assign employees per date, and manage shift-swap requests.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -59,11 +73,11 @@ function HRView() {
             <span><strong>{s.name}</strong> — {s.start_time} to {s.end_time}</span>
             <span className="row" style={{ gap: 6 }}>
               <span className={'status-tag ' + (s.status === 'Active' ? 'present' : 'locked')}>{s.status}</span>
-              <button onClick={() => toggleShift(s)}>{s.status === 'Active' ? 'Pause' : 'Resume'}</button>
+              {canManage && <button onClick={() => toggleShift(s)}>{s.status === 'Active' ? 'Pause' : 'Resume'}</button>}
             </span>
           </div>
         ))}
-        {showShiftForm ? (
+        {canManage && (showShiftForm ? (
           <form onSubmit={addShift} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
             <input placeholder="Shift name" value={shiftForm.name} onChange={(e) => setShiftForm({ ...shiftForm, name: e.target.value })} required style={{ flex: '1 1 140px' }} />
             <input type="time" value={shiftForm.start_time} onChange={(e) => setShiftForm({ ...shiftForm, start_time: e.target.value })} required style={{ flex: '1 1 100px' }} />
@@ -71,7 +85,7 @@ function HRView() {
             <button className="primary" type="submit">Add</button>
             <button type="button" onClick={() => setShowShiftForm(false)}>Cancel</button>
           </form>
-        ) : <button style={{ marginTop: 10 }} onClick={() => setShowShiftForm(true)}>+ Add Shift</button>}
+        ) : <button style={{ marginTop: 10 }} onClick={() => setShowShiftForm(true)}>+ Add Shift</button>)}
       </div>
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -82,10 +96,14 @@ function HRView() {
         {rows.map((r) => (
           <div key={r.employee_id} className="rec-row">
             <span>{r.name} <span className="feature-meta">({r.employee_code} · {r.department})</span></span>
-            <select value={r.shift_id || ''} onChange={(e) => assign(r.employee_id, e.target.value)}>
-              <option value="">Unassigned</option>
-              {shifts.filter((s) => s.status === 'Active').map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
+            {canManage ? (
+              <select value={r.shift_id || ''} onChange={(e) => assign(r.employee_id, e.target.value)}>
+                <option value="">Unassigned</option>
+                {shifts.filter((s) => s.status === 'Active').map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            ) : (
+              <span className="feature-meta">{r.shift_name || 'Unassigned'}</span>
+            )}
           </div>
         ))}
       </div>
@@ -100,7 +118,7 @@ function HRView() {
             </span>
             <span className="row" style={{ gap: 6 }}>
               <span className={'status-tag ' + (s.status === 'Pending' ? 'pending' : s.status === 'Approved' ? 'present' : 'absent')}>{s.status}</span>
-              {s.status === 'Pending' && <>
+              {s.status === 'Pending' && canManage && <>
                 <button onClick={() => decideSwap(s.id, 'approve')}>Approve</button>
                 <button onClick={() => decideSwap(s.id, 'reject')}>Reject</button>
               </>}
@@ -112,7 +130,7 @@ function HRView() {
   );
 }
 
-function EmployeeView() {
+function EmployeeView({ compact }) {
   const [rows, setRows] = useState([]);
   const [swaps, setSwaps] = useState([]);
   const [error, setError] = useState('');
@@ -134,8 +152,8 @@ function EmployeeView() {
 
   return (
     <div>
-      <h1>My Roster</h1>
-      <div className="subtitle">Your upcoming shift assignments.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Roster</div> : <h1>My Roster</h1>}
+      {!compact && <div className="subtitle">Your upcoming shift assignments.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>

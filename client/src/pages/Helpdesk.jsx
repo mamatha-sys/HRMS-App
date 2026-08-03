@@ -2,10 +2,25 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin dashboard only, no own tickets.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own ticket
+// raising/tracking (MyHelpdesk) AND the company-wide dashboard below it, rather than one
+// replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL are limited to viewing their assigned department(s)/team(s) — per
+// Super Admin policy, no create/assign/resolve/escalate/KB-manage actions here unless
+// explicitly granted. This gates every write affordance (previously a broader combined
+// FULL_HR_ROLES + SELF_AND_ADMIN_ROLES constant incorrectly gated Knowledge Base compose/delete).
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const STATUS_CLASS = { Open: 'pending', 'In Progress': 'info', Resolved: 'present', Closed: 'absent' };
 const CATEGORIES = ['IT', 'HR', 'Admin', 'Grievance', 'Facilities', 'Payroll', 'Other'];
 const PRIORITIES = ['Low', 'Medium', 'High', 'Critical'];
+// Urgency colors, consistent everywhere a ticket's priority is shown: green → yellow → orange → red.
+const PRIORITY_CLASS = { Low: 'priority-low', Medium: 'priority-medium', High: 'priority-high', Critical: 'priority-critical' };
+function PriorityBadge({ priority }) {
+  return <span className={'priority-badge ' + (PRIORITY_CLASS[priority] || 'priority-medium')}>{priority}</span>;
+}
 
 const KEY_FEATURES = [
   { key: 'creation', label: 'Ticket Creation, Assignment & Categorization' },
@@ -30,7 +45,9 @@ function readFileAsDataUrl(file) {
 
 export default function Helpdesk() {
   const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRHelpdesk /> : <MyHelpdesk />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRHelpdesk />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) return (<><MyHelpdesk compact /><HRHelpdesk compact sectionLabel="Company Helpdesk" /></>);
+  return <MyHelpdesk />;
 }
 
 function TicketThread({ ticket, isHR, onChanged }) {
@@ -83,7 +100,7 @@ function TicketThread({ ticket, isHR, onChanged }) {
 }
 
 // Employee self-service: raise tickets, track status, confirm/reopen/rate resolution.
-function MyHelpdesk() {
+function MyHelpdesk({ compact }) {
   const [tickets, setTickets] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -117,8 +134,8 @@ function MyHelpdesk() {
 
   return (
     <div>
-      <h1>Helpdesk</h1>
-      <div className="subtitle">Raise IT, HR, Admin, Grievance, Facilities or Payroll tickets and track their status.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Helpdesk</div> : <h1>Helpdesk</h1>}
+      {!compact && <div className="subtitle">Raise IT, HR, Admin, Grievance, Facilities or Payroll tickets and track their status.</div>}
       {error && <div className="banner error">{error}</div>}
       <div className="card" style={{ marginBottom: 14 }}>
         {showForm ? (
@@ -151,8 +168,11 @@ function MyHelpdesk() {
         {tickets.map((t) => (
           <div key={t.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span><strong>{t.subject}</strong> <span className="feature-meta">· {t.category} · {t.priority} priority</span></span>
-              <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
+              <span><strong>{t.subject}</strong> <span className="feature-meta">· {t.category}</span></span>
+              <span className="row" style={{ gap: 6 }}>
+                <PriorityBadge priority={t.priority} />
+                <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
+              </span>
             </div>
             {t.description && <div className="feature-meta">{t.description}</div>}
             {t.status === 'Resolved' && !t.requester_confirmed && (
@@ -180,7 +200,9 @@ function MyHelpdesk() {
   );
 }
 
-function HRHelpdesk() {
+function HRHelpdesk({ compact, sectionLabel }) {
+  const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('dashboard');
   const [ov, setOv] = useState(null);
   const [error, setError] = useState('');
@@ -206,8 +228,8 @@ function HRHelpdesk() {
 
   return (
     <div>
-      <h1>Helpdesk</h1>
-      <div className="subtitle">Track and resolve employee IT/HR/Admin/Grievance/Facilities/Payroll tickets.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Helpdesk'}</div> : <h1>Helpdesk</h1>}
+      {!compact && <div className="subtitle">Track and resolve employee IT/HR/Admin/Grievance/Facilities/Payroll tickets.</div>}
       {error && <div className="banner error">{error}</div>}
       {ov && (
         <div className="kpi-row">
@@ -217,16 +239,20 @@ function HRHelpdesk() {
       <div className="dashboard-grid">
         <div className="card">
           <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">1</span>Helpdesk Tickets</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>Resolved/Closed tickets drop off this list — see them in Ticket Resolution or Reports.</div>
           {!ov && <div className="empty">Loading…</div>}
-          {ov && ov.tickets.length === 0 && <div className="empty">No tickets yet.</div>}
-          {ov && ov.tickets.map((t) => (
+          {ov && ov.tickets.filter((t) => !['Resolved', 'Closed'].includes(t.status)).length === 0 && <div className="empty">No open tickets.</div>}
+          {ov && ov.tickets.filter((t) => !['Resolved', 'Closed'].includes(t.status)).map((t) => (
             <div key={t.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <span><strong>{t.subject}</strong></span>
-                <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
+                <span className="row" style={{ gap: 6 }}>
+                  <PriorityBadge priority={t.priority} />
+                  <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
+                </span>
               </div>
-              <div className="feature-meta">{t.employee_name} · {t.category} · {t.priority}</div>
-              {t.status === 'Open' && <button style={{ marginTop: 4 }} onClick={() => setStatus(t.id, 'Resolved')}>Mark Resolved</button>}
+              <div className="feature-meta">{t.employee_name} · {t.category}</div>
+              {canManage && t.status === 'Open' && <button style={{ marginTop: 4 }} onClick={() => setStatus(t.id, 'Resolved')}>Mark Resolved</button>}
             </div>
           ))}
         </div>
@@ -235,7 +261,10 @@ function HRHelpdesk() {
           <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">4</span>Key Features</div>
           <div className="feature-meta" style={{ marginBottom: 8 }}>{KEY_FEATURES.length} features in this module — click any tile to open its screen.</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            {KEY_FEATURES.map((f) => <button key={f.key} className="pill" onClick={() => setScreen(f.key)}>{f.label}</button>)}
+            {/* Non-canManage (Assistant Manager/STL/TL) only get view-safe screens — every other
+                tile drives a write endpoint (create/assign/resolve/escalate/KB-manage/routing/
+                reports) that's now blocked server-side for them. */}
+            {KEY_FEATURES.filter((f) => canManage || ['sla', 'kb'].includes(f.key)).map((f) => <button key={f.key} className="pill" onClick={() => setScreen(f.key)}>{f.label}</button>)}
           </div>
         </div>
       </div>
@@ -278,7 +307,8 @@ function CreationScreen({ onBack }) {
           <div key={t.id} className="rec-row" style={{ alignItems: 'flex-start' }}>
             <span>{t.subject} — {t.employee_name}</span>
             <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-              <span className="feature-meta">{t.category} · {t.priority}</span>
+              <span className="feature-meta">{t.category}</span>
+              <PriorityBadge priority={t.priority} />
               <select value={t.assigned_to_employee_id || ''} onChange={(e) => assign(t.id, e.target.value)}>
                 <option value="">Unassigned</option>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
@@ -321,14 +351,14 @@ function SlaScreen({ onBack }) {
   return (
     <div>
       <h1>SLA Tracking &amp; Status</h1>
-      <div className="subtitle">Critical: 1h · High: 4h · Medium: 24h · Low: 72h response targets.</div>
+      <div className="subtitle">Critical: 1h · High: 4h · Medium: 24h · Low: 72h response targets. Separately, any ticket left unresolved for 24+ hours auto-escalates one priority level, repeating every further 24h until Critical or resolved.</div>
       {error && <div className="banner error">{error}</div>}
       <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Helpdesk</button>
       <div className="card">
         {!ov && <div className="empty">Loading…</div>}
         {ov && ov.tickets.map((t) => (
           <div key={t.id} className="rec-row">
-            <span>{t.subject} <span className="feature-meta">· {t.priority}</span></span>
+            <span className="row" style={{ gap: 6 }}>{t.subject} <PriorityBadge priority={t.priority} /></span>
             <span className="row" style={{ gap: 6 }}>
               <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
               {t.slaBreached ? <span className="status-tag absent">SLA Breached</span> : <span className="status-tag present">Within SLA</span>}
@@ -427,7 +457,10 @@ function NotesScreen({ onBack }) {
 // --- Knowledge Base ---
 function KnowledgeBaseScreen({ onBack }) {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
+  // Browsing the Knowledge Base stays open to everyone who reaches this screen (matches the
+  // backend, which lets any authenticated user GET articles); only composing/deleting is a
+  // write action, gated by the restrictive canManage.
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [articles, setArticles] = useState(null);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -456,7 +489,7 @@ function KnowledgeBaseScreen({ onBack }) {
       <div className="subtitle">Self-help articles employees can check before raising a ticket.</div>
       {error && <div className="banner error">{error}</div>}
       <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Helpdesk</button>
-      {isHR && (
+      {canManage && (
         <div className="card" style={{ marginBottom: 14 }}>
           {showForm ? (
             <form onSubmit={submit}>
@@ -488,7 +521,7 @@ function KnowledgeBaseScreen({ onBack }) {
               <span className="status-tag info">{a.category}</span>
             </div>
             <div className="feature-meta">{a.body}</div>
-            {isHR && <button style={{ marginTop: 4 }} onClick={() => remove(a.id)}>Delete</button>}
+            {canManage && <button style={{ marginTop: 4 }} onClick={() => remove(a.id)}>Delete</button>}
           </div>
         ))}
       </div>
@@ -567,7 +600,7 @@ function EscalationScreen({ onBack }) {
   return (
     <div>
       <h1>Ticket Escalation</h1>
-      <div className="subtitle">Tickets that have breached their SLA and are still unresolved.</div>
+      <div className="subtitle">Tickets that have breached their SLA and are still unresolved. Note: tickets unresolved for 24+ hours also auto-escalate on their own, independent of manual approval here.</div>
       {error && <div className="banner error">{error}</div>}
       <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Helpdesk</button>
       <div className="card">
@@ -576,10 +609,13 @@ function EscalationScreen({ onBack }) {
         {tickets && tickets.map((t) => (
           <div key={t.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span>{t.subject} <span className="feature-meta">· {t.employee_name}</span></span>
-              <span className="status-tag absent">SLA Breached</span>
+              <span className="row" style={{ gap: 6 }}>{t.subject} <span className="feature-meta">· {t.employee_name}</span></span>
+              <span className="row" style={{ gap: 6 }}>
+                <PriorityBadge priority={t.priority} />
+                <span className="status-tag absent">SLA Breached</span>
+              </span>
             </div>
-            {t.escalated ? <div className="status-tag present" style={{ marginTop: 6, display: 'inline-block' }}>Already escalated · {t.priority}</div> : <button style={{ marginTop: 6 }} onClick={() => approve(t.id)}>Approve Escalation</button>}
+            {t.escalated ? <div className="status-tag present" style={{ marginTop: 6, display: 'inline-block' }}>Already escalated</div> : <button style={{ marginTop: 6 }} onClick={() => approve(t.id)}>Approve Escalation</button>}
           </div>
         ))}
       </div>

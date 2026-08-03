@@ -4,4 +4,8 @@ build/
 .env
 *.log
 server/data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
 .DS_Store

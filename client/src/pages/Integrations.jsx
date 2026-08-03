@@ -8,7 +8,8 @@ const KEY_FEATURES = [
   { key: 'calendar', label: 'Calendar Sync (Google)' },
   { key: 'payroll-export', label: 'Payroll Bank-Transfer Export' },
   { key: 'custom', label: 'Custom Integrations (Add Your Own)' },
-  { key: 'branding', label: 'Company Branding (Logo & Name)' }
+  { key: 'branding', label: 'Company Branding (Logo & Name)' },
+  { key: 'job-boards', label: 'Job Board Postings (Naukri, LinkedIn, Shine, Indeed)' }
 ];
 
 export default function Integrations() {
@@ -26,6 +27,7 @@ export default function Integrations() {
   if (screen === 'payroll-export') return <PayrollExportScreen onBack={() => setScreen('dashboard')} />;
   if (screen === 'custom') return <CustomIntegrationsScreen onBack={() => { load(); setScreen('dashboard'); }} />;
   if (screen === 'branding') return <BrandingScreen onBack={() => { load(); setScreen('dashboard'); }} />;
+  if (screen === 'job-boards') return <JobBoardsScreen onBack={() => { load(); setScreen('dashboard'); }} />;
 
   const s = overview?.status;
   return (
@@ -46,6 +48,7 @@ export default function Integrations() {
             <StatusPill label="Teams" ok={s.teams} />
             <StatusPill label="Google Calendar" ok={s.calendarConnected} />
             <StatusPill label={`Custom Integrations (${s.customIntegrations})`} ok={s.customIntegrations > 0} />
+            <StatusPill label={`Job Boards Connected (${s.jobBoardsConnected})`} ok={s.jobBoardsConnected > 0} />
           </div>
         </div>
       )}
@@ -515,11 +518,11 @@ function CustomIntegrationsScreen({ onBack }) {
 
 // ---------- Company Branding (logo + name) ----------
 function BrandingScreen({ onBack }) {
-  const [form, setForm] = useState({ company_name: '', company_logo: '' });
+  const [form, setForm] = useState({ company_name: '', company_logo: '', company_address: '' });
   const [error, setError] = useState('');
   const [saved, setSaved] = useState(false);
 
-  useEffect(() => { api.get('/branding').then((r) => setForm({ company_name: r.data.company_name || '', company_logo: r.data.company_logo || '' })).catch(() => {}); }, []);
+  useEffect(() => { api.get('/branding').then((r) => setForm({ company_name: r.data.company_name || '', company_logo: r.data.company_logo || '', company_address: r.data.company_address || '' })).catch(() => {}); }, []);
 
   async function handleLogo(e) {
     const file = e.target.files?.[0]; if (!file) return;
@@ -541,7 +544,7 @@ function BrandingScreen({ onBack }) {
     <div>
       <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Integrations</button>
       <h1>Company Branding</h1>
-      <div className="subtitle">Your own company logo &amp; name, shown on the Login page and in the app header for everyone.</div>
+      <div className="subtitle">Your own company logo, name &amp; address — shown on the Login page, the app header, and on payslips.</div>
       {error && <div className="banner error">{error}</div>}
       {saved && <div className="banner" style={{ background: '#E4F5EC', color: '#1E8E5A' }}>Saved.</div>}
 
@@ -549,6 +552,9 @@ function BrandingScreen({ onBack }) {
         <form onSubmit={save}>
           <label className="field-label">Company name</label>
           <input placeholder="HRMS" value={form.company_name} onChange={(e) => setForm({ ...form, company_name: e.target.value })} style={{ marginBottom: 10 }} />
+          <label className="field-label">Company address <span className="note">(shown on payslips)</span></label>
+          <textarea rows={3} placeholder="#512, 5th Floor, Building Name, Area, City, State, Country - Pincode" value={form.company_address}
+            onChange={(e) => setForm({ ...form, company_address: e.target.value })} style={{ marginBottom: 10, width: '100%' }} />
           <label className="field-label">Logo</label>
           <div className="row" style={{ alignItems: 'center', gap: 10, marginBottom: 10 }}>
             {form.company_logo && <img src={form.company_logo} alt="" style={{ width: 48, height: 48, objectFit: 'contain', borderRadius: 6, background: '#fff', border: '1px solid #EEF0F3' }} />}
@@ -557,6 +563,96 @@ function BrandingScreen({ onBack }) {
           </div>
           <button className="primary" type="submit">Save</button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Job Board Postings — which boards Recruitment's Manage Posting can post to ----------
+function JobBoardsScreen({ onBack }) {
+  const [boards, setBoards] = useState([]);
+  const [error, setError] = useState('');
+  const [showAdd, setShowAdd] = useState(false);
+  const [newBoardLabel, setNewBoardLabel] = useState('');
+  const [editingKey, setEditingKey] = useState(null);
+  const [credentialInputs, setCredentialInputs] = useState({});
+
+  function load() { api.get('/integrations/job-boards').then((r) => setBoards(r.data.boards)).catch(() => setError('Could not load job boards.')); }
+  useEffect(load, []);
+
+  async function connect(board) {
+    setError('');
+    try {
+      await api.put(`/integrations/job-boards/${board.key}`, { credential: credentialInputs[board.key] || '' });
+      setEditingKey(null);
+      setCredentialInputs((c) => ({ ...c, [board.key]: '' }));
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not connect.'); }
+  }
+
+  async function disconnect(board) {
+    setError('');
+    try { await api.put(`/integrations/job-boards/${board.key}`, { credential: '' }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not disconnect.'); }
+  }
+
+  async function submitAddBoard(e) {
+    e.preventDefault(); setError('');
+    try { await api.post('/integrations/job-boards', { label: newBoardLabel }); setNewBoardLabel(''); setShowAdd(false); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not add job board.'); }
+  }
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Integrations</button>
+      <h1>Job Board Postings</h1>
+      <div className="subtitle">
+        This does not publish jobs on the board's own website — that needs a paid partner API relationship with each portal, which isn't available here.
+        Connecting just marks a board as ready to reference on approved requisitions; if you paste that board's real job-posting URL (after posting it there yourself),
+        Recruitment's "Live on" line will link straight to it, for tracking only. The Company Careers Page is always available and isn't listed here.
+      </div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="card">
+        {boards.map((b) => (
+          <div key={b.key} className="rec-row" style={{ alignItems: 'flex-start' }}>
+            <span style={{ flex: 1 }}>
+              <div style={{ marginBottom: editingKey === b.key ? 6 : 0 }}>{b.label}</div>
+              {editingKey === b.key && (
+                <input
+                  autoFocus
+                  placeholder="Job posting URL on this board (or an account ID/key for reference)"
+                  value={credentialInputs[b.key] || ''}
+                  onChange={(e) => setCredentialInputs((c) => ({ ...c, [b.key]: e.target.value }))}
+                  style={{ width: '100%' }}
+                />
+              )}
+            </span>
+            <span className="row" style={{ gap: 6, flexShrink: 0 }}>
+              <span className={'status-tag ' + (b.connected ? 'present' : 'locked')}>{b.connected ? 'Connected' : 'Not connected'}</span>
+              {editingKey === b.key ? (
+                <>
+                  <button className="primary" onClick={() => connect(b)}>Save</button>
+                  <button onClick={() => setEditingKey(null)}>Cancel</button>
+                </>
+              ) : b.connected ? (
+                <button onClick={() => disconnect(b)}>Disconnect</button>
+              ) : (
+                <button onClick={() => setEditingKey(b.key)}>Connect</button>
+              )}
+            </span>
+          </div>
+        ))}
+
+        {showAdd ? (
+          <form onSubmit={submitAddBoard} className="row" style={{ marginTop: 12 }}>
+            <input placeholder="New job board name (e.g. Monster)" value={newBoardLabel} onChange={(e) => setNewBoardLabel(e.target.value)} required style={{ flex: '1 1 200px' }} />
+            <button className="primary" type="submit">Add</button>
+            <button type="button" onClick={() => { setShowAdd(false); setNewBoardLabel(''); }}>Cancel</button>
+          </form>
+        ) : (
+          <button style={{ marginTop: 12 }} onClick={() => setShowAdd(true)}>+ Add Job Board</button>
+        )}
       </div>
     </div>
   );

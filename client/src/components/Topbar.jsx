@@ -18,7 +18,7 @@ export default function Topbar() {
     <div className="topbar">
       <div className="brand">
         {branding?.company_logo && <img src={branding.company_logo} alt="" className="brand-logo" />}
-        {branding?.company_name || 'HRMS'} <span>Employee &amp; Attendance Console</span>
+        {branding?.company_name || 'HRMS'}
       </div>
       <div className="role-switch">
         <span>{user?.name} · {ROLE_LABELS[user?.role] || user?.role}</span>

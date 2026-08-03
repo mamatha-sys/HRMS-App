@@ -3,15 +3,19 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { evaluateDecision, approvalChainLabel } from '../utils/chain.js';
 import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
 
 const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
-const withStage = (rows) => rows.map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
+// A department can be split into teams (e.g. Education's Team-A/Team-B) — surface which team
+// the requester belongs to so an STL overseeing both teams can tell them apart at a glance.
+const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
+const withStage = (rows) => rows.map((r) => ({ ...r, team_name: teamNameOf(r.team_id), current_stage_name: roleNameOf(r.current_stage_role_id) }));
 // The approvals table records the requester by name (no employee_id column), matching the
 // convention already used in attendance.routes.js's own regularization queries.
-const employeeByName = (name) => db.prepare('SELECT department, team_id FROM employees WHERE name = ?').get(name);
+const employeeByName = (name) => db.prepare('SELECT id, department, team_id FROM employees WHERE name = ?').get(name);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 router.get('/', (req, res) => {
@@ -45,6 +49,16 @@ function decide(finalStatus) {
 
     if (result.finalized) {
       db.prepare('UPDATE approvals SET status = ?, decided_by = ? WHERE id = ?').run(finalStatus, req.user.sub, approval.id);
+      // Leave/Expense already notify their requester from their own dedicated routes — this
+      // generic table's Regularization rows are the one type that never did. Scoped to just
+      // Regularization here so Leave/Expense don't end up notified twice.
+      if (approval.type === 'Regularization') {
+        const requesterEmp = employeeByName(approval.requester);
+        if (requesterEmp) {
+          notifyEmployee(requesterEmp.id, `Regularization ${finalStatus}`,
+            `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
+        }
+      }
     } else {
       db.prepare('UPDATE approvals SET current_stage_role_id = ? WHERE id = ?').run(result.stageRoleId, approval.id);
     }

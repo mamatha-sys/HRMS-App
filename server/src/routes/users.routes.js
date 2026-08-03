@@ -7,7 +7,7 @@ const router = Router();
 router.use(requireAuth, requireRole('super_admin'));
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email, role: u.role, active: !!u.active, faceEnrolled: !!u.face_descriptor };
+  return { id: u.id, name: u.name, email: u.email, role: u.role, active: !!u.active };
 }
 
 function isValidRole(role) {
@@ -88,13 +88,6 @@ router.put('/:id/scope', (req, res) => {
   replace();
 
   res.json({ departmentIds, teamIds });
-});
-
-router.put('/:id/reset-face', (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  db.prepare('UPDATE users SET face_descriptor = NULL WHERE id = ?').run(req.params.id);
-  res.json({ user: publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id)) });
 });
 
 export default router;

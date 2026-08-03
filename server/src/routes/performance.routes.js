@@ -2,12 +2,18 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
+import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '10' (Performance Management / PMS).
+// Dynamic RBAC via Manage Roles — module '10' (Performance Management / PMS). A Senior Team
+// Lead/Team Lead/Assistant Manager also passes — but ONLY for the read-only /overview and
+// /reports below, which explicitly scope every list they return; every write endpoint in this
+// file (create/edit/progress/manager-assessment/competency/plan/complete) still checks isHR
+// directly, so scoped roles stay view-only here, matching Super Admin policy.
 const isHR = (role) => canModuleAdmin(role, '10');
+const canViewPerformance = (role) => canModuleAdmin(role, '10') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
 const SCOPE_BANNER = {
@@ -38,15 +44,25 @@ function withFeedback(review) {
 }
 
 router.get('/overview', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!canViewPerformance(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const scoped = isScopedRole(req.user.role);
+  const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
 
-  const reviews = db.prepare("SELECT * FROM performance_reviews ORDER BY (status = 'Completed'), created_at DESC").all().map(withFeedback);
+  let reviews = db.prepare(`
+    SELECT pr.*, e.department AS employee_department
+    FROM performance_reviews pr LEFT JOIN employees e ON e.id = pr.employee_id
+    ORDER BY (pr.status = 'Completed'), pr.created_at DESC
+  `).all().map(withFeedback);
+  // A review not yet linked to a real employee record can't be attributed to a department —
+  // fail closed (hide it) for a scoped role rather than showing an unattributed, unscoped record.
+  if (scoped) reviews = reviews.filter((r) => r.employee_department && scopeDeptNames.has(r.employee_department));
+
   const inProgress = reviews.filter((r) => r.status === 'In Progress').length;
   const rated = reviews.filter((r) => r.rating != null);
   const avgRating = rated.length ? Math.round((rated.reduce((t, r) => t + r.rating, 0) / rated.length) * 10) / 10 : 0;
 
   res.json({
-    banner: SCOPE_BANNER[req.user.role],
+    banner: scoped ? 'Team/organization performance — view your assigned department(s)/team(s) only; no create, edit, or approval actions here.' : SCOPE_BANNER[req.user.role],
     kpis: [
       { label: 'Reviews In Progress', value: inProgress, color: 'blue' },
       { label: 'Avg Rating (Org)', value: avgRating, color: 'green' }
@@ -175,8 +191,14 @@ router.put('/reviews/:id/complete', (req, res) => {
 
 // Performance Reports & Analytics: by-team averages, status split, rating distribution.
 router.get('/reports', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const reviews = db.prepare('SELECT * FROM performance_reviews').all();
+  if (!canViewPerformance(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const scoped = isScopedRole(req.user.role);
+  const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
+  let reviews = db.prepare(`
+    SELECT pr.*, e.department AS employee_department
+    FROM performance_reviews pr LEFT JOIN employees e ON e.id = pr.employee_id
+  `).all();
+  if (scoped) reviews = reviews.filter((r) => r.employee_department && scopeDeptNames.has(r.employee_department));
 
   const byTeam = {};
   reviews.forEach((r) => {

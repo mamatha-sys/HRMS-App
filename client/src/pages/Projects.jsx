@@ -2,24 +2,35 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own project list.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own projects
+// (MyProjects) AND the company project list below it, rather than one replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const STATUS_CLASS = { Active: 'present', 'On Hold': 'pending', Completed: 'locked' };
 
 export default function Projects() {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
+  const isHR = FULL_HR_ROLES.includes(user?.role) || SELF_AND_ADMIN_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('list');
   const [selectedId, setSelectedId] = useState(null);
 
   if (screen === 'detail') return <ProjectDetail id={selectedId} isHR={isHR} onBack={() => setScreen('list')} />;
   if (screen === 'resources') return <ResourceOverview onBack={() => setScreen('list')} />;
 
-  return isHR
-    ? <ProjectList onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />
-    : <MyProjects />;
+  if (FULL_HR_ROLES.includes(user?.role)) {
+    return <ProjectList onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />;
+  }
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
+    return (<>
+      <MyProjects compact />
+      <ProjectList compact sectionLabel="Company Projects" onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />
+    </>);
+  }
+  return <MyProjects />;
 }
 
-function ProjectList({ onOpen, onResources }) {
+function ProjectList({ onOpen, onResources, compact, sectionLabel }) {
   const [projects, setProjects] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -39,8 +50,8 @@ function ProjectList({ onOpen, onResources }) {
     <div>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <div>
-          <h1>Project &amp; Resource Management</h1>
-          <div className="subtitle">Track projects and who's allocated to them.</div>
+          {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Projects'}</div> : <h1>Project &amp; Resource Management</h1>}
+          {!compact && <div className="subtitle">Track projects and who's allocated to them.</div>}
         </div>
         <button onClick={onResources}>Resource Overview</button>
       </div>
@@ -171,15 +182,15 @@ function ResourceOverview({ onBack }) {
   );
 }
 
-function MyProjects() {
+function MyProjects({ compact }) {
   const [assignments, setAssignments] = useState([]);
   const [error, setError] = useState('');
   useEffect(() => { api.get('/projects/mine/list').then((r) => setAssignments(r.data.assignments)).catch(() => setError('Could not load your projects.')); }, []);
 
   return (
     <div>
-      <h1>My Projects</h1>
-      <div className="subtitle">Projects you're assigned to.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Projects</div> : <h1>My Projects</h1>}
+      {!compact && <div className="subtitle">Projects you're assigned to.</div>}
       {error && <div className="banner error">{error}</div>}
       <div className="card">
         {assignments.length === 0 && <div className="empty">You're not assigned to any project yet.</div>}

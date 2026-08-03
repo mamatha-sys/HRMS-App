@@ -1,13 +1,40 @@
 import { useEffect, useMemo, useState } from 'react';
 import api from '../api.js';
 
-// Very small CSV parser: first row = headers, comma-separated, no quoted-comma support (fine for demo).
+// Quote-aware CSV line splitter — handles a properly-quoted field containing a comma, an
+// escaped "" inside a quoted field, and a whole line wrapped in one outer pair of quotes (a
+// common export artifact from copying a spreadsheet column whose cells already contain commas —
+// naive comma-splitting on that leaves stray quote characters stuck to the first/last header,
+// so nothing matches the expected field names and every row looks empty/invalid).
+function splitCsvLine(line) {
+  let working = line.trim();
+  if (working.length > 1 && working.startsWith('"') && working.endsWith('"')) {
+    const inner = working.slice(1, -1);
+    if (!inner.includes('"')) working = inner; // strip only the outer wrap, not a genuinely-quoted single field
+  }
+  const cells = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < working.length; i++) {
+    const ch = working[i];
+    if (inQuotes) {
+      if (ch === '"' && working[i + 1] === '"') { cur += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { cur += ch; }
+    } else if (ch === '"') { inQuotes = true; }
+    else if (ch === ',') { cells.push(cur); cur = ''; }
+    else { cur += ch; }
+  }
+  cells.push(cur);
+  return cells;
+}
+
 function parseCsv(text) {
   const lines = text.trim().split(/\r?\n/).filter((l) => l.trim());
   if (lines.length === 0) return [];
-  const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
+  const headers = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase().replace(/\s+/g, '_'));
   return lines.slice(1).map((line) => {
-    const cells = line.split(',');
+    const cells = splitCsvLine(line);
     const row = {};
     headers.forEach((h, i) => { row[h] = (cells[i] || '').trim(); });
     return row;

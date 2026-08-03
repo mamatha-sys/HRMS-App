@@ -3,16 +3,25 @@ import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own reviews.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own reviews
+// (MyPerformance) AND the performance admin view below it, rather than one replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Assistant Manager/STL/TL are limited to viewing their assigned department(s)/team(s) — per
+// Super Admin policy, no create/edit/approve/manage actions here unless explicitly granted.
+const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 
 export default function Performance() {
   const { user } = useAuth();
-  return HR_ROLES.includes(user?.role) ? <HRPerformance /> : <MyPerformance />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRPerformance />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) return (<><MyPerformance compact /><HRPerformance compact sectionLabel="Company Performance" /></>);
+  return <MyPerformance />;
 }
 
 // Self-Appraisal self-service: an employee's own reviews, with their own self-assessment
 // submit button and read/add access to the 360° feedback thread.
-function MyPerformance() {
+function MyPerformance({ compact }) {
   const [reviews, setReviews] = useState([]);
   const [error, setError] = useState('');
   const [noteFor, setNoteFor] = useState(null);
@@ -39,8 +48,8 @@ function MyPerformance() {
 
   return (
     <div>
-      <h1>Performance Management</h1>
-      <div className="subtitle">Your goals, self-appraisal and review status.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Performance</div> : <h1>Performance Management</h1>}
+      {!compact && <div className="subtitle">Your goals, self-appraisal and review status.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card">
@@ -117,8 +126,9 @@ function useReview(reviewId) {
   return { review, error, reload: load };
 }
 
-function HRPerformance() {
+function HRPerformance({ compact, sectionLabel }) {
   const { user } = useAuth();
+  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('dashboard');
   const [activeReviewId, setActiveReviewId] = useState(null);
   const [tab, setTab] = useState('dashboard'); // dashboard | reports (kept separate from `screen`)
@@ -150,7 +160,7 @@ function HRPerformance() {
     catch (err) { setError(err.response?.data?.error || 'Could not mark complete.'); }
   }
 
-  if (screen === 'goals') return <GoalsScreen employees={employees} onBack={backToDashboard} />;
+  if (screen === 'goals') return <GoalsScreen employees={employees} canManage={canManage} onBack={backToDashboard} />;
   if (screen === 'appraisal') return <AppraisalScreen reviewId={activeReviewId} onDone={backToDashboard} onBack={backToDashboard} />;
   if (screen === 'feedback') return <FeedbackScreen reviewId={activeReviewId} onBack={backToDashboard} />;
   if (screen === 'competency') return <CompetencyScreen reviewId={activeReviewId} onDone={backToDashboard} onBack={backToDashboard} />;
@@ -158,8 +168,8 @@ function HRPerformance() {
 
   return (
     <div>
-      <h1>Performance Management</h1>
-      <div className="subtitle">Signed in as: <strong>{user?.name}</strong></div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Performance'}</div> : <h1>Performance Management</h1>}
+      {!compact && <div className="subtitle">Signed in as: <strong>{user?.name}</strong></div>}
       {ov?.banner && <div className="banner info">{ov.banner}</div>}
       {error && <div className="banner error">{error}</div>}
 
@@ -215,9 +225,9 @@ function HRPerformance() {
             <div className="card" id="section-reviews">
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                 <div className="feature-name"><span className="widget-badge">1</span>Performance Reviews</div>
-                <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add Review'}</button>
+                {canManage && <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add Review'}</button>}
               </div>
-              {showForm && (
+              {canManage && showForm && (
                 <form onSubmit={submitReview} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
                   <select value={form.employee_id} onChange={(e) => {
                     const emp = employees.find((x) => String(x.id) === e.target.value);
@@ -246,7 +256,7 @@ function HRPerformance() {
                     <div className="feature-meta">{r.goal_text}{r.kpi_text ? ` · KPI: ${r.kpi_text}` : ''}</div>
                     <div className="feature-meta">Self-Assessment: {r.self_assessment_status} · Manager Assessment: {r.manager_assessment_status}{r.rating ? ` · Rating: ${r.rating}/5` : ''}</div>
 
-                    {r.status !== 'Completed' && (
+                    {canManage && r.status !== 'Completed' && (
                       <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         <button onClick={() => goToReviewScreen(r.id, 'appraisal')}>Submit Manager Assessment</button>
                         <button disabled={!bothSubmitted} onClick={() => markComplete(r.id)} title={!bothSubmitted ? 'Both self- and manager-assessment must be submitted first' : ''}>
@@ -254,13 +264,15 @@ function HRPerformance() {
                         </button>
                       </div>
                     )}
-                    <div className="feature-meta" style={{ marginTop: 6 }}>
-                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'feedback'); }}>360° Feedback</a>
-                      {' · '}
-                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'competency'); }}>Competency</a>
-                      {' · '}
-                      <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'plan'); }}>Plan</a>
-                    </div>
+                    {canManage && (
+                      <div className="feature-meta" style={{ marginTop: 6 }}>
+                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'feedback'); }}>360° Feedback</a>
+                        {' · '}
+                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'competency'); }}>Competency</a>
+                        {' · '}
+                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'plan'); }}>Plan</a>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -293,7 +305,7 @@ function HRPerformance() {
 }
 
 // --- Dedicated "Goal Assignment & Tracking" screen: Employee | Goal | Due | Progress. ---
-function GoalsScreen({ employees, onBack }) {
+function GoalsScreen({ employees, canManage, onBack }) {
   const [ov, setOv] = useState(null);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -333,14 +345,14 @@ function GoalsScreen({ employees, onBack }) {
                 <td>{r.goal_text}</td>
                 <td>{r.due_date || '—'}</td>
                 <td style={{ minWidth: 140 }}>
-                  {editingProgress === r.id ? (
+                  {canManage && editingProgress === r.id ? (
                     <span className="row" style={{ display: 'inline-flex', alignItems: 'center' }}>
                       <input type="number" min="0" max="100" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} style={{ width: 60 }} />
                       <button className="primary" onClick={() => saveProgress(r.id)}>Save</button>
                       <button onClick={() => setEditingProgress(null)}>Cancel</button>
                     </span>
                   ) : (
-                    <span onClick={() => { setEditingProgress(r.id); setProgressDraft(r.progress_pct); }} style={{ cursor: 'pointer' }} title="Click to update">
+                    <span onClick={canManage ? () => { setEditingProgress(r.id); setProgressDraft(r.progress_pct); } : undefined} style={canManage ? { cursor: 'pointer' } : undefined} title={canManage ? 'Click to update' : ''}>
                       <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
                         <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
                       </div>
@@ -354,7 +366,7 @@ function GoalsScreen({ employees, onBack }) {
         )}
       </div>
 
-      {showForm && (
+      {canManage && showForm && (
         <div className="card">
           <form onSubmit={assignGoal} className="row" style={{ flexWrap: 'wrap' }}>
             <select value={form.employee_id} onChange={(e) => {
@@ -370,7 +382,9 @@ function GoalsScreen({ employees, onBack }) {
           </form>
         </div>
       )}
-      <button style={{ background: '#1E8E5A', color: '#fff', borderColor: '#1E8E5A' }} onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Assign New Goal'}</button>
+      {canManage && (
+        <button style={{ background: '#1E8E5A', color: '#fff', borderColor: '#1E8E5A' }} onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Assign New Goal'}</button>
+      )}
     </div>
   );
 }

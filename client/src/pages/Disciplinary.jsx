@@ -2,19 +2,26 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
+// Super Admin is a pure system-administrator account — admin overview only, no own case record.
+const FULL_HR_ROLES = ['super_admin'];
+// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own case record
+// (EmployeeView) AND the company case log below it, rather than one replacing the other.
+const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const CATEGORY_CLASS = { Warning: 'pending', Suspension: 'absent', Termination: 'absent', Other: 'info' };
 
 export default function Disciplinary() {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
   const [openId, setOpenId] = useState(null);
 
   if (openId) return <CaseDetail id={openId} onBack={() => setOpenId(null)} />;
-  return isHR ? <HRView onOpen={setOpenId} /> : <EmployeeView onOpen={setOpenId} />;
+  if (FULL_HR_ROLES.includes(user?.role)) return <HRView onOpen={setOpenId} />;
+  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
+    return (<><EmployeeView compact onOpen={setOpenId} /><HRView compact sectionLabel="Company Disciplinary Cases" onOpen={setOpenId} /></>);
+  }
+  return <EmployeeView onOpen={setOpenId} />;
 }
 
-function HRView({ onOpen }) {
+function HRView({ onOpen, compact, sectionLabel }) {
   const [cases, setCases] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
@@ -36,8 +43,8 @@ function HRView({ onOpen }) {
 
   return (
     <div>
-      <h1>Disciplinary Action Tracking</h1>
-      <div className="subtitle">HR-only case log — visible to HR roles and, read-only, to the employee it concerns.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Disciplinary Cases'}</div> : <h1>Disciplinary Action Tracking</h1>}
+      {!compact && <div className="subtitle">HR-only case log — visible to HR roles and, read-only, to the employee it concerns.</div>}
       {error && <div className="banner error">{error}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -79,15 +86,15 @@ function HRView({ onOpen }) {
   );
 }
 
-function EmployeeView({ onOpen }) {
+function EmployeeView({ onOpen, compact }) {
   const [cases, setCases] = useState([]);
   const [error, setError] = useState('');
   useEffect(() => { api.get('/disciplinary/mine').then((r) => setCases(r.data.cases)).catch(() => setError('Could not load your cases.')); }, []);
 
   return (
     <div>
-      <h1>Disciplinary Cases</h1>
-      <div className="subtitle">Your own record — visible only to you and HR.</div>
+      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Disciplinary Cases</div> : <h1>Disciplinary Cases</h1>}
+      {!compact && <div className="subtitle">Your own record — visible only to you and HR.</div>}
       {error && <div className="banner error">{error}</div>}
       <div className="card">
         {cases.length === 0 && <div className="empty">No disciplinary cases on your record.</div>}
@@ -107,7 +114,7 @@ function EmployeeView({ onOpen }) {
 
 function CaseDetail({ id, onBack }) {
   const { user } = useAuth();
-  const isHR = HR_ROLES.includes(user?.role);
+  const isHR = FULL_HR_ROLES.includes(user?.role) || SELF_AND_ADMIN_ROLES.includes(user?.role);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [note, setNote] = useState('');

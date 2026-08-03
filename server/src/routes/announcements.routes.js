@@ -2,14 +2,22 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
+import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 import { notifyAll, employeesForTarget } from '../utils/notify.js';
 import { dispatchChannels, recentDeliveries } from '../utils/channels.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
 
 const router = Router();
 router.use(requireAuth);
+const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
-// Dynamic RBAC via Manage Roles — module '14' (Announcements).
+// Dynamic RBAC via Manage Roles — module '14' (Announcements). Every write endpoint below
+// (compose/pin/delete, compose-options, the delivery log) still checks isHR directly, so an
+// Assistant Manager/STL/TL stays view-only here, matching Super Admin policy — they never had
+// a separate admin view to begin with (the feed below is already the same one every employee
+// sees), so the only change scoped roles need is a wider "which department(s) am I" for the
+// self-service department filter just below, using their assigned supervisor scope rather than
+// only their own personal department.
 const isHR = (role) => canModuleAdmin(role, '14');
 
 function withRecipients(rows) {
@@ -27,23 +35,32 @@ router.get('/', (req, res) => {
     const announcements = db.prepare('SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC').all();
     return res.json({ announcements: withRecipients(announcements) });
   }
-  // Employee self-service: only company-wide posts, posts targeted at their own department, or
-  // posts naming them individually — never another employee's or another department's notice.
-  const employee = db.prepare('SELECT * FROM employees WHERE user_id = ?').get(req.user.sub);
+  // Employee self-service: only company-wide posts, posts targeted at their own department (or,
+  // for a scoped Assistant Manager/STL/TL, any department/team assigned to them in User
+  // Management), or posts naming them individually — never another employee's or another
+  // department's notice.
+  const employee = myEmployee(req.user.sub);
+  const deptNames = new Set(employee?.department ? [employee.department] : []);
+  if (isScopedRole(req.user.role)) {
+    scopeDepartmentNames(getSupervisorScope(employee?.id)).forEach((n) => deptNames.add(n));
+  }
+  const deptList = [...deptNames];
+  const deptPlaceholders = deptList.length ? deptList.map(() => '?').join(',') : 'NULL';
   const announcements = db.prepare(`
     SELECT a.* FROM announcements a
     WHERE (a.target_department IS NULL AND NOT EXISTS (SELECT 1 FROM announcement_recipients r WHERE r.announcement_id = a.id))
-       OR (a.target_department IS NOT NULL AND a.target_department = @dept)
-       OR EXISTS (SELECT 1 FROM announcement_recipients r WHERE r.announcement_id = a.id AND r.employee_id = @empId)
+       OR (a.target_department IS NOT NULL AND a.target_department IN (${deptPlaceholders}))
+       OR EXISTS (SELECT 1 FROM announcement_recipients r WHERE r.announcement_id = a.id AND r.employee_id = ?)
     ORDER BY a.pinned DESC, a.created_at DESC
-  `).all({ dept: employee?.department || null, empId: employee?.id || null });
+  `).all(...deptList, employee?.id || null);
   res.json({ announcements });
 });
 
-// Data the compose form needs: department list + employee picker (same shape as Notifications').
+// Data the compose form needs: the real Organization Structure department list + employee
+// picker (same shape as Notifications').
 router.get('/compose-options', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const departments = db.prepare("SELECT DISTINCT department FROM employees WHERE status = 'Active' ORDER BY department").all().map((d) => d.department);
+  const departments = db.prepare("SELECT name FROM departments ORDER BY name").all().map((d) => d.name);
   const employees = db.prepare("SELECT id, name, employee_code, department FROM employees WHERE status = 'Active' ORDER BY name").all();
   res.json({ departments, employees });
 });
