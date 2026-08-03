@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import authRoutes from './routes/auth.routes.js';
@@ -82,6 +84,15 @@ app.use('/api/projects', projectsRoutes);
 app.use('/api/timesheet', timesheetRoutes);
 app.use('/api/disciplinary', disciplinaryRoutes);
 app.use('/api/my-access', myAccessRoutes);
+
+// Production: this same process also serves the built React app (client/dist) — one Node
+// process per domain is what Hostinger's Node.js Selector (and most shared-hosting Node
+// setups) expects, rather than a separate static host. Dev mode still runs the two separately
+// (Vite dev server on 5173, proxying /api to this server on 4000), so this only matters when
+// client/dist actually exists (i.e. `npm run build` was run).
+const clientDist = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'client', 'dist');
+app.use(express.static(clientDist));
+app.get(/^(?!\/api).*/, (req, res) => res.sendFile(path.join(clientDist, 'index.html')));
 
 app.use((err, req, res, next) => {
   if (err?.type === 'entity.too.large') {
