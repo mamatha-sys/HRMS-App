@@ -23,7 +23,15 @@ router.get('/', (req, res) => {
   const rows = status
     ? db.prepare('SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC').all(status)
     : db.prepare("SELECT * FROM approvals ORDER BY (status = 'Pending') DESC, created_at DESC").all();
-  const enriched = rows.map((r) => ({ ...r, ...(employeeByName(r.requester) || {}) }));
+  // Only pull department/team_id from the matched employee — spreading the whole employee row
+  // clobbered the approval's own `id` with the employee's id whenever they happened to collide
+  // (both are auto-incrementing ints from 1, so this was a real, silent bug: the client would
+  // call /approvals/:id/approve|reject with the wrong id — sometimes another row entirely,
+  // sometimes a 404 "Approval not found").
+  const enriched = rows.map((r) => {
+    const emp = employeeByName(r.requester);
+    return { ...r, department: emp?.department, team_id: emp?.team_id };
+  });
   const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ approvals: withStage(scoped), chainLabel: approvalChainLabel() });
 });
@@ -57,6 +65,17 @@ function decide(finalStatus) {
         if (requesterEmp) {
           notifyEmployee(requesterEmp.id, `Regularization ${finalStatus}`,
             `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
+        }
+      }
+      // A hierarchy-approved profile edit request unlocks the employee's record back to
+      // 'assigned' (same effect the old direct HR "Approve edit" used to have) — a rejection
+      // leaves them locked, so they'd need to raise a fresh request if they still want the edit.
+      if (approval.type === 'Profile Edit') {
+        const requesterEmp = employeeByName(approval.requester);
+        if (requesterEmp) {
+          if (finalStatus === 'Approved') db.prepare("UPDATE employees SET stage = 'assigned' WHERE id = ?").run(requesterEmp.id);
+          notifyEmployee(requesterEmp.id, `Profile edit request ${finalStatus}`,
+            `Your profile edit request ("${approval.detail}") was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
         }
       }
     } else {

@@ -7,6 +7,7 @@ import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { sendSms } from '../utils/channels.js';
 import { isScopedRole, filterToScope } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
+import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -88,13 +89,32 @@ function saveCustomFieldValues(employeeId, values) {
   });
 }
 
+const roleNameOf = (id) => (id ? db.prepare('SELECT name FROM roles WHERE id = ?').get(id)?.name : null);
+// Edit requests ride the same shared "approvals" table + hierarchy chain as Leave/
+// Regularization (type: 'Profile Edit'), matched by requester name — same convention already
+// used for Regularization. Gives full history (every request is its own row, never overwritten),
+// a request count, and hierarchy-wise approval for free, instead of the old single mutable
+// edit_requested boolean that lost all trace of a request once decided.
+function editRequestsFor(employeeName) {
+  return db.prepare("SELECT * FROM approvals WHERE type = 'Profile Edit' AND requester = ? ORDER BY created_at DESC").all(employeeName)
+    .map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
+}
+
 function hydrate(emp) {
   let documents = [];
   if (emp.documents) { try { documents = JSON.parse(emp.documents); } catch { documents = []; } }
   // phone_otp_code/phone_otp_expires are a one-time secret in transit to the employee's own phone
   // via SMS — never echo them back over the API to anyone (HR included) viewing this record.
   const { phone_otp_code, phone_otp_expires, ...rest } = emp;
-  return { ...rest, documents, edit_requested: !!emp.edit_requested, phone_verified: !!emp.phone_verified, custom_fields: customFieldValuesFor(emp.id) };
+  const editRequests = editRequestsFor(emp.name);
+  return {
+    ...rest, documents, phone_verified: !!emp.phone_verified, custom_fields: customFieldValuesFor(emp.id),
+    edit_requests: editRequests,
+    edit_request_count: editRequests.length,
+    // Derived, not the raw column — a Pending row in the chain is the actual source of truth now.
+    edit_requested: editRequests.some((r) => r.status === 'Pending'),
+    edit_chain_label: approvalChainLabel()
+  };
 }
 
 function fieldAccessForRole(role) {
@@ -520,21 +540,33 @@ router.post('/:id/reject', requireHR, (req, res) => {
 });
 
 // Stage 5 — employee requests an edit on a locked profile.
+// Raises a hierarchy-approval request (same chain mechanics as Leave/Regularization) instead of
+// just flipping a boolean — requires a reason, and every request becomes its own permanent
+// history row (see editRequestsFor above), so nothing is lost once it's decided.
 router.post('/:id/request-edit', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   if (emp.user_id !== req.user.sub && !isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   if (emp.stage !== 'locked') return res.status(400).json({ error: 'Only a locked profile needs an edit request.' });
-  db.prepare('UPDATE employees SET edit_requested = 1 WHERE id = ?').run(req.params.id);
-  res.json({ employee: present(getEmp(req.params.id), req.user) });
+  const reason = req.body?.reason?.trim();
+  if (!reason) return res.status(400).json({ error: 'A reason is required to request an edit.' });
+  if (editRequestsFor(emp.name).some((r) => r.status === 'Pending')) {
+    return res.status(400).json({ error: 'You already have a pending edit request awaiting approval.' });
+  }
+  const stage = bottomRole();
+  db.prepare('INSERT INTO approvals (type, requester, detail, current_stage_role_id) VALUES (?, ?, ?, ?)')
+    .run('Profile Edit', emp.name, reason, stage ? stage.id : null);
+  res.status(201).json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
-// Stage 5 — HR approves the edit request (unlocks back to 'assigned' for re-filling).
+// HR directly unlocking a locked profile, independent of the request-edit chain above (e.g. HR
+// wants to fix something the employee never asked to change). The reasoned, hierarchy-approved
+// path is POST /approvals/:id/approve on the 'Profile Edit' row itself, not this route.
 router.post('/:id/approve-edit', requireHR, (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   if (emp.stage !== 'locked') return res.status(400).json({ error: 'Only a locked profile can be unlocked.' });
-  db.prepare("UPDATE employees SET stage = 'assigned', edit_requested = 0 WHERE id = ?").run(req.params.id);
+  db.prepare("UPDATE employees SET stage = 'assigned' WHERE id = ?").run(req.params.id);
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 

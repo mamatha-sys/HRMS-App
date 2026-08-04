@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import ChainStepper from '../components/ChainStepper.jsx';
 
 // Roles that get the full HR list view (browse employee records) vs. self-service "My Profile".
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
@@ -634,6 +635,7 @@ export default function Employees() {
                     <td>
                       <span className={'status-tag ' + STAGE_CLASS[emp.stage]}>{STAGE_LABEL[emp.stage]}</span>
                       {emp.edit_requested && <span className="status-tag pending" style={{ marginLeft: 4 }}>edit req</span>}
+                      {emp.edit_request_count > 0 && <span className="feature-meta" style={{ marginLeft: 4 }}>({emp.edit_request_count} edit req{emp.edit_request_count === 1 ? '' : 's'} total)</span>}
                     </td>
                     <td style={{ whiteSpace: 'nowrap' }}>
                       {canEditEmployee && <button onClick={() => startEdit(emp)}>Edit</button>}
@@ -922,6 +924,22 @@ function EmployeeDetail({ emp }) {
           </div>
         </>
       )}
+      {emp.edit_requests?.length > 0 && (
+        <>
+          <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>
+            Edit Request History <span className="feature-meta">({emp.edit_request_count} raised)</span>
+          </div>
+          {emp.edit_requests.map((r) => (
+            <div key={r.id} style={{ marginBottom: 8 }}>
+              <div className="rec-row">
+                <span>{r.detail}<div className="feature-meta">{r.created_at.slice(0, 10)}</div></span>
+                <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : r.status === 'Rejected' ? 'absent' : 'pending')}>{r.status}</span>
+              </div>
+              {r.status === 'Pending' && <ChainStepper chainLabel={emp.edit_chain_label} currentStageName={r.current_stage_name} status={r.status} />}
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -981,16 +999,22 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
     try { await api.post(`/employees/${emp.id}/submit`); setInfo('Submitted for HR review.'); onSaved(); }
     catch (err) { setError(err.response?.data?.error || 'Submit failed.'); }
   }
-  async function requestEdit() {
+  const [showEditRequestForm, setShowEditRequestForm] = useState(false);
+  const [editReason, setEditReason] = useState('');
+  async function requestEdit(e) {
+    e.preventDefault();
     setError(''); setInfo('');
-    try { await api.post(`/employees/${emp.id}/request-edit`); setInfo('Edit request sent to HR.'); onSaved(); }
-    catch (err) { setError(err.response?.data?.error || 'Request failed.'); }
+    try {
+      await api.post(`/employees/${emp.id}/request-edit`, { reason: editReason });
+      setInfo('Edit request sent for approval.'); setEditReason(''); setShowEditRequestForm(false); onSaved();
+    } catch (err) { setError(err.response?.data?.error || 'Request failed.'); }
   }
+  const pendingEditRequest = (emp.edit_requests || []).find((r) => r.status === 'Pending');
 
   const banner = {
     assigned: 'Your HR has assigned this profile to you — fill in your details and Submit.',
     submitted: 'Submitted — waiting for HR to review and approve. You cannot edit until it is approved or sent back.',
-    locked: emp.edit_requested ? 'Your profile is locked. Edit request sent — waiting for HR to approve.' : 'Your profile is approved and locked. Raise an edit request if you need to change something.',
+    locked: emp.edit_requested ? 'Your profile is locked. Edit request sent — waiting for approval.' : 'Your profile is approved and locked. Raise an edit request if you need to change something.',
     draft: 'Your HR is still preparing this profile.'
   }[emp.stage];
 
@@ -1105,7 +1129,38 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
       </form>
 
       {emp.stage === 'locked' && !emp.edit_requested && (
-        <button className="primary" style={{ marginTop: 12 }} onClick={requestEdit}>Request edit</button>
+        showEditRequestForm ? (
+          <form onSubmit={requestEdit} className="card" style={{ marginTop: 12, background: '#F7F8FA' }}>
+            <label className="field-label">Why do you need to edit your profile?</label>
+            <input value={editReason} onChange={(e) => setEditReason(e.target.value)} required placeholder="e.g. My phone number changed" style={{ marginBottom: 10 }} />
+            <div className="row">
+              <button className="primary" type="submit">Send Request</button>
+              <button type="button" onClick={() => { setShowEditRequestForm(false); setEditReason(''); }}>Cancel</button>
+            </div>
+          </form>
+        ) : (
+          <button className="primary" style={{ marginTop: 12 }} onClick={() => setShowEditRequestForm(true)}>Request edit</button>
+        )
+      )}
+
+      {pendingEditRequest && (
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="feature-name" style={{ marginBottom: 8 }}>Edit Request — Pending</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>{pendingEditRequest.detail}</div>
+          <ChainStepper chainLabel={emp.edit_chain_label} currentStageName={pendingEditRequest.current_stage_name} status={pendingEditRequest.status} />
+        </div>
+      )}
+
+      {emp.edit_requests?.length > 0 && (
+        <div className="card" style={{ marginTop: 12 }}>
+          <div className="feature-name" style={{ marginBottom: 8 }}>Edit Request History <span className="feature-meta">({emp.edit_request_count} raised)</span></div>
+          {emp.edit_requests.map((r) => (
+            <div key={r.id} className="rec-row">
+              <span>{r.detail}<div className="feature-meta">{r.created_at.slice(0, 10)}</div></span>
+              <span className={'status-tag ' + (r.status === 'Approved' ? 'present' : r.status === 'Rejected' ? 'absent' : 'pending')}>{r.status}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
