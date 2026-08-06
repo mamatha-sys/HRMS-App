@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -30,6 +30,80 @@ function getLocation() {
 }
 
 function mapLink(lat, lng) { return `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`; }
+
+// Same color meanings as the status-tag classes used everywhere else (present=green, absent=red,
+// info=blue for Leave, locked=gray for Not marked) — a calendar is just those same colors laid
+// out as a month grid instead of a list.
+const CALENDAR_COLORS = {
+  Present: { bg: '#E4F5EC', color: '#1E8E5A' },
+  Absent: { bg: '#FBEAE5', color: '#B3401E' },
+  Leave: { bg: '#E8EEF9', color: '#2E5CB8' },
+  'Not marked': { bg: '#EEF0F3', color: '#5A6472' }
+};
+const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Month-grid calendar, color-coded by day status, with a per-month Present/Absent/Leave/Not-
+// marked count row — used both for an employee's own view (no employeeId) and, from HR's Monthly
+// Report, for any one employee in scope (employeeId set, mirrors the CSV export's ?id= idiom).
+function AttendanceCalendar({ employeeId, employeeLabel }) {
+  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+
+  function load(m) {
+    api.get('/attendance/calendar', { params: { month: m, ...(employeeId ? { id: employeeId } : {}) } })
+      .then((r) => setData(r.data)).catch(() => setError('Could not load calendar.'));
+  }
+  useEffect(() => { load(month); }, [employeeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function changeMonth(delta) {
+    const [y, m] = month.split('-').map(Number);
+    const d = new Date(y, m - 1 + delta, 1);
+    const next = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    setMonth(next); load(next);
+  }
+
+  if (error) return <div className="banner error">{error}</div>;
+  if (!data) return <div className="empty">Loading calendar…</div>;
+
+  const firstDow = new Date(`${data.month}-01T00:00:00`).getDay();
+  const cells = [...Array(firstDow).fill(null), ...data.days];
+
+  return (
+    <div>
+      <div className="row" style={{ alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
+        <div className="feature-name">{employeeLabel || 'My'} Attendance Calendar — {data.month}</div>
+        <div style={{ flex: 1 }} />
+        <button onClick={() => changeMonth(-1)}>← Prev</button>
+        <button onClick={() => changeMonth(1)}>Next →</button>
+      </div>
+      <div className="row" style={{ gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <span className="status-tag present">Present: {data.summary.present}</span>
+        <span className="status-tag absent">Absent: {data.summary.absent}</span>
+        <span className="status-tag info">Leave: {data.summary.leave}</span>
+        <span className="status-tag locked">Not marked: {data.summary.notMarked}</span>
+        {data.summary.halfDayCut > 0 && <span className="status-tag pending">Half-day cut: {data.summary.halfDayCut}</span>}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
+        {WEEKDAY_LABELS.map((d) => <div key={d} className="feature-meta" style={{ textAlign: 'center', fontWeight: 700 }}>{d}</div>)}
+        {cells.map((c, i) => {
+          if (!c) return <div key={`blank-${i}`} />;
+          const style = c.status && CALENDAR_COLORS[c.status] ? CALENDAR_COLORS[c.status] : { bg: '#fff', color: '#B7BEC9' };
+          const title = c.status ? `${c.date} — ${c.status}${c.check_in_time ? ` · In ${c.check_in_time}` : ''}${c.check_out_time ? ` · Out ${c.check_out_time}` : ''}${c.half_day_flag ? ' · Half-day cut' : ''}` : c.date;
+          return (
+            <div key={c.date} title={title} style={{
+              background: style.bg, color: style.color, borderRadius: 6, padding: '8px 4px', textAlign: 'center',
+              fontSize: 13, fontWeight: 600, minHeight: 40,
+              border: c.half_day_flag ? '2px solid #C2540A' : c.status ? '1px solid transparent' : '1px dashed #EEF0F3'
+            }}>
+              {c.day}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 // Web Check-in and Mobile App both require a live face capture before the check-in is accepted —
 // opens the camera, waits for a face in frame, and hands the extracted descriptor back to the
@@ -122,6 +196,7 @@ function MyAttendance({ compact }) {
   const [submitting, setSubmitting] = useState(false);
   const [reg, setReg] = useState({ date: '', reason: '' });
   const [showReg, setShowReg] = useState(false);
+  const [showCalendar, setShowCalendar] = useState(false);
 
   function load() { api.get('/attendance/mine').then((r) => setData(r.data)).catch(() => setError('Could not load attendance.')); }
   useEffect(load, []);
@@ -196,6 +271,7 @@ function MyAttendance({ compact }) {
           <button className="primary" onClick={startCheckIn} disabled={!!t?.check_in_time || showFaceCapture}>Check in</button>
           <button onClick={checkOut} disabled={!t?.check_in_time || !!t?.check_out_time}>Check out</button>
           <button onClick={() => setShowReg((v) => !v)}>Regularize</button>
+          <button onClick={() => setShowCalendar((v) => !v)}>{showCalendar ? 'Hide calendar' : 'Calendar view'}</button>
         </div>
         <div className="note" style={{ marginTop: 6 }}>Check-in captures your GPS location (browser will ask permission) and requires a quick face verification.</div>
         {showFaceCapture && (
@@ -209,6 +285,12 @@ function MyAttendance({ compact }) {
           </form>
         )}
       </div>
+
+      {showCalendar && (
+        <div className="card">
+          <AttendanceCalendar />
+        </div>
+      )}
 
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>My Regularization Requests</div>
@@ -450,6 +532,7 @@ function MonthlyReports() {
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [calendarFor, setCalendarFor] = useState(null); // the employee row currently showing its calendar
 
   function load(m) { api.get('/attendance/monthly-report', { params: { month: m } }).then((r) => setData(r.data)).catch(() => setError('Could not load report.')); }
   useEffect(() => load(month), []);
@@ -458,6 +541,11 @@ function MonthlyReports() {
     const res = await api.get('/attendance/monthly-report/export', { params: { month }, responseType: 'blob' });
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a'); a.href = url; a.download = `attendance-monthly-${month}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+  async function exportOneCsv(r) {
+    const res = await api.get('/attendance/monthly-report/export', { params: { month, id: r.id }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-monthly-${month}-${r.employee_code || r.name}.csv`; a.click(); URL.revokeObjectURL(url);
   }
 
   return (
@@ -473,14 +561,25 @@ function MonthlyReports() {
         <>
           <div className="note" style={{ marginTop: 8 }}>Grace time 9:15 AM · {data.freeLateAllowance} free late arrival(s)/month, then each late day is flagged with an automatic half-day pay cut.</div>
           <table style={{ marginTop: 10 }}>
-            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th></tr></thead>
+            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th><th></th></tr></thead>
             <tbody>{data.rows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
-                <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
-                <td>{r.halfDayCut > 0 ? <span className="status-tag absent">{r.halfDayCut}</span> : 0}</td>
-                <td><strong>{r.attendancePct}%</strong></td>
-              </tr>
+              <Fragment key={r.id}>
+                <tr>
+                  <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
+                  <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
+                  <td>{r.halfDayCut > 0 ? <span className="status-tag absent">{r.halfDayCut}</span> : 0}</td>
+                  <td><strong>{r.attendancePct}%</strong></td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button onClick={() => setCalendarFor(calendarFor === r.id ? null : r.id)}>{calendarFor === r.id ? 'Hide calendar' : 'Calendar'}</button>{' '}
+                    <button onClick={() => exportOneCsv(r)}>Export</button>
+                  </td>
+                </tr>
+                {calendarFor === r.id && (
+                  <tr>
+                    <td colSpan={10}><AttendanceCalendar employeeId={r.id} employeeLabel={r.name} /></td>
+                  </tr>
+                )}
+              </Fragment>
             ))}</tbody>
           </table>
         </>

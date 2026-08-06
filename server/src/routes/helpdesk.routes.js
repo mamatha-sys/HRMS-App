@@ -115,9 +115,13 @@ router.get('/overview', (req, res) => {
   let tickets = db.prepare("SELECT * FROM tickets ORDER BY (status = 'Open') DESC, created_at DESC").all().map((t) => withDetails(t, { includeInternal: hr }));
   // Every ticket has a raiser (myEmployee() is required to create one), so unlike Assets/
   // Recruitment there's no "unattributed" case here — a scoped role sees only tickets raised
-  // by an employee within their assigned department(s)/team(s).
+  // by an employee within their assigned department(s)/team(s). Grievance tickets are the one
+  // exception: they route straight to HR/Super Admin and are hidden from every scoped supervisor
+  // (STL/TL/Assistant Manager) regardless of department, since a grievance may well be about that
+  // very supervisor — see the matching exclusion in notifications.routes.js for the ticket alert.
   if (scoped) {
     tickets = tickets.filter((t) => {
+      if (t.category === 'Grievance') return false;
       const emp = db.prepare('SELECT department FROM employees WHERE id = ?').get(t.employee_id);
       return emp?.department && scopeDeptNames.has(emp.department);
     });
@@ -160,15 +164,17 @@ router.get('/:id', (req, res) => {
 router.post('/', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { category, priority, subject, description } = req.body || {};
+  const { category, priority, subject, description, attachment_data_url, attachment_name } = req.body || {};
   if (!CATEGORIES.includes(category)) return res.status(400).json({ error: 'A valid category is required' });
   if (!subject?.trim()) return res.status(400).json({ error: 'Subject is required' });
   const prio = PRIORITIES.includes(priority) ? priority : 'Medium';
   const slaDeadline = new Date(Date.now() + SLA_HOURS[prio] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
 
   const routing = db.prepare('SELECT assigned_to_employee_id FROM ticket_routing WHERE category = ?').get(category);
-  const info = db.prepare('INSERT INTO tickets (employee_id, category, priority, subject, description, sla_deadline, assigned_to_employee_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(me.id, category, prio, subject.trim(), description || null, slaDeadline, routing?.assigned_to_employee_id || null);
+  const info = db.prepare(`
+    INSERT INTO tickets (employee_id, category, priority, subject, description, sla_deadline, assigned_to_employee_id, attachment_data_url, attachment_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(me.id, category, prio, subject.trim(), description || null, slaDeadline, routing?.assigned_to_employee_id || null, attachment_data_url || null, attachment_name || null);
 
   // A dashboard alert fires for every new ticket, not just auto-routed ones — routing just
   // changes who it says the ticket landed with. The ticket's own description rides along too,

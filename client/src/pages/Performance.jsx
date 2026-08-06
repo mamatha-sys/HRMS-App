@@ -23,11 +23,19 @@ export default function Performance() {
 // submit button and read/add access to the 360° feedback thread.
 function MyPerformance({ compact }) {
   const [reviews, setReviews] = useState([]);
+  const [attendance, setAttendance] = useState(null);
+  const [thisMonthTargets, setThisMonthTargets] = useState({ assigned: 0, completed: 0 });
   const [error, setError] = useState('');
   const [noteFor, setNoteFor] = useState(null);
   const [note, setNote] = useState('');
 
-  function load() { api.get('/performance/my-reviews').then((r) => setReviews(r.data.reviews)).catch(() => {}); }
+  function load() {
+    api.get('/performance/my-reviews').then((r) => {
+      setReviews(r.data.reviews);
+      setAttendance(r.data.attendance);
+      setThisMonthTargets(r.data.thisMonthTargets || { assigned: 0, completed: 0 });
+    }).catch(() => {});
+  }
   useEffect(load, []);
 
   async function submitSelfAssessment(id) {
@@ -52,6 +60,12 @@ function MyPerformance({ compact }) {
       {!compact && <div className="subtitle">Your goals, self-appraisal and review status.</div>}
       {error && <div className="banner error">{error}</div>}
 
+      <div className="kpi-row">
+        <div className="kpi-card blue"><div className="kpi-label">This Month's Targets</div><div className="kpi-value">{thisMonthTargets.completed}/{thisMonthTargets.target || thisMonthTargets.assigned || 4}</div></div>
+        <div className="kpi-card green"><div className="kpi-label">This Month's Attendance</div><div className="kpi-value">{attendance ? `${attendance.attendancePct}%` : '—'}</div></div>
+        {attendance && <div className="kpi-card gold"><div className="kpi-label">Late Check-ins</div><div className="kpi-value">{attendance.late}</div></div>}
+      </div>
+
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>My Goals</div>
         {reviews.length === 0 && <div className="empty">No goals assigned yet.</div>}
@@ -66,7 +80,9 @@ function MyPerformance({ compact }) {
                   <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
                     <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
                   </div>
-                  <span className="feature-meta">{r.progress_pct}%</span>
+                  <span className="feature-meta">
+                    {r.target_value != null ? `${r.achieved_value ?? 0}/${r.target_value} ${r.unit || ''} · ` : ''}{r.progress_pct}%
+                  </span>
                 </td>
               </tr>
             ))}</tbody>
@@ -137,7 +153,44 @@ function HRPerformance({ compact, sectionLabel }) {
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '' });
+  const [form, setForm] = useState({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '', month: new Date().toISOString().slice(0, 7), target_value: '', unit: '' });
+  const [expandedDetails, setExpandedDetails] = useState(null);
+
+  // A plain-text summary of one review — everything the card shows plus the write-up fields that
+  // only appear in "View Details" — downloaded client-side, same lightweight Blob-download
+  // pattern already used for Recruitment/Leave CSV exports (no server-side PDF generation).
+  function downloadReviewReport(r) {
+    const lines = [
+      'Performance Review Report',
+      '=========================',
+      `Employee: ${r.employee_name} (${r.employee_code || '—'})`,
+      `Department: ${r.employee_department || '—'}`,
+      `Designation: ${r.employee_designation || '—'}`,
+      `Review Month: ${r.month || '—'}`,
+      `Team: ${r.team || '—'}`,
+      '',
+      `Goal: ${r.goal_text}`,
+      `KPI: ${r.kpi_text || '—'}`,
+      r.target_value != null ? `Goal Progress: ${r.achieved_value ?? 0}/${r.target_value} ${r.unit || ''} (${r.progress_pct}%)` : `Goal Progress: ${r.progress_pct}%`,
+      `Overall Score: ${r.overallScore}/100`,
+      `Rating: ${r.rating != null ? `${r.rating}/5` : '—'}`,
+      '',
+      `Self-Assessment: ${r.self_assessment_status}`,
+      `Manager Assessment: ${r.manager_assessment_status}`,
+      `Review Status: ${r.status}`,
+      `Plan: ${r.plan_type}`,
+      '',
+      `Achievements: ${r.achievements_text || '—'}`,
+      `Development Areas: ${r.development_areas || '—'}`,
+      `Competency Notes: ${r.competency_notes || '—'}`,
+      r.attendance ? `\nAttendance (${r.attendance.month}): ${r.attendance.attendancePct}% · Late check-ins: ${r.attendance.late} · Missing punches: ${r.attendance.missingPunch}` : ''
+    ].filter((l) => l !== '');
+    const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `performance-review-${(r.employee_name || 'employee').replace(/\s+/g, '-')}-${r.month || r.id}.txt`; a.click();
+    URL.revokeObjectURL(url);
+  }
 
   function load() {
     api.get('/performance/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load performance overview.'));
@@ -146,13 +199,30 @@ function HRPerformance({ compact, sectionLabel }) {
   useEffect(() => { api.get('/employees').then((r) => setEmployees(r.data.employees.filter((e) => e.status === 'Active'))).catch(() => {}); }, []);
   useEffect(() => { if (tab === 'reports') api.get('/performance/reports').then((r) => setReports(r.data)).catch(() => {}); }, [tab]);
 
+  const [targetPolicy, setTargetPolicy] = useState(null);
+  const [policyDraft, setPolicyDraft] = useState({});
+  function loadTargetPolicy() { api.get('/performance/target-policy').then((r) => setTargetPolicy(r.data)).catch(() => {}); }
+  useEffect(loadTargetPolicy, []);
+  async function savePolicy(departmentId) {
+    setError('');
+    try { await api.put(`/performance/target-policy/${departmentId}`, { targets_per_month: policyDraft[departmentId] }); loadTargetPolicy(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save target policy.'); }
+  }
+  // The selected employee's department decides how many targets they're allowed this month —
+  // shown live in the Add Review form so HR knows the cap before hitting it.
+  const selectedEmpDept = employees.find((e) => String(e.id) === String(form.employee_id))?.department;
+  const capForSelected = targetPolicy?.departments.find((d) => d.department === selectedEmpDept)?.targets_per_month ?? targetPolicy?.defaultTargetsPerMonth ?? 4;
+
   function goToReviewScreen(reviewId, target) { setActiveReviewId(reviewId); setScreen(target); }
   function backToDashboard() { setScreen('dashboard'); setActiveReviewId(null); load(); }
 
   async function submitReview(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/performance/reviews', form); setForm({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not create review.'); }
+    try {
+      await api.post('/performance/reviews', form);
+      setForm({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '', month: new Date().toISOString().slice(0, 7), target_value: '', unit: '' });
+      setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not create review.'); }
   }
   async function markComplete(id) {
     setError('');
@@ -221,6 +291,62 @@ function HRPerformance({ compact, sectionLabel }) {
             </div>
           )}
 
+          {ov?.mySupervisorProgress && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="feature-name" style={{ marginBottom: 4 }}>My Standing ({ov.mySupervisorProgress.month})</div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>Blends your own target progress with your department's average — completing your team's targets improves this too.</div>
+              <div className="row" style={{ gap: 16 }}>
+                <span>Personal: <strong>{ov.mySupervisorProgress.personalAvgProgress}%</strong></span>
+                <span>Department avg: <strong>{ov.mySupervisorProgress.departmentAvgProgress}%</strong></span>
+                <span>Combined: <strong style={{ color: '#2E5CB8' }}>{ov.mySupervisorProgress.combined}%</strong></span>
+              </div>
+            </div>
+          )}
+
+          {ov?.departmentProgress?.length > 0 && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="feature-name" style={{ marginBottom: 8 }}>Department-wise Progress &amp; Top Performers ({ov.month})</div>
+              {ov.departmentProgress.map((d, i) => (
+                <div key={d.department} className="rec-row" style={{ alignItems: 'center' }}>
+                  <span>
+                    {i === 0 && <span className="status-tag present" style={{ marginRight: 6 }}>Top</span>}
+                    <strong>{d.department}</strong>
+                    <span className="feature-meta" style={{ marginLeft: 6 }}>
+                      {d.employeesWithTargets} with targets · {d.fullyCompletedCount} completed all {d.targetsPerMonth}
+                      {d.topPerformer ? ` · Top: ${d.topPerformer.name} (${d.topPerformer.targetsCompleted}/${d.topPerformer.targetsAssigned}, ${d.topPerformer.avgProgress}%)` : ''}
+                    </span>
+                  </span>
+                  <span style={{ minWidth: 140 }}>
+                    <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
+                      <div style={{ height: '100%', width: `${d.avgProgress}%`, background: '#2E5CB8' }} />
+                    </div>
+                    <span className="feature-meta">{d.avgProgress}%</span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {user?.role === 'super_admin' && targetPolicy && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="feature-name" style={{ marginBottom: 4 }}>Target Policy — Targets per Month by Department</div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>How many monthly targets each department's employees get. Default is {targetPolicy.defaultTargetsPerMonth} for any department not overridden below.</div>
+              {targetPolicy.departments.map((d) => (
+                <div key={d.department_id} className="rec-row">
+                  <span>{d.department}</span>
+                  <span className="row" style={{ gap: 6, alignItems: 'center' }}>
+                    <input
+                      type="number" min="1" style={{ width: 60 }}
+                      value={policyDraft[d.department_id] ?? d.targets_per_month}
+                      onChange={(e) => setPolicyDraft({ ...policyDraft, [d.department_id]: e.target.value })}
+                    />
+                    <button onClick={() => savePolicy(d.department_id)}>Save</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="dashboard-grid">
             <div className="card" id="section-reviews">
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
@@ -239,38 +365,99 @@ function HRPerformance({ compact, sectionLabel }) {
                   <input placeholder="Team (optional)" value={form.team} onChange={(e) => setForm({ ...form, team: e.target.value })} style={{ flex: '1 1 100px' }} />
                   <input placeholder="Goal" value={form.goal_text} onChange={(e) => setForm({ ...form, goal_text: e.target.value })} required style={{ flex: '2 1 200px' }} />
                   <input placeholder="KPI" value={form.kpi_text} onChange={(e) => setForm({ ...form, kpi_text: e.target.value })} style={{ flex: '1 1 160px' }} />
+                  <div style={{ flex: '0 1 130px' }}>
+                    <label className="field-label" style={{ fontSize: 11 }}>Target month</label>
+                    <input type="month" value={form.month} onChange={(e) => setForm({ ...form, month: e.target.value })} />
+                  </div>
+                  <input type="number" min="0" placeholder="Target value (optional)" value={form.target_value} onChange={(e) => setForm({ ...form, target_value: e.target.value })} style={{ flex: '1 1 140px' }} />
+                  <input placeholder="Unit (e.g. deals, tickets)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} style={{ flex: '1 1 140px' }} />
                   <button className="primary" type="submit">Add</button>
                 </form>
               )}
+              <div className="feature-meta" style={{ marginBottom: 8 }}>
+                {selectedEmpDept ? `Up to ${capForSelected} target(s) per month for ${selectedEmpDept}.` : 'Target count is set per department — see Target Policy below.'}
+                {' '}Leave target value blank for a qualitative goal — set it for a measurable one so progress is computed, not guessed.
+              </div>
               {ov?.reviews.length === 0 && <div className="empty">No performance reviews yet.</div>}
               {ov?.reviews.map((r) => {
                 const bothSubmitted = r.self_assessment_status === 'Submitted' && r.manager_assessment_status === 'Submitted';
+                const notStarted = r.self_assessment_status === 'Pending' && r.manager_assessment_status === 'Pending';
                 return (
                   <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
-                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
-                      <span><strong>{r.employee_name}</strong>{r.team && <span className="status-tag info" style={{ marginLeft: 6 }}>{r.team}</span>}{r.plan_type !== 'None' && <span className={'status-tag ' + (r.plan_type === 'Promotion' ? 'present' : 'absent')} style={{ marginLeft: 6 }}>{r.plan_type}</span>}</span>
-                      <span className={'status-tag ' + (r.status === 'Completed' ? 'present' : (r.manager_assessment_status === 'Pending' ? 'pending' : 'absent'))}>
-                        {r.status === 'Completed' ? 'Completed' : (r.self_assessment_status === 'Pending' ? 'Self-Assessment Pending' : 'Manager Assessment Pending')}
+                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
+                      <span>
+                        <strong>{r.employee_name}</strong> <span className="feature-meta">({r.employee_code || 'no ID on file'})</span>
+                        {r.team && <span className="status-tag info" style={{ marginLeft: 6 }}>{r.team}</span>}
+                        {r.plan_type !== 'None' && <span className={'status-tag ' + (r.plan_type === 'Promotion' ? 'present' : 'absent')} style={{ marginLeft: 6 }}>{r.plan_type}</span>}
                       </span>
+                      <span className={'status-tag ' + (r.status === 'Completed' ? 'present' : 'pending')}>{r.status}</span>
                     </div>
-                    <div className="feature-meta">{r.goal_text}{r.kpi_text ? ` · KPI: ${r.kpi_text}` : ''}</div>
-                    <div className="feature-meta">Self-Assessment: {r.self_assessment_status} · Manager Assessment: {r.manager_assessment_status}{r.rating ? ` · Rating: ${r.rating}/5` : ''}</div>
 
-                    {canManage && r.status !== 'Completed' && (
-                      <div style={{ marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                        <button onClick={() => goToReviewScreen(r.id, 'appraisal')}>Submit Manager Assessment</button>
-                        <button disabled={!bothSubmitted} onClick={() => markComplete(r.id)} title={!bothSubmitted ? 'Both self- and manager-assessment must be submitted first' : ''}>
-                          Mark Review Complete
-                        </button>
+                    <div className="grid2" style={{ marginBottom: 6 }}>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Department &amp; Designation</div>
+                        <div>{r.employee_department || '—'}{r.employee_designation ? ` · ${r.employee_designation}` : ''}</div>
+                      </div>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Review Month</div>
+                        <div>{r.month || '—'}</div>
+                      </div>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Goal Progress</div>
+                        <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginTop: 4, marginBottom: 2, maxWidth: 160 }}>
+                          <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
+                        </div>
+                        <span className="feature-meta">
+                          {r.target_value != null ? `${r.achieved_value ?? 0}/${r.target_value} ${r.unit || ''} · ` : ''}{r.progress_pct}%
+                        </span>
+                      </div>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Overall Score</div>
+                        <div style={{ fontWeight: 700 }}>{r.overallScore}/100</div>
+                      </div>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Self Assessment</div>
+                        <span className={'status-tag ' + (r.self_assessment_status === 'Submitted' ? 'present' : 'pending')}>{r.self_assessment_status}</span>
+                      </div>
+                      <div>
+                        <div className="field-label" style={{ fontSize: 11 }}>Manager Assessment</div>
+                        <span className={'status-tag ' + (r.manager_assessment_status === 'Submitted' ? 'present' : 'pending')}>{r.manager_assessment_status}</span>
+                      </div>
+                    </div>
+
+                    {canManage && (
+                      <div className="row" style={{ marginTop: 4, gap: 6, flexWrap: 'wrap' }}>
+                        {r.status !== 'Completed' && r.manager_assessment_status === 'Pending' && (
+                          <button className="primary" onClick={() => goToReviewScreen(r.id, 'appraisal')}>{notStarted ? 'Start Review' : 'Submit Assessment'}</button>
+                        )}
+                        <button onClick={() => setExpandedDetails(expandedDetails === r.id ? null : r.id)}>{expandedDetails === r.id ? 'Hide Details' : 'View Details'}</button>
+                        <button onClick={() => downloadReviewReport(r)}>Download Report</button>
+                        {r.status !== 'Completed' && (
+                          <button disabled={!bothSubmitted} onClick={() => markComplete(r.id)} title={!bothSubmitted ? 'Both self- and manager-assessment must be submitted first' : ''}>
+                            Mark Review Complete
+                          </button>
+                        )}
                       </div>
                     )}
-                    {canManage && (
-                      <div className="feature-meta" style={{ marginTop: 6 }}>
-                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'feedback'); }}>360° Feedback</a>
-                        {' · '}
-                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'competency'); }}>Competency</a>
-                        {' · '}
-                        <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'plan'); }}>Plan</a>
+
+                    {expandedDetails === r.id && (
+                      <div className="card" style={{ marginTop: 8, background: '#F7F9FC' }}>
+                        <div className="feature-meta">Goal: {r.goal_text}</div>
+                        {r.kpi_text && <div className="feature-meta">KPI: {r.kpi_text}</div>}
+                        {r.rating != null && <div className="feature-meta">Rating: {r.rating}/5</div>}
+                        {r.achievements_text && <div className="feature-meta">Achievements: {r.achievements_text}</div>}
+                        {r.development_areas && <div className="feature-meta">Development Areas: {r.development_areas}</div>}
+                        {r.competency_notes && <div className="feature-meta">Competency Notes: {r.competency_notes}</div>}
+                        {r.attendance && <div className="feature-meta">Attendance ({r.attendance.month}): {r.attendance.attendancePct}% · {r.attendance.late} late check-in(s) · {r.attendance.missingPunch} missing punch(es)</div>}
+                        {canManage && (
+                          <div className="feature-meta" style={{ marginTop: 6 }}>
+                            <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'feedback'); }}>360° Feedback</a>
+                            {' · '}
+                            <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'competency'); }}>Competency</a>
+                            {' · '}
+                            <a href="#" onClick={(e) => { e.preventDefault(); goToReviewScreen(r.id, 'plan'); }}>Plan</a>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -309,7 +496,7 @@ function GoalsScreen({ employees, canManage, onBack }) {
   const [ov, setOv] = useState(null);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ employee_id: '', employee_name: '', goal_text: '', due_date: '' });
+  const [form, setForm] = useState({ employee_id: '', employee_name: '', goal_text: '', due_date: '', target_value: '', unit: '' });
   const [editingProgress, setEditingProgress] = useState(null);
   const [progressDraft, setProgressDraft] = useState(0);
 
@@ -318,13 +505,20 @@ function GoalsScreen({ employees, canManage, onBack }) {
 
   async function assignGoal(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/performance/reviews', form); setForm({ employee_id: '', employee_name: '', goal_text: '', due_date: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not assign goal.'); }
+    try {
+      await api.post('/performance/reviews', form);
+      setForm({ employee_id: '', employee_name: '', goal_text: '', due_date: '', target_value: '', unit: '' });
+      setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not assign goal.'); }
   }
-  async function saveProgress(id) {
+  // Measurable goals (target_value set) save an achieved amount, which the server turns into
+  // progress_pct — qualitative goals still save a typed-in percentage directly.
+  async function saveProgress(r) {
     setError('');
-    try { await api.put(`/performance/reviews/${id}/progress`, { progress_pct: progressDraft }); setEditingProgress(null); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not update progress.'); }
+    try {
+      await api.put(`/performance/reviews/${r.id}/progress`, r.target_value != null ? { achieved_value: progressDraft } : { progress_pct: progressDraft });
+      setEditingProgress(null); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not update progress.'); }
   }
 
   return (
@@ -347,16 +541,25 @@ function GoalsScreen({ employees, canManage, onBack }) {
                 <td style={{ minWidth: 140 }}>
                   {canManage && editingProgress === r.id ? (
                     <span className="row" style={{ display: 'inline-flex', alignItems: 'center' }}>
-                      <input type="number" min="0" max="100" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} style={{ width: 60 }} />
-                      <button className="primary" onClick={() => saveProgress(r.id)}>Save</button>
+                      {r.target_value != null ? (
+                        <>
+                          <input type="number" min="0" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} style={{ width: 70 }} />
+                          <span className="feature-meta">/ {r.target_value} {r.unit || ''}</span>
+                        </>
+                      ) : (
+                        <input type="number" min="0" max="100" value={progressDraft} onChange={(e) => setProgressDraft(e.target.value)} style={{ width: 60 }} />
+                      )}
+                      <button className="primary" onClick={() => saveProgress(r)}>Save</button>
                       <button onClick={() => setEditingProgress(null)}>Cancel</button>
                     </span>
                   ) : (
-                    <span onClick={canManage ? () => { setEditingProgress(r.id); setProgressDraft(r.progress_pct); } : undefined} style={canManage ? { cursor: 'pointer' } : undefined} title={canManage ? 'Click to update' : ''}>
+                    <span onClick={canManage ? () => { setEditingProgress(r.id); setProgressDraft(r.target_value != null ? r.achieved_value : r.progress_pct); } : undefined} style={canManage ? { cursor: 'pointer' } : undefined} title={canManage ? 'Click to update' : ''}>
                       <div style={{ height: 8, background: '#EEF0F3', borderRadius: 4, overflow: 'hidden', marginBottom: 2 }}>
                         <div style={{ height: '100%', width: `${r.progress_pct}%`, background: '#2E5CB8' }} />
                       </div>
-                      <span className="feature-meta">{r.progress_pct}%</span>
+                      <span className="feature-meta">
+                        {r.target_value != null ? `${r.achieved_value ?? 0}/${r.target_value} ${r.unit || ''} · ` : ''}{r.progress_pct}%
+                      </span>
                     </span>
                   )}
                 </td>
@@ -378,8 +581,11 @@ function GoalsScreen({ employees, canManage, onBack }) {
             </select>
             <input placeholder="Goal" value={form.goal_text} onChange={(e) => setForm({ ...form, goal_text: e.target.value })} required style={{ flex: '2 1 200px' }} />
             <input type="date" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} style={{ flex: '1 1 140px' }} />
+            <input type="number" min="0" placeholder="Target value (optional)" value={form.target_value} onChange={(e) => setForm({ ...form, target_value: e.target.value })} style={{ flex: '1 1 140px' }} />
+            <input placeholder="Unit (e.g. deals, tickets)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} style={{ flex: '1 1 140px' }} />
             <button className="primary" type="submit">Assign</button>
           </form>
+          <div className="feature-meta" style={{ marginTop: 4 }}>Leave target value blank for a qualitative goal (progress entered manually as a %). Set it for a measurable one (e.g. "20 deals") — progress is then computed from achieved ÷ target.</div>
         </div>
       )}
       {canManage && (

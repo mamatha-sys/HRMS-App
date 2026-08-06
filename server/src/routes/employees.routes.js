@@ -8,6 +8,7 @@ import { sendSms } from '../utils/channels.js';
 import { isScopedRole, filterToScope } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
+import { CSV_FIELDS, DIRECT_COLUMN_KEYS } from '../utils/employeeCsvFields.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -100,6 +101,12 @@ function editRequestsFor(employeeName) {
     .map((r) => ({ ...r, current_stage_name: roleNameOf(r.current_stage_role_id) }));
 }
 
+// Dated department/designation/team change history — newest first, so "current" is transfers[0]
+// and the profile can show "transferred on <date>" next to the designation.
+function transfersFor(employeeId) {
+  return db.prepare('SELECT * FROM employee_transfers WHERE employee_id = ? ORDER BY transfer_date DESC, created_at DESC').all(employeeId);
+}
+
 function hydrate(emp) {
   let documents = [];
   if (emp.documents) { try { documents = JSON.parse(emp.documents); } catch { documents = []; } }
@@ -113,7 +120,8 @@ function hydrate(emp) {
     edit_request_count: editRequests.length,
     // Derived, not the raw column — a Pending row in the chain is the actual source of truth now.
     edit_requested: editRequests.some((r) => r.status === 'Pending'),
-    edit_chain_label: approvalChainLabel()
+    edit_chain_label: approvalChainLabel(),
+    transfers: transfersFor(emp.id)
   };
 }
 
@@ -287,6 +295,21 @@ router.put('/field-config/:fieldKey', (req, res) => {
   res.json({ field: { key: catalogEntry.key, label: o.label?.trim() || catalogEntry.label, defaultLabel: catalogEntry.label, section: catalogEntry.section, protected: PROTECTED_FIELD_KEYS.includes(catalogEntry.key), hidden: !!o.hidden } });
 });
 
+// Declared before '/:id' so 'import-template.csv' is never swallowed as an id — same reason
+// '/custom-fields' above it is.
+// Sample CSV covering every importable field (built-in + active custom fields) with one example
+// row, so a Super Admin/HR always knows exactly which columns bulk import actually accepts.
+router.get('/import-template.csv', requireHR, (req, res) => {
+  const customFields = activeCustomFields();
+  const headers = [...CSV_FIELDS.map((f) => f.key), ...customFields.map((f) => f.key)];
+  const sampleRow = [...CSV_FIELDS.map((f) => f.sample), ...customFields.map(() => '')];
+  const escape = (v) => (/[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v);
+  const csv = [headers.join(','), sampleRow.map(escape).join(',')].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="employee-import-template.csv"');
+  res.send(csv);
+});
+
 router.get('/:id', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
@@ -349,34 +372,75 @@ router.post('/', requireHR, (req, res) => {
   res.status(201).json({ employee: present(getEmp(info.lastInsertRowid), req.user) });
 });
 
-// Bulk import — inserts already-onboarded (locked) records.
+// Bulk import — inserts already-onboarded (locked) records. Full-field: every column CSV_FIELDS
+// knows about (see employeeCsvFields.js), not just the original
+// name/email/designation/department/branch/phone subset, plus any active
+// Super-Admin-defined custom field whose `key` appears as a CSV column. Values go through the
+// same serializeField() the single-employee edit form uses, so a CSV round-trips identically to
+// filling the form by hand (team resolved by name against the row's department, employment_type/
+// status validated against their allowed values, etc.).
 router.post('/bulk', requireHR, (req, res) => {
   const { rows, defaultDepartment, defaultBranch, defaultJoiningDate } = req.body || {};
   if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'rows must be a non-empty array' });
 
+  const customFieldByKey = {};
+  activeCustomFields().forEach((f) => { customFieldByKey[f.key] = f; });
+
+  function resolveTeamId(teamName, departmentName) {
+    if (!teamName?.trim()) return null;
+    const dept = db.prepare('SELECT id FROM departments WHERE name = ?').get(departmentName);
+    if (!dept) return null;
+    return db.prepare('SELECT id FROM teams WHERE name = ? AND department_id = ?').get(teamName.trim(), dept.id)?.id || null;
+  }
+
   const results = { inserted: 0, skipped: 0, errors: [] };
   const insertOne = db.transaction((list) => {
     list.forEach((raw, i) => {
-      const row = {
-        name: raw.name?.trim(),
-        email: raw.email?.trim(),
-        designation: raw.designation?.trim(),
-        department: (raw.department || defaultDepartment || '').trim(),
-        branch: (raw.branch || defaultBranch || '').trim() || null,
-        date_of_joining: (raw.date_of_joining || defaultJoiningDate || '').trim(),
-        phone: raw.phone?.trim() || null,
-        status: ['Active', 'On Probation', 'Exited'].includes(raw.status) ? raw.status : 'Active'
-      };
-      if (!row.name || !row.email || !row.department || !row.designation || !row.date_of_joining) {
+      const name = raw.name?.trim();
+      const email = raw.email?.trim();
+      const designation = raw.designation?.trim();
+      const department = (raw.department || defaultDepartment || '').trim();
+      const dateOfJoining = (raw.date_of_joining || defaultJoiningDate || '').trim();
+      if (!name || !email || !department || !designation || !dateOfJoining) {
         results.errors.push(`Row ${i + 1}: missing name/email/department/designation/joining date`);
         return;
       }
-      if (db.prepare('SELECT id FROM employees WHERE email = ?').get(row.email)) { results.skipped++; return; }
-      db.prepare(`
-        INSERT INTO employees (employee_code, name, email, phone, department, branch, designation, date_of_joining, status, stage)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'locked')
-      `).run(nextEmployeeCode(), row.name, row.email, row.phone, row.department, row.branch, row.designation, row.date_of_joining, row.status);
-      results.inserted++;
+      if (db.prepare('SELECT id FROM employees WHERE email = ?').get(email)) { results.skipped++; return; }
+
+      const values = { name, email, department, designation, date_of_joining: dateOfJoining };
+      DIRECT_COLUMN_KEYS.forEach((key) => {
+        if (values[key] !== undefined) return; // already set above from name/email/department/designation/date_of_joining
+        let v = raw[key];
+        if (key === 'branch' && !v) v = defaultBranch;
+        if (key === 'status' && !['Active', 'On Probation', 'Exited'].includes(v)) v = 'Active';
+        if (key === 'pay_type' && !['Package', 'Stipend'].includes(v)) v = 'Package'; // CHECK-constrained column
+        if (key === 'ctc') v = v ? Math.max(0, parseInt(v, 10) || 0) : null; // INTEGER column
+        values[key] = serializeField(key, typeof v === 'string' ? v.trim() || null : v ?? null);
+      });
+      values.team_id = resolveTeamId(raw.team, department);
+
+      // A per-row try/catch — one row hitting an unexpected constraint (or anything else) turns
+      // into an error entry for that row alone, instead of throwing inside the transaction and
+      // silently rolling back every row already inserted in this same batch.
+      try {
+        const columns = Object.keys(values);
+        const info = db.prepare(`
+          INSERT INTO employees (employee_code, stage, ${columns.join(', ')})
+          VALUES (?, 'locked', ${columns.map(() => '?').join(', ')})
+        `).run(nextEmployeeCode(), ...columns.map((c) => values[c]));
+
+        // Any CSV column matching an active custom field's key becomes that field's value —
+        // same storage saveCustomFieldValues() already uses for the form, keyed by field_id.
+        const customValues = {};
+        Object.entries(raw).forEach(([k, v]) => {
+          if (customFieldByKey[k]) customValues[customFieldByKey[k].id] = v;
+        });
+        if (Object.keys(customValues).length) saveCustomFieldValues(info.lastInsertRowid, customValues);
+
+        results.inserted++;
+      } catch (err) {
+        results.errors.push(`Row ${i + 1}: ${err.message}`);
+      }
     });
   });
   insertOne(rows);
@@ -412,6 +476,28 @@ router.put('/:id/account-status', requireHR, (req, res) => {
   db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, emp.user_id);
   db.prepare('UPDATE employees SET status = ? WHERE id = ?').run(active ? 'Active' : 'Exited', req.params.id);
   res.json({ employee: present(getEmp(req.params.id), req.user) });
+});
+
+// Transfer: department/designation/team change with an effective date, kept as its own dated
+// history (employee_transfers) instead of a plain field edit that would silently overwrite the
+// old value — so the profile can show what changed and when, not just the current designation.
+router.post('/:id/transfer', requireHR, (req, res) => {
+  const emp = getEmp(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  const { department, designation, team_id, transfer_date, reason } = req.body || {};
+  if (!transfer_date) return res.status(400).json({ error: 'transfer_date is required' });
+  const toDepartment = department?.trim() || emp.department;
+  const toDesignation = designation?.trim() || emp.designation;
+  const toTeamId = team_id !== undefined ? (team_id || null) : emp.team_id;
+  if (toDepartment === emp.department && toDesignation === emp.designation && toTeamId === emp.team_id) {
+    return res.status(400).json({ error: 'Nothing changed — pick a new department, designation, or team to transfer to.' });
+  }
+  db.prepare(`
+    INSERT INTO employee_transfers (employee_id, from_department, to_department, from_designation, to_designation, from_team_id, to_team_id, transfer_date, reason, created_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(emp.id, emp.department, toDepartment, emp.designation, toDesignation, emp.team_id, toTeamId, transfer_date, reason?.trim() || null, req.user.name || null);
+  db.prepare('UPDATE employees SET department = ?, designation = ?, team_id = ? WHERE id = ?').run(toDepartment, toDesignation, toTeamId, emp.id);
+  res.status(201).json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
 // Stage 3 (employee) / general edit. Editing someone else's record is Super Admin/HR Admin

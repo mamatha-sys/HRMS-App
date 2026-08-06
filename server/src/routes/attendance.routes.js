@@ -134,13 +134,19 @@ router.get('/monthly-report', (req, res) => {
   res.json({ month, daysInMonth, rows, freeLateAllowance: freeLateAllowance() });
 });
 
+// ?id=<employee id> narrows this to a single employee's monthly summary — same columns, one row
+// — rather than a separate endpoint, matching /reports/employees.csv's pattern. Filtered through
+// filterToScope FIRST so a scoped role can't export someone outside their department/team just by
+// passing an arbitrary id.
 router.get('/monthly-report/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
-  const employees = filterToScope(
+  const employeeId = req.query.id ? Number(req.query.id) : null;
+  let employees = filterToScope(
     db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
   );
+  if (employeeId) employees = employees.filter((e) => e.id === employeeId);
   const rows = employees.map((e) => {
     const marks = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     return {
@@ -154,7 +160,7 @@ router.get('/monthly-report/export', (req, res) => {
   });
   const csv = ['code,name,department,present,absent,leave,late,half_day_cut', ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.present},${r.absent},${r.leave},${r.late},${r.halfDayCut}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="attendance-monthly-${month}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${employeeId ? `attendance-monthly-${month}-${rows[0]?.employee_code || employeeId}` : `attendance-monthly-${month}`}.csv"`);
   res.send(csv);
 });
 
@@ -217,6 +223,52 @@ router.get('/mine', (req, res) => {
   };
 
   res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel(), summary });
+});
+
+// Calendar view — every day of one calendar month for one employee (self by default; HR/scoped
+// roles can pass ?id= for anyone in their scope, same filterToScope-then-narrow idiom as the CSV
+// exports), so the client can color a full month grid instead of just a rolling 30-day list.
+// Days with no attendance row are 'Not marked' if they're in the past, or null (not yet reached)
+// if they're still upcoming — the client tells those apart to avoid painting the future absent.
+router.get('/calendar', (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : today().slice(0, 7);
+  const employeeId = req.query.id ? Number(req.query.id) : null;
+  let employee;
+  if (employeeId) {
+    if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+    const scoped = filterToScope(
+      db.prepare('SELECT id, employee_code, name, department, team_id FROM employees WHERE id = ?').all(employeeId),
+      req.user.role, myEmployee(req.user.sub)?.id
+    );
+    employee = scoped[0];
+    if (!employee) return res.status(404).json({ error: 'Employee not found or outside your scope' });
+  } else {
+    employee = myEmployee(req.user.sub);
+    if (!employee) return res.json({ month, employee: null, days: [], summary: null });
+  }
+
+  const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(? || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
+  const marks = db.prepare('SELECT date, status, check_in_time, check_out_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(employee.id, month + '%');
+  const byDate = Object.fromEntries(marks.map((m) => [m.date, m]));
+  const todayStr = today();
+  const days = Array.from({ length: daysInMonth }, (_, i) => {
+    const date = `${month}-${String(i + 1).padStart(2, '0')}`;
+    const mark = byDate[date];
+    return {
+      date, day: i + 1,
+      status: mark?.status ?? (date <= todayStr ? 'Not marked' : null),
+      check_in_time: mark?.check_in_time || null, check_out_time: mark?.check_out_time || null,
+      half_day_flag: !!mark?.half_day_flag
+    };
+  });
+  const summary = {
+    present: days.filter((d) => d.status === 'Present').length,
+    absent: days.filter((d) => d.status === 'Absent').length,
+    leave: days.filter((d) => d.status === 'Leave').length,
+    halfDayCut: days.filter((d) => d.half_day_flag).length,
+    notMarked: days.filter((d) => d.status === 'Not marked').length
+  };
+  res.json({ month, employee: { id: employee.id, name: employee.name, employee_code: employee.employee_code }, days, summary });
 });
 
 const upsertToday = (employeeId, patch) => upsertAttendanceForDate(employeeId, today(), patch);
@@ -301,19 +353,22 @@ router.post('/mark', (req, res) => {
   res.json({ ok: true });
 });
 
-// CSV export of a date's attendance (HR).
+// CSV export of a date's attendance (HR). ?id=<employee id> narrows to a single employee's row,
+// same idiom as /monthly-report/export and /reports/employees.csv.
 router.get('/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const date = req.query.date || today();
+  const employeeId = req.query.id ? Number(req.query.id) : null;
   let rows = db.prepare(`
-    SELECT e.employee_code, e.name, e.department, e.team_id, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
+    SELECT e.id, e.employee_code, e.name, e.department, e.team_id, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
     FROM employees e LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ? ORDER BY e.id
   `).all(date);
   rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+  if (employeeId) rows = rows.filter((r) => r.id === employeeId);
   const csv = ['code,name,department,status,check_in,check_out,method,half_day_cut',
     ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.status},${r.check_in},${r.check_out},${r.method},${r.half_day_flag ? 1 : 0}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="attendance-${date}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="${employeeId ? `attendance-${date}-${rows[0]?.employee_code || employeeId}` : `attendance-${date}`}.csv"`);
   res.send(csv);
 });
 

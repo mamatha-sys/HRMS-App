@@ -14,8 +14,8 @@ const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 function splitCtcPreview(ctc, cfg) {
   const basic = Math.round(ctc * cfg['Basic % of CTC'] / 100);
   const hra = Math.round(basic * cfg['HRA % of Basic'] / 100);
-  const employeePf = Math.round(basic * cfg['Employee PF % of Basic'] / 100);
-  const employerPf = Math.round(basic * cfg['Employer PF % of Basic'] / 100);
+  const employeePf = Math.min(Math.round(basic * cfg['Employee PF % of Basic'] / 100), cfg['Employee PF Monthly Cap']);
+  const employerPf = Math.min(Math.round(basic * cfg['Employer PF % of Basic'] / 100), cfg['Employer PF Monthly Cap']);
   const gratuity = Math.round(basic * cfg['Gratuity % of Basic'] / 100);
   const pt = Math.round(cfg['Professional Tax (flat monthly)']);
   const bonus = Math.round(basic * cfg['Bonus % of Basic'] / 100);
@@ -41,10 +41,10 @@ function openPayslip(payslipId) {
 }
 
 // A printable payslip matching a standard Indian payslip layout: company header, employee/
-// statutory info grid, itemized earnings/deductions (frozen at the time payroll ran — not
-// today's live salary structure), and a Leave Details table. Opens in a new tab; "Print /
-// Save as PDF" uses the browser's own print dialog rather than a bundled PDF library.
-function payslipHtml({ payslip, employee, leaveDetails, company }) {
+// statutory info grid, and itemized earnings/deductions (frozen at the time payroll ran — not
+// today's live salary structure). Opens in a new tab; "Print / Save as PDF" uses the browser's
+// own print dialog rather than a bundled PDF library.
+function payslipHtml({ payslip, employee, company }) {
   const earnings = payslip.earnings || [];
   const deductionLines = [...(payslip.deductions || [])];
   if (payslip.late_deduction) deductionLines.push({ label: 'Late Arrival Half-day Cut', amount: payslip.late_deduction });
@@ -86,16 +86,6 @@ function payslipHtml({ payslip, employee, leaveDetails, company }) {
     </tr>`;
   }).join('');
 
-  const leaveRowsHtml = (leaveDetails || []).map((l) => `
-    <tr>
-      <td>${esc(l.leave_type)}</td>
-      <td>${l.opening_balance == null ? esc(l.entitlement) : l.opening_balance}</td>
-      <td>${l.entitlement == null ? '—' : esc(l.entitlement)}</td>
-      <td>${l.leaves_taken}</td>
-      <td>${l.current_balance == null ? '—' : l.current_balance}</td>
-    </tr>
-  `).join('');
-
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Payslip — ${esc(employee?.name)} — ${esc(payslip.period)}</title>
 <style>
@@ -132,12 +122,6 @@ function payslipHtml({ payslip, employee, leaveDetails, company }) {
     <tr class="totals"><td>GROSS SALARY</td><td>${inr2(grossSalary)}</td><td>TOTAL DEDUCTIONS</td><td>${inr2(totalDeductions)}</td></tr>
     <tr class="totals"><td colspan="2"></td><td>NET SALARY<br><span style="font-weight:400;font-size:11px;">(Bank Transfer)</span></td><td>₹ ${inr2(payslip.net)}</td></tr>
   </table>
-  ${leaveDetails && leaveDetails.length ? `
-  <table>
-    <tr><td class="section-title" colspan="5">LEAVE DETAILS</td></tr>
-    <tr><th>Leave Type</th><th>Opening Balance</th><th>Entitlement</th><th>Leaves Taken</th><th>Current Balance</th></tr>
-    ${leaveRowsHtml}
-  </table>` : ''}
   <div class="footer">This is a computer generated payslip, needs no signature</div>
 </body></html>`;
 }

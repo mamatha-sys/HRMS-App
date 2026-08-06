@@ -102,6 +102,26 @@ export function notifyAttendanceGaps(employeeId) {
   });
 }
 
+// This month's Present/Absent/Late/Half-day-cut/Missing-punch counts + attendance % for one
+// employee — same formula as attendance.routes.js's own /mine and /monthly-report (present ÷
+// days in month), pulled out here so Performance can report attendance alongside targets without
+// duplicating the SQL. `month` defaults to the current month if omitted.
+export function monthlyAttendanceSummary(employeeId, month) {
+  const m = month || today().slice(0, 7);
+  const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(? || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(m).d;
+  const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(employeeId, m + '%');
+  const present = monthRows.filter((r) => r.status === 'Present').length;
+  return {
+    month: m,
+    present,
+    absent: monthRows.filter((r) => r.status === 'Absent').length,
+    late: monthRows.filter((r) => r.check_in_time && r.check_in_time > LATE_AFTER).length,
+    halfDayCut: monthRows.filter((r) => r.half_day_flag).length,
+    missingPunch: monthRows.filter((r) => r.status === 'Present' && !r.check_in_time).length,
+    attendancePct: daysInMonth > 0 ? Math.round((present / daysInMonth) * 100) : 0
+  };
+}
+
 export function upsertAttendanceForDate(employeeId, date, patch) {
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, date);
   if (existing) {

@@ -1,7 +1,17 @@
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
+
+// Same base64-data-URL pattern already used for expense receipts / helpdesk attachments.
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 // Super Admin is a pure system-administrator account — admin overview only, no own leave balance.
 const FULL_HR_ROLES = ['super_admin'];
@@ -11,6 +21,52 @@ const SCOPED_ROLES = ['stl', 'tl'];
 // scoped to their assigned departments/teams for STL/TL), rather than one replacing the other.
 const SELF_AND_TEAM_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const tag = (s) => s === 'Approved' ? 'present' : s === 'Rejected' ? 'absent' : 'pending';
+
+// Groups one leave type's ledger entries (each already tagged with the calendar month it belongs
+// to via period_month) into a month-by-month table: what was earned, what was taken, and the
+// balance standing at the end of that month — ascending so the balance rolls forward correctly.
+function monthlyBreakdown(history, leaveTypeName) {
+  const rows = history.filter((h) => h.leave_type === leaveTypeName)
+    .slice().sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const byMonth = new Map();
+  rows.forEach((h) => {
+    const key = h.period_month || (h.created_at || '').slice(0, 7);
+    if (!byMonth.has(key)) byMonth.set(key, { month: key, earned: 0, taken: 0, balance: h.balance_after });
+    const m = byMonth.get(key);
+    if (h.change > 0) m.earned += h.change; else m.taken += -h.change;
+    m.balance = h.balance_after;
+  });
+  return Array.from(byMonth.values()).sort((a, b) => a.month.localeCompare(b.month));
+}
+function monthLabel(key) {
+  const [y, m] = (key || '').split('-');
+  const names = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  return m ? names[Number(m) - 1] : key;
+}
+// The exact "Month / Leave Earned / Leave Taken / Balance" table, shared by both the employee's
+// own view (MyLeave) and HR's per-employee "Employee View" (LeaveReports) — one leave type's
+// monthly ledger, rendered identically wherever it's shown.
+function MonthlyLedgerTable({ history, leaveTypeName }) {
+  const rows = monthlyBreakdown(history, leaveTypeName);
+  if (rows.length === 0) return <div className="empty">No accrual months recorded yet — check back after the first full month.</div>;
+  return (
+    <div className="matrix-wrap">
+      <table>
+        <thead><tr><th>Month</th><th>Leave Earned</th><th>Leave Taken</th><th>Balance</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.month}>
+              <td>{monthLabel(r.month)}</td>
+              <td style={{ color: '#1E8E5A' }}>{r.earned > 0 ? `+${r.earned}` : '—'}</td>
+              <td>{r.taken}</td>
+              <td style={{ fontWeight: 700 }}>{r.balance}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export default function Leave() {
   const { user } = useAuth();
@@ -30,6 +86,7 @@ function MyLeave({ compact }) {
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [form, setForm] = useState({ leave_type_id: '', from_date: '', to_date: '', reason: '' });
+  const [document, setDocument] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
@@ -46,8 +103,11 @@ function MyLeave({ compact }) {
 
   async function apply(e) {
     e.preventDefault(); setError(''); setInfo('');
-    try { await api.post('/leaves', form); setInfo('Leave applied.'); setForm({ ...form, from_date: '', to_date: '', reason: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not apply.'); }
+    try {
+      const document_data_url = document ? await readFileAsDataUrl(document) : undefined;
+      await api.post('/leaves', { ...form, document_data_url, document_name: document?.name });
+      setInfo('Leave applied.'); setForm({ ...form, from_date: '', to_date: '', reason: '' }); setDocument(null); setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not apply.'); }
   }
   async function requestCancel(id) {
     setError(''); setInfo('');
@@ -71,13 +131,25 @@ function MyLeave({ compact }) {
         <div className="kpi-row">
           {balances.map((b) => (
             <div key={b.leave_type_id} className="kpi-card blue">
-              <div className="kpi-label">{b.name}</div>
+              <div className="kpi-label">{b.name}{b.carry_forward && <span className="status-tag present" style={{ marginLeft: 6 }}>Carries forward</span>}</div>
               <div className={'kpi-value' + (b.unpaid ? ' text' : '')}>{b.unpaid ? 'Unlimited' : b.balance}</div>
               {b.unpaid && <div className="feature-meta">{b.days_taken_ytd || 0} day(s) taken this year</div>}
+              {b.monthly_accrual > 0 && (
+                <div className="feature-meta">
+                  Accrues {b.monthly_accrual}/month{b.carry_forward ? ', never expires' : ''} — available balance is this month's total, carried over from every unused month before it.
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
+
+      {balances.filter((b) => b.monthly_accrual > 0).map((b) => (
+        <div key={b.leave_type_id} className="card">
+          <div className="feature-name" style={{ marginBottom: 8 }}>Monthly {b.name} balance</div>
+          <MonthlyLedgerTable history={history} leaveTypeName={b.name} />
+        </div>
+      ))}
 
       <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 14 }}>
         <button onClick={() => setShowHistory((v) => !v)}>{showHistory ? 'Hide balance history' : 'Balance history'}</button>
@@ -109,6 +181,10 @@ function MyLeave({ compact }) {
               <div><label className="field-label">Reason</label><input value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} /></div>
               <div><label className="field-label">From</label><input type="date" value={form.from_date} onChange={(e) => setForm({ ...form, from_date: e.target.value })} required /></div>
               <div><label className="field-label">To</label><input type="date" value={form.to_date} onChange={(e) => setForm({ ...form, to_date: e.target.value })} required /></div>
+              <div>
+                <label className="field-label">Supporting document <span className="note">(optional — e.g. medical certificate)</span></label>
+                <input type="file" accept="image/*,application/pdf" onChange={(e) => setDocument(e.target.files?.[0] || null)} />
+              </div>
             </div>
             <div className="row" style={{ marginTop: 12 }}><button className="primary" type="submit">Submit application</button></div>
           </form>
@@ -124,6 +200,11 @@ function MyLeave({ compact }) {
               <span>{l.type} — {l.from_date} to {l.to_date} ({l.days}d){l.reason ? ` — ${l.reason}` : ''}</span>
               <span className={'status-tag ' + tag(l.status)}>{l.cancelled ? 'Cancelled' : l.status}{l.cancel_requested ? ' · cancel pending' : ''}</span>
             </div>
+            {l.document_data_url && (
+              <a className="pill" href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginBottom: 6 }}>
+                📎 {l.document_name || 'Attachment'}
+              </a>
+            )}
             {l.status === 'Pending' && chainLabel && <ChainStepper chainLabel={chainLabel} currentStageName={l.current_stage_name} status={l.status} />}
             {l.status !== 'Pending' && l.decided_by_name && (
               <div className="feature-meta" style={{ marginBottom: 6 }}>
@@ -214,7 +295,9 @@ function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
   return (
     <>
       <tr>
-        <td>{l.employee_name}</td><td>{l.team_name || '—'}</td><td>{l.type}</td><td>{l.from_date}</td><td>{l.to_date}</td><td>{l.days}</td>
+        <td>{l.employee_name}</td><td>{l.team_name || '—'}</td>
+        <td>{l.type}{l.document_data_url && <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" title={l.document_name || 'Attachment'} style={{ marginLeft: 4 }}>📎</a>}</td>
+        <td>{l.from_date}</td><td>{l.to_date}</td><td>{l.days}</td>
         <td>
           <span className={'status-tag ' + tag(l.status)}>{l.cancelled ? 'Cancelled' : l.status}</span>
           {l.status !== 'Pending' && l.decided_by_name && <div className="feature-meta">by {l.decided_by_name}</div>}
@@ -374,7 +457,14 @@ function HRLeave({ compact, sectionLabel }) {
                       onDecide={decide}
                       onError={setError}
                       onReject={() => decide(l.id, 'reject')}
-                      header={<span>{l.employee_name}{l.team_name && <span className="feature-meta"> ({l.team_name})</span>} — {l.type} ({l.days}d)</span>}
+                      header={
+                        <span>
+                          {l.employee_name}{l.team_name && <span className="feature-meta"> ({l.team_name})</span>} — {l.type} ({l.days}d)
+                          {l.document_data_url && (
+                            <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.document_name || 'Attachment'}</a>
+                          )}
+                        </span>
+                      }
                     />
                     <ChainStepper chainLabel={ov.chainLabel} currentStageName={l.current_stage_name} status={l.status} />
                   </div>
@@ -419,9 +509,14 @@ function HRLeave({ compact, sectionLabel }) {
                       </>
                     ) : (
                       <>
-                        <span>{t.name} ({t.code}) {!t.active && <span className="status-tag pending">Paused</span>}</span>
+                        <span>
+                          {t.name} ({t.code}) {!t.active && <span className="status-tag pending">Paused</span>}
+                          {!!t.carry_forward && <span className="status-tag present" style={{ marginLeft: 4 }}>Carries forward</span>}
+                        </span>
                         <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                          <span className="feature-meta">{t.unpaid ? 'Unpaid' : `${t.annual_quota}/yr`}</span>
+                          <span className="feature-meta">
+                            {t.unpaid ? 'Unpaid' : t.monthly_accrual > 0 ? `${t.monthly_accrual}/month` : `${t.annual_quota}/yr`}
+                          </span>
                           {user?.role === 'super_admin' && (
                             <>
                               <button onClick={() => startEditType(t)}>Edit</button>
@@ -515,6 +610,8 @@ function HRLeave({ compact, sectionLabel }) {
 function LeaveReports() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  const [employeeViewFor, setEmployeeViewFor] = useState(null); // employee_id currently expanded
+  const [employeeViewHistory, setEmployeeViewHistory] = useState([]);
   useEffect(() => { api.get('/leaves/reports').then((r) => setData(r.data)).catch(() => setError('Could not load reports.')); }, []);
 
   async function exportCsv() {
@@ -522,6 +619,20 @@ function LeaveReports() {
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a'); a.href = url; a.download = 'leave-balances.csv'; a.click(); URL.revokeObjectURL(url);
   }
+  async function exportOneCsv(b) {
+    const res = await api.get('/leaves/reports/export', { params: { id: b.employee_id }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `leave-balance-${b.employee_code || b.name}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+  // Same Month/Leave Earned/Leave Taken/Balance ledger the employee sees on their own Leave page —
+  // available here per-employee so HR can pull it up for anyone, not just each person for themselves.
+  async function toggleEmployeeView(b) {
+    if (employeeViewFor === b.employee_id) { setEmployeeViewFor(null); return; }
+    setEmployeeViewFor(b.employee_id);
+    try { const r = await api.get('/leaves/balance-history', { params: { employee_id: b.employee_id } }); setEmployeeViewHistory(r.data.history || []); }
+    catch { setError('Could not load this employee\'s ledger.'); }
+  }
+  const monthlyAccrualTypes = (data?.leaveTypes || []).filter((t) => t.monthly_accrual > 0);
 
   return (
     <div>
@@ -533,12 +644,33 @@ function LeaveReports() {
         {data && (
           <div className="matrix-wrap">
             <table>
-              <thead><tr><th>Code</th><th>Name</th><th>Department</th>{data.leaveTypes.map((t) => <th key={t.id}>{t.code}{t.unpaid ? ' (used)' : ''}</th>)}</tr></thead>
+              <thead><tr><th>Code</th><th>Name</th><th>Department</th>{data.leaveTypes.map((t) => <th key={t.id}>{t.code}{t.unpaid ? ' (used)' : ''}</th>)}<th></th></tr></thead>
               <tbody>{data.balances.map((b) => (
-                <tr key={b.employee_id}>
-                  <td>{b.employee_code}</td><td>{b.name}</td><td>{b.department}</td>
-                  {data.leaveTypes.map((t) => <td key={t.id}>{b.values[t.id]}</td>)}
-                </tr>
+                <Fragment key={b.employee_id}>
+                  <tr>
+                    <td>{b.employee_code}</td><td>{b.name}</td><td>{b.department}</td>
+                    {data.leaveTypes.map((t) => <td key={t.id}>{b.values[t.id]}</td>)}
+                    <td style={{ whiteSpace: 'nowrap' }}>
+                      {monthlyAccrualTypes.length > 0 && (
+                        <button onClick={() => toggleEmployeeView(b)}>{employeeViewFor === b.employee_id ? 'Hide' : 'Employee View'}</button>
+                      )}{' '}
+                      <button onClick={() => exportOneCsv(b)}>Export</button>
+                    </td>
+                  </tr>
+                  {employeeViewFor === b.employee_id && (
+                    <tr>
+                      <td colSpan={4 + data.leaveTypes.length}>
+                        <div className="feature-name" style={{ marginBottom: 8 }}>Employee View — {b.name}</div>
+                        {monthlyAccrualTypes.map((t) => (
+                          <div key={t.id} style={{ marginBottom: 10 }}>
+                            {monthlyAccrualTypes.length > 1 && <div className="feature-meta" style={{ marginBottom: 4 }}>{t.name}</div>}
+                            <MonthlyLedgerTable history={employeeViewHistory} leaveTypeName={t.name} />
+                          </div>
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}</tbody>
             </table>
           </div>

@@ -607,6 +607,14 @@ function migrate() {
   `);
   const lt = db.prepare('PRAGMA table_info(leave_types)').all().map((c) => c.name);
   if (!lt.includes('active')) db.exec('ALTER TABLE leave_types ADD COLUMN active INTEGER NOT NULL DEFAULT 1');
+  // Sick Leave: monthly accrual (1 day/month) with uncapped carry-forward, instead of the flat
+  // annual_quota granted upfront like every other type. monthly_accrual = 0/NULL means "use the
+  // existing flat annual_quota model" — only Sick Leave opts into this, per Super Admin policy;
+  // Casual Leave and everything else keep their current flat-grant, no-carry-forward behavior
+  // completely unchanged. See applyMonthlyAccrual() in leaves.routes.js for the actual crediting.
+  if (!lt.includes('carry_forward')) db.exec('ALTER TABLE leave_types ADD COLUMN carry_forward INTEGER NOT NULL DEFAULT 0');
+  if (!lt.includes('monthly_accrual')) db.exec('ALTER TABLE leave_types ADD COLUMN monthly_accrual INTEGER');
+  db.prepare("UPDATE leave_types SET carry_forward = 1, monthly_accrual = 1 WHERE code = 'SL'").run();
 
   if (db.prepare('SELECT COUNT(*) AS c FROM leave_approval_reasons').get().c === 0) {
     const insReason = db.prepare('INSERT INTO leave_approval_reasons (label, sort_order) VALUES (?, ?)');
@@ -738,7 +746,43 @@ function migrate() {
       label TEXT,
       hidden INTEGER NOT NULL DEFAULT 0
     );
+
+    -- A dated history of department/designation/team changes, separate from a plain field edit —
+    -- editing department/designation directly via PUT /employees/:id silently overwrites the old
+    -- value with no record of when or from what; a Transfer captures the before/after and the
+    -- effective date so it's visible on the employee's profile later.
+    CREATE TABLE IF NOT EXISTS employee_transfers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      from_department TEXT, to_department TEXT,
+      from_designation TEXT, to_designation TEXT,
+      from_team_id INTEGER, to_team_id INTEGER,
+      transfer_date TEXT NOT NULL,
+      reason TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+  // Tracks where each employee's monthly-accrual leave types (currently just Sick Leave) last
+  // credited up to — applyMonthlyAccrual() in leaves.routes.js reads this, credits whatever whole
+  // months have elapsed since, and advances it, so re-checking a balance never double-credits.
+  // Existing rows default to NOW at migration time — accrual starts fresh from today on top of
+  // whatever balance an employee already has, rather than retroactively recomputing years of
+  // history from their join date.
+  const elbCols = db.prepare('PRAGMA table_info(employee_leave_balances)').all().map((c) => c.name);
+  if (!elbCols.includes('last_accrued_at')) {
+    db.exec("ALTER TABLE employee_leave_balances ADD COLUMN last_accrued_at TEXT");
+    db.prepare("UPDATE employee_leave_balances SET last_accrued_at = datetime('now') WHERE last_accrued_at IS NULL").run();
+  }
+
+  // Tags each leave_balance_history row with the calendar month ('YYYY-MM') it belongs to, so the
+  // client can group the ledger into a month-by-month balance table (accrued/used/closing per
+  // month) instead of just a flat chronological log. Backfilled from created_at for existing rows.
+  const lbhCols = db.prepare('PRAGMA table_info(leave_balance_history)').all().map((c) => c.name);
+  if (!lbhCols.includes('period_month')) {
+    db.exec('ALTER TABLE leave_balance_history ADD COLUMN period_month TEXT');
+    db.prepare("UPDATE leave_balance_history SET period_month = strftime('%Y-%m', created_at) WHERE period_month IS NULL").run();
+  }
 
   // Recruitment: `positions` becomes "Job Requisitions" — every requisition now needs HR/manager
   // approval before it's live, and can be posted to job boards once approved.
@@ -865,6 +909,27 @@ function migrate() {
 
   migrateCandidatesTable();
 
+  // Candidate contact + profile fields — none of these existed before (the only prior "contact"
+  // was free-text stuffed into `panel` by the self-referral form). Needed for candidate-facing
+  // Email/WhatsApp messaging and a fuller ATS-style profile.
+  const candCols = db.prepare('PRAGMA table_info(candidates)').all().map((c) => c.name);
+  [
+    ['email', 'TEXT'], ['phone', 'TEXT'], ['experience_years', 'TEXT'],
+    ['current_ctc', 'TEXT'], ['expected_ctc', 'TEXT'], ['notice_period', 'TEXT'],
+    ['resume_data_url', 'TEXT'], ['resume_name', 'TEXT'],
+    ['linkedin_url', 'TEXT'], ['location', 'TEXT']
+  ].forEach(([col, type]) => { if (!candCols.includes(col)) db.exec(`ALTER TABLE candidates ADD COLUMN ${col} ${type}`); });
+
+  // Job requisitions: replacement-hire tracking (who's leaving, target date to backfill them)
+  // and a Job Description + the date it was finalized — none of this existed before, requisitions
+  // were just department + title + headcount.
+  const posCols2 = db.prepare('PRAGMA table_info(positions)').all().map((c) => c.name);
+  if (!posCols2.includes('is_replacement')) db.exec('ALTER TABLE positions ADD COLUMN is_replacement INTEGER NOT NULL DEFAULT 0');
+  if (!posCols2.includes('replacement_for')) db.exec('ALTER TABLE positions ADD COLUMN replacement_for TEXT');
+  if (!posCols2.includes('replacement_target_date')) db.exec('ALTER TABLE positions ADD COLUMN replacement_target_date TEXT');
+  if (!posCols2.includes('job_description')) db.exec('ALTER TABLE positions ADD COLUMN job_description TEXT');
+  if (!posCols2.includes('jd_date')) db.exec('ALTER TABLE positions ADD COLUMN jd_date TEXT');
+
   // --- Onboarding / offboarding checklists: named responsibilities per new hire / exit,
   // each independently checkable, driving the overall onboarding_pct / clearance counts.
   db.exec(`
@@ -897,6 +962,39 @@ function migrate() {
   if (!perCols.includes('progress_pct')) db.exec('ALTER TABLE performance_reviews ADD COLUMN progress_pct INTEGER NOT NULL DEFAULT 0');
   if (!perCols.includes('achievements_text')) db.exec('ALTER TABLE performance_reviews ADD COLUMN achievements_text TEXT');
   if (!perCols.includes('development_areas')) db.exec('ALTER TABLE performance_reviews ADD COLUMN development_areas TEXT');
+  // Buckets each goal/target into the calendar month it belongs to ('YYYY-MM') — company policy
+  // is N targets per employee per month, N configurable per department (see
+  // department_target_policies below; enforced in performance.routes.js at creation time) — this
+  // is what makes "this month's targets" a queryable group instead of an undifferentiated pile of
+  // goals. Backfilled from created_at for existing rows.
+  if (!perCols.includes('month')) {
+    db.exec('ALTER TABLE performance_reviews ADD COLUMN month TEXT');
+    db.prepare("UPDATE performance_reviews SET month = strftime('%Y-%m', created_at) WHERE month IS NULL").run();
+  }
+  // Measurable targets: a target_value/achieved_value/unit triple (e.g. "20 deals", achieved 15)
+  // lets progress_pct be computed from real numbers instead of HR eyeballing a percentage.
+  // Nullable — a qualitative goal ("Improve code quality") just leaves these unset and keeps the
+  // old manual progress_pct entry.
+  if (!perCols.includes('target_value')) db.exec('ALTER TABLE performance_reviews ADD COLUMN target_value REAL');
+  if (!perCols.includes('achieved_value')) db.exec('ALTER TABLE performance_reviews ADD COLUMN achieved_value REAL');
+  if (!perCols.includes('unit')) db.exec('ALTER TABLE performance_reviews ADD COLUMN unit TEXT');
+  // Last time a "your self-assessment/manager-assessment is still pending" reminder went out for
+  // this review — throttles the lazy reminder sweep (see sendPendingAssessmentReminders() in
+  // performance.routes.js) to at most once every few days per review, same "no scheduler, check
+  // lazily on read" idiom as Helpdesk's 24h auto-escalation.
+  if (!perCols.includes('last_reminded_at')) db.exec('ALTER TABLE performance_reviews ADD COLUMN last_reminded_at TEXT');
+
+  // How many monthly targets a department's employees get — Super Admin can set this per
+  // department (Sales might run 6 monthly targets, a back-office team might run 2); a department
+  // with no row here just uses the default. Missing row = default, same "no row = default" idiom
+  // as freeLateAllowance()/notice period elsewhere.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS department_target_policies (
+      department_id INTEGER PRIMARY KEY REFERENCES departments(id) ON DELETE CASCADE,
+      targets_per_month INTEGER NOT NULL DEFAULT 4,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS performance_feedback (
@@ -1090,6 +1188,10 @@ function migrate() {
   // from created_at (which stays fixed) and from manual escalation (which doesn't touch this).
   const ticketCols = db.prepare('PRAGMA table_info(tickets)').all().map((c) => c.name);
   if (!ticketCols.includes('last_escalated_at')) db.exec('ALTER TABLE tickets ADD COLUMN last_escalated_at TEXT');
+  // Proof/document attached at raise time (e.g. a screenshot or receipt) — distinct from
+  // ticket_comments' own attachment columns, which are for files added later in the thread.
+  if (!ticketCols.includes('attachment_data_url')) db.exec('ALTER TABLE tickets ADD COLUMN attachment_data_url TEXT');
+  if (!ticketCols.includes('attachment_name')) db.exec('ALTER TABLE tickets ADD COLUMN attachment_name TEXT');
   const ticketCommentCols = db.prepare('PRAGMA table_info(ticket_comments)').all().map((c) => c.name);
   if (!ticketCommentCols.includes('internal')) db.exec('ALTER TABLE ticket_comments ADD COLUMN internal INTEGER NOT NULL DEFAULT 0');
   if (!ticketCommentCols.includes('attachment_data_url')) db.exec('ALTER TABLE ticket_comments ADD COLUMN attachment_data_url TEXT');
@@ -1201,6 +1303,11 @@ function migrate() {
   `);
 
   migrateLeavesTable();
+  // Optional attachment (e.g. a medical certificate for Sick Leave) — same base64-data-URL-as-
+  // TEXT-column pattern already used for expense_claims.receipt_data_url.
+  const leaveCols = db.prepare('PRAGMA table_info(leaves)').all().map((c) => c.name);
+  if (!leaveCols.includes('document_data_url')) db.exec('ALTER TABLE leaves ADD COLUMN document_data_url TEXT');
+  if (!leaveCols.includes('document_name')) db.exec('ALTER TABLE leaves ADD COLUMN document_name TEXT');
 
   // --- Integrations: generic key/value config store (Slack/Teams webhook URLs, Google
   // Calendar OAuth client id/secret + refresh token) so Super Admin can manage credentials
@@ -2054,11 +2161,16 @@ function seedModuleData() {
   const deptId = (name) => db.prepare('SELECT id FROM departments WHERE name = ?').get(name)?.id;
   if (db.prepare('SELECT COUNT(*) AS c FROM candidates').get().c === 0) {
     const posByTitle = (title) => db.prepare('SELECT id FROM positions WHERE title = ?').get(title)?.id;
-    const insCand = db.prepare('INSERT INTO candidates (name, position_id, panel, feedback_status, stage) VALUES (?, ?, ?, ?, ?)');
-    insCand.run('A. Verma', posByTitle('Senior Backend Engineer'), 'Usha, Vasavi', 'No feedback yet', 'Technical Interview');
-    insCand.run('J. Thomas', posByTitle('Senior Backend Engineer'), null, 'No feedback yet', 'Resume Screening');
-    insCand.run('M. Khan', posByTitle('Automation QA Engineer'), 'Ragini', 'Feedback submitted', 'Offer');
-    insCand.run('S. Rao', posByTitle('Sales Executive'), 'Bhavana', 'Feedback submitted', 'HR Interview');
+    // `stage` was replaced by `round_id` (FK into interview_rounds) when the pipeline became
+    // dynamic/HR-configurable — this seed still wrote the old column name and would crash on any
+    // fresh DB (or one where candidates had all been cleared) until interview_rounds is resolved
+    // by name instead.
+    const roundByName = (name) => db.prepare('SELECT id FROM interview_rounds WHERE name = ?').get(name)?.id;
+    const insCand = db.prepare('INSERT INTO candidates (name, position_id, panel, feedback_status, round_id) VALUES (?, ?, ?, ?, ?)');
+    insCand.run('A. Verma', posByTitle('Senior Backend Engineer'), 'Usha, Vasavi', 'No feedback yet', roundByName('Technical Interview'));
+    insCand.run('J. Thomas', posByTitle('Senior Backend Engineer'), null, 'No feedback yet', roundByName('Resume Screening'));
+    insCand.run('M. Khan', posByTitle('Automation QA Engineer'), 'Ragini', 'Feedback submitted', roundByName('Offer'));
+    insCand.run('S. Rao', posByTitle('Sales Executive'), 'Bhavana', 'Feedback submitted', roundByName('HR Interview'));
   }
 
   if (db.prepare('SELECT COUNT(*) AS c FROM new_hires').get().c === 0) {

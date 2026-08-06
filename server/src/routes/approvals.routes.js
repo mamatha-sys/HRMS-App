@@ -28,9 +28,16 @@ router.get('/', (req, res) => {
   // (both are auto-incrementing ints from 1, so this was a real, silent bug: the client would
   // call /approvals/:id/approve|reject with the wrong id — sometimes another row entirely,
   // sometimes a 404 "Approval not found").
+  // For a Profile Edit request specifically, the approver deciding it also sees how many edit
+  // requests this employee has raised in total (this one included) — useful context (e.g. a
+  // pattern of repeated requests) that isn't visible from the reason/chain alone.
+  const editRequestCountFor = (name) => db.prepare("SELECT COUNT(*) AS c FROM approvals WHERE type = 'Profile Edit' AND requester = ?").get(name).c;
   const enriched = rows.map((r) => {
     const emp = employeeByName(r.requester);
-    return { ...r, department: emp?.department, team_id: emp?.team_id };
+    return {
+      ...r, department: emp?.department, team_id: emp?.team_id,
+      edit_request_count: r.type === 'Profile Edit' ? editRequestCountFor(r.requester) : undefined
+    };
   });
   const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ approvals: withStage(scoped), chainLabel: approvalChainLabel() });

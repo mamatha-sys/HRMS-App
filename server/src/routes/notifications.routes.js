@@ -29,7 +29,10 @@ router.get('/', (req, res) => {
     // STL/TL if the raising employee's department falls within their assigned scope — the same
     // department-scoping the Vacancies widget already applies for this role, rather than every
     // 'staff' alert company-wide. A 'staff' broadcast with no ticket_id (nothing to attribute to
-    // a department) still reaches them, same as before.
+    // a department) still reaches them, same as before. Grievance tickets are excluded outright
+    // (t.category != 'Grievance') — they route straight to HR/Super Admin, since a grievance may
+    // well be about the very supervisor this alert would otherwise reach; matches the same
+    // exclusion in helpdesk.routes.js's /overview ticket list.
     const rows = db.prepare(`
       SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.user_id = ?) AS is_read
       FROM notifications n
@@ -38,7 +41,7 @@ router.get('/', (req, res) => {
          OR (n.employee_id IS NULL AND n.target_department IS NULL AND n.target_role = 'all')
          OR (n.employee_id IS NULL AND n.target_department IS NULL AND n.target_role = 'staff' AND (
               n.ticket_id IS NULL
-              OR EXISTS (SELECT 1 FROM tickets t JOIN employees e ON e.id = t.employee_id WHERE t.id = n.ticket_id AND e.department IN (${placeholders}))
+              OR EXISTS (SELECT 1 FROM tickets t JOIN employees e ON e.id = t.employee_id WHERE t.id = n.ticket_id AND e.department IN (${placeholders}) AND t.category != 'Grievance')
             ))
          OR (n.employee_id IS NULL AND n.target_department IS NULL AND n.target_role = ?))
         AND (n.ticket_id IS NULL OR NOT EXISTS (SELECT 1 FROM tickets t WHERE t.id = n.ticket_id AND t.status IN ('Resolved','Closed')))

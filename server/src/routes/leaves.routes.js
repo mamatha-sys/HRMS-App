@@ -17,6 +17,8 @@ router.use(requireAuth);
 const isHR = (role) => canModuleAdmin(role, '08') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
 function activeTypes() { return db.prepare('SELECT * FROM leave_types WHERE active = 1 ORDER BY id').all(); }
 function allTypes() { return db.prepare('SELECT * FROM leave_types ORDER BY id').all(); }
 function typeById(id) { return db.prepare('SELECT * FROM leave_types WHERE id = ?').get(id); }
@@ -37,20 +39,57 @@ function reasonLabelsOf(approvalReasonIds) {
 function ensureBalances(employeeId) {
   const types = allTypes();
   const have = new Set(db.prepare('SELECT leave_type_id FROM employee_leave_balances WHERE employee_id = ?').all(employeeId).map((r) => r.leave_type_id));
-  const ins = db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?)');
+  const ins = db.prepare("INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance, last_accrued_at) VALUES (?, ?, ?, datetime('now'))");
   types.forEach((t) => { if (!have.has(t.id)) ins.run(employeeId, t.id, t.annual_quota); });
 }
-function balanceOf(employeeId, leaveTypeId) {
+
+// Sick Leave (currently the only monthly_accrual type) doesn't get its annual_quota granted
+// upfront — it credits 1 day for every whole month elapsed since last_accrued_at, carrying
+// forward with no cap (per Super Admin policy). Lazy, same reasoning as Helpdesk's 24h
+// auto-escalation: no background scheduler in this app, so this runs whenever a balance is read,
+// crediting however many months have piled up since the last check rather than missing them.
+function applyMonthlyAccrual(employeeId) {
   ensureBalances(employeeId);
+  const accrualTypes = db.prepare('SELECT * FROM leave_types WHERE monthly_accrual > 0 AND active = 1').all();
+  accrualTypes.forEach((t) => {
+    const row = db.prepare('SELECT * FROM employee_leave_balances WHERE employee_id = ? AND leave_type_id = ?').get(employeeId, t.id);
+    if (!row?.last_accrued_at) return;
+    const elapsed = db.prepare(`
+      SELECT (CAST(strftime('%Y','now') AS INTEGER) - CAST(strftime('%Y', ?) AS INTEGER)) * 12
+           + (CAST(strftime('%m','now') AS INTEGER) - CAST(strftime('%m', ?) AS INTEGER))
+           - (CASE WHEN strftime('%d','now') < strftime('%d', ?) THEN 1 ELSE 0 END) AS months
+    `).get(row.last_accrued_at, row.last_accrued_at, row.last_accrued_at).months;
+    if (elapsed >= 1) {
+      // One history row per elapsed month (not a single batched row) so the ledger stays truly
+      // month-wise even when several months piled up before the balance was next read — each row
+      // is tagged with the specific month it accrued for, letting the client build an accurate
+      // month-by-month balance table straight from history instead of parsing free-text reasons.
+      let bal = row.balance;
+      let cursor = row.last_accrued_at;
+      for (let i = 0; i < elapsed; i += 1) {
+        cursor = db.prepare("SELECT datetime(?, '+1 month') AS d").get(cursor).d;
+        bal += t.monthly_accrual;
+        const parts = db.prepare("SELECT strftime('%Y-%m', ?) AS m, CAST(strftime('%m', ?) AS INTEGER) AS mnum, strftime('%Y', ?) AS y").get(cursor, cursor, cursor);
+        const pretty = `${MONTH_NAMES[parts.mnum - 1]} ${parts.y}`;
+        logBalanceHistory(employeeId, t.name, t.monthly_accrual, bal, `Monthly accrual — ${pretty}`, null, parts.m);
+      }
+      db.prepare('UPDATE employee_leave_balances SET balance = ?, last_accrued_at = ? WHERE employee_id = ? AND leave_type_id = ?')
+        .run(bal, cursor, employeeId, t.id);
+    }
+  });
+}
+
+function balanceOf(employeeId, leaveTypeId) {
+  applyMonthlyAccrual(employeeId);
   return db.prepare('SELECT balance FROM employee_leave_balances WHERE employee_id = ? AND leave_type_id = ?').get(employeeId, leaveTypeId)?.balance ?? 0;
 }
 function setBalance(employeeId, leaveTypeId, balance) {
   db.prepare('INSERT INTO employee_leave_balances (employee_id, leave_type_id, balance) VALUES (?, ?, ?) ON CONFLICT(employee_id, leave_type_id) DO UPDATE SET balance = excluded.balance')
     .run(employeeId, leaveTypeId, balance);
 }
-function logBalanceHistory(employeeId, leaveTypeName, change, balanceAfter, reason, actorId) {
-  db.prepare('INSERT INTO leave_balance_history (employee_id, leave_type, change, balance_after, reason, created_by) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(employeeId, leaveTypeName, change, balanceAfter, reason, actorId || null);
+function logBalanceHistory(employeeId, leaveTypeName, change, balanceAfter, reason, actorId, periodMonth) {
+  db.prepare('INSERT INTO leave_balance_history (employee_id, leave_type, change, balance_after, reason, created_by, period_month) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(employeeId, leaveTypeName, change, balanceAfter, reason, actorId || null, periodMonth || db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m);
 }
 
 // Days already taken this calendar year for one employee + leave type (Approved, not cancelled).
@@ -65,12 +104,12 @@ function daysTakenThisYear(employeeId, leaveTypeId) {
 
 // All balances for an employee, active types only (paused types are hidden everywhere).
 function balancesFor(employeeId) {
-  ensureBalances(employeeId);
+  applyMonthlyAccrual(employeeId);
   return db.prepare(`
-    SELECT lt.id AS leave_type_id, lt.name, lt.code, lt.unpaid, elb.balance
+    SELECT lt.id AS leave_type_id, lt.name, lt.code, lt.unpaid, lt.carry_forward, lt.monthly_accrual, elb.balance
     FROM leave_types lt LEFT JOIN employee_leave_balances elb ON elb.leave_type_id = lt.id AND elb.employee_id = ?
     WHERE lt.active = 1 ORDER BY lt.id
-  `).all(employeeId).map((b) => ({ ...b, days_taken_ytd: b.unpaid ? daysTakenThisYear(employeeId, b.leave_type_id) : null }));
+  `).all(employeeId).map((b) => ({ ...b, carry_forward: !!b.carry_forward, days_taken_ytd: b.unpaid ? daysTakenThisYear(employeeId, b.leave_type_id) : null }));
 }
 
 function daysBetween(from, to) {
@@ -242,24 +281,31 @@ router.get('/reports', (req, res) => {
   res.json({ leaveTypes: types, balances, history });
 });
 
+// ?id=<employee id> narrows this to a single employee's leave balances — same columns, one row —
+// rather than a separate endpoint, matching /reports/employees.csv's pattern. Filtered through
+// filterToScope FIRST so a scoped role can't export someone outside their department/team just by
+// passing an arbitrary id.
 router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
-  const employees = filterToScope(
+  const employeeId = req.query.id ? Number(req.query.id) : null;
+  let employees = filterToScope(
     db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
   );
+  if (employeeId) employees = employees.filter((e) => e.id === employeeId);
   const header = ['code', 'name', 'department', ...types.map((t) => t.unpaid ? `${t.code} (days used)` : t.code)];
   const rows = employees.map((e) => [e.employee_code, e.name, e.department, ...types.map((t) => t.unpaid ? daysTakenThisYear(e.id, t.id) : balanceOf(e.id, t.id))].join(','));
   const csv = [header.join(','), ...rows].join('\n');
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', 'attachment; filename="leave-balances.csv"');
+  res.setHeader('Content-Disposition', `attachment; filename="${employeeId ? `leave-balance-${employees[0]?.employee_code || employeeId}` : 'leave-balances'}.csv"`);
   res.send(csv);
 });
 
 router.get('/balance-history', (req, res) => {
   if (isHR(req.user.role)) {
     const employeeId = req.query.employee_id;
+    if (employeeId) applyMonthlyAccrual(employeeId); // trigger any pending accrual before reading, else recent months are missing
     const rows = employeeId
       ? db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(employeeId)
       : db.prepare('SELECT * FROM leave_balance_history ORDER BY created_at DESC LIMIT 100').all();
@@ -269,6 +315,7 @@ router.get('/balance-history', (req, res) => {
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ history: [] });
+  applyMonthlyAccrual(me.id);
   res.json({ history: db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(me.id) });
 });
 
@@ -352,14 +399,15 @@ router.get('/mine', (req, res) => {
   // instead of silently failing to load it.
   if (!me) return res.json({ leaves: [], balances: [], history: [], chainLabel: approvalChainLabel() });
   const rows = db.prepare('SELECT * FROM leaves WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
+  const balances = balancesFor(me.id); // must run first — this is what triggers/logs the lazy accrual the history query below reads
   const history = db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
-  res.json({ leaves: withName(rows), balances: balancesFor(me.id), history, chainLabel: approvalChainLabel() });
+  res.json({ leaves: withName(rows), balances, history, chainLabel: approvalChainLabel() });
 });
 
 router.post('/', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { leave_type_id, from_date, to_date, reason } = req.body || {};
+  const { leave_type_id, from_date, to_date, reason, document_data_url, document_name } = req.body || {};
   const lt = leave_type_id ? typeById(leave_type_id) : null;
   if (!lt || !from_date || !to_date) return res.status(400).json({ error: 'leave_type_id, from_date and to_date are required' });
   if (!lt.active) return res.status(400).json({ error: `${lt.name} is currently paused and cannot be applied for.` });
@@ -372,8 +420,10 @@ router.post('/', (req, res) => {
   }
 
   const stage = bottomRole();
-  const info = db.prepare('INSERT INTO leaves (employee_id, leave_type_id, type, from_date, to_date, days, reason, current_stage_role_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(me.id, lt.id, lt.name, from_date, to_date, days, reason || null, stage ? stage.id : null);
+  const info = db.prepare(`
+    INSERT INTO leaves (employee_id, leave_type_id, type, from_date, to_date, days, reason, current_stage_role_id, document_data_url, document_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(me.id, lt.id, lt.name, from_date, to_date, days, reason || null, stage ? stage.id : null, document_data_url || null, document_name || null);
   res.status(201).json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(info.lastInsertRowid)])[0] });
 });
 

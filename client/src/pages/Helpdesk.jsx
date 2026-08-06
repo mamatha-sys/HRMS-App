@@ -21,6 +21,13 @@ const PRIORITY_CLASS = { Low: 'priority-low', Medium: 'priority-medium', High: '
 function PriorityBadge({ priority }) {
   return <span className={'priority-badge ' + (PRIORITY_CLASS[priority] || 'priority-medium')}>{priority}</span>;
 }
+// Category badge, reusing the existing status-tag color set rather than adding new CSS —
+// Grievance gets the "absent" (red) look since it's the sensitive one that skips the requester's
+// own supervisor and routes straight to HR/Super Admin (see the raise-ticket form's note below).
+const CATEGORY_CLASS = { IT: 'info', HR: 'present', Admin: 'locked', Grievance: 'absent', Facilities: 'pending', Payroll: 'info', Other: 'locked' };
+function CategoryBadge({ category }) {
+  return <span className={'status-tag ' + (CATEGORY_CLASS[category] || 'info')}>{category}</span>;
+}
 
 const KEY_FEATURES = [
   { key: 'creation', label: 'Ticket Creation, Assignment & Categorization' },
@@ -105,6 +112,7 @@ function MyHelpdesk({ compact }) {
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ category: 'IT', priority: 'Medium', subject: '', description: '' });
+  const [file, setFile] = useState(null);
   const [expanded, setExpanded] = useState(null);
 
   function load() { api.get('/helpdesk/my').then((r) => setTickets(r.data.tickets)).catch(() => {}); }
@@ -113,8 +121,11 @@ function MyHelpdesk({ compact }) {
   async function submit(e) {
     e.preventDefault(); setError('');
     if (!form.subject.trim()) { setError('Subject is required.'); return; }
-    try { await api.post('/helpdesk', form); setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not raise ticket.'); }
+    try {
+      const attachment_data_url = file ? await readFileAsDataUrl(file) : undefined;
+      await api.post('/helpdesk', { ...form, attachment_data_url, attachment_name: file?.name });
+      setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setFile(null); setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not raise ticket.'); }
   }
   async function confirm(id) {
     setError('');
@@ -144,6 +155,9 @@ function MyHelpdesk({ compact }) {
             <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={{ marginBottom: 10 }}>
               {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
+            {form.category === 'Grievance' && (
+              <div className="banner info" style={{ marginBottom: 10 }}>Grievance tickets go directly to HR/Super Admin — your Team Lead/supervisor never sees these.</div>
+            )}
             <label className="field-label">Priority</label>
             <select value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} style={{ marginBottom: 10 }}>
               {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
@@ -152,6 +166,8 @@ function MyHelpdesk({ compact }) {
             <input value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} required style={{ marginBottom: 10 }} />
             <label className="field-label">Description</label>
             <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ marginBottom: 10 }} />
+            <label className="field-label">Attach proof / document <span className="note">(optional)</span></label>
+            <input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} style={{ marginBottom: 10, display: 'block' }} />
             <div className="row">
               <button className="primary" type="submit">Submit Ticket</button>
               <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
@@ -168,13 +184,15 @@ function MyHelpdesk({ compact }) {
         {tickets.map((t) => (
           <div key={t.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span><strong>{t.subject}</strong> <span className="feature-meta">· {t.category}</span></span>
+              <span><strong>{t.subject}</strong></span>
               <span className="row" style={{ gap: 6 }}>
+                <CategoryBadge category={t.category} />
                 <PriorityBadge priority={t.priority} />
                 <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
               </span>
             </div>
             {t.description && <div className="feature-meta">{t.description}</div>}
+            {t.attachment_data_url && <a className="pill" href={t.attachment_data_url} download={t.attachment_name || 'attachment'} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 4 }}>📎 {t.attachment_name || 'Attachment'}</a>}
             {t.status === 'Resolved' && !t.requester_confirmed && (
               <div className="row" style={{ marginTop: 6, gap: 6 }}>
                 <button className="primary" onClick={() => confirm(t.id)}>Confirm Resolution</button>
@@ -247,12 +265,14 @@ function HRHelpdesk({ compact, sectionLabel }) {
               <div className="row" style={{ justifyContent: 'space-between' }}>
                 <span><strong>{t.subject}</strong></span>
                 <span className="row" style={{ gap: 6 }}>
+                  <CategoryBadge category={t.category} />
                   <PriorityBadge priority={t.priority} />
                   <span className={'status-tag ' + (STATUS_CLASS[t.status] || 'info')}>{t.status}</span>
                 </span>
               </div>
-              <div className="feature-meta">{t.employee_name} · {t.category}</div>
-              {canManage && t.status === 'Open' && <button style={{ marginTop: 4 }} onClick={() => setStatus(t.id, 'Resolved')}>Mark Resolved</button>}
+              <div className="feature-meta">{t.employee_name}</div>
+              {t.attachment_data_url && <a className="pill" href={t.attachment_data_url} download={t.attachment_name || 'attachment'} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 4 }}>📎 {t.attachment_name || 'Attachment'}</a>}
+              {canManage && t.status === 'Open' && <button style={{ marginTop: 4, display: 'block' }} onClick={() => setStatus(t.id, 'Resolved')}>Mark Resolved</button>}
             </div>
           ))}
         </div>
@@ -279,6 +299,7 @@ function CreationScreen({ onBack }) {
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ category: 'IT', priority: 'Medium', subject: '', description: '' });
+  const [file, setFile] = useState(null);
 
   function load() { api.get('/helpdesk/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load tickets.')); }
   useEffect(load, []);
@@ -287,8 +308,11 @@ function CreationScreen({ onBack }) {
   async function submit(e) {
     e.preventDefault(); setError('');
     if (!form.subject.trim()) { setError('Subject is required.'); return; }
-    try { await api.post('/helpdesk', form); setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not raise ticket.'); }
+    try {
+      const attachment_data_url = file ? await readFileAsDataUrl(file) : undefined;
+      await api.post('/helpdesk', { ...form, attachment_data_url, attachment_name: file?.name });
+      setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setFile(null); setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not raise ticket.'); }
   }
   async function assign(id, employeeId) {
     setError('');
@@ -305,9 +329,12 @@ function CreationScreen({ onBack }) {
         {!ov && <div className="empty">Loading…</div>}
         {ov && ov.tickets.map((t) => (
           <div key={t.id} className="rec-row" style={{ alignItems: 'flex-start' }}>
-            <span>{t.subject} — {t.employee_name}</span>
+            <span>
+              {t.subject} — {t.employee_name}
+              {t.attachment_data_url && <> <a className="pill" href={t.attachment_data_url} download={t.attachment_name || 'attachment'} target="_blank" rel="noreferrer">📎 {t.attachment_name || 'Attachment'}</a></>}
+            </span>
             <span className="row" style={{ gap: 6, alignItems: 'center' }}>
-              <span className="feature-meta">{t.category}</span>
+              <CategoryBadge category={t.category} />
               <PriorityBadge priority={t.priority} />
               <select value={t.assigned_to_employee_id || ''} onChange={(e) => assign(t.id, e.target.value)}>
                 <option value="">Unassigned</option>
@@ -326,8 +353,13 @@ function CreationScreen({ onBack }) {
                 {PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
             </div>
+            {form.category === 'Grievance' && (
+              <div className="banner info" style={{ marginTop: 8 }}>Grievance tickets go directly to HR/Super Admin — the requester's Team Lead/supervisor never sees these.</div>
+            )}
             <input placeholder="Subject" value={form.subject} onChange={(e) => setForm({ ...form, subject: e.target.value })} required style={{ marginTop: 8, marginBottom: 8 }} />
             <input placeholder="Description" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={{ marginBottom: 8 }} />
+            <label className="field-label">Attach proof / document <span className="note">(optional)</span></label>
+            <input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files?.[0] || null)} style={{ marginBottom: 8, display: 'block' }} />
             <div className="row">
               <button className="primary" type="submit">Create Ticket</button>
               <button type="button" onClick={() => setShowForm(false)}>Cancel</button>

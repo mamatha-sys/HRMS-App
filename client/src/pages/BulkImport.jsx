@@ -85,12 +85,26 @@ export default function BulkImport() {
     }
   }
 
+  async function downloadTemplate() {
+    const res = await api.get('/employees/import-template.csv', { responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'employee-import-template.csv'; a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div>
       <h1>Bulk Import Employees</h1>
-      <div className="subtitle">Upload or paste a CSV (columns: name, email, designation, department, branch, phone). Rows without a department/branch/joining date fall back to the defaults below.</div>
+      <div className="subtitle">
+        Upload or paste a CSV — every employee field is supported (personal, address, employment, bank, education,
+        plus any custom fields), not just the basics. Rows without a department/branch/joining date fall back to the
+        defaults below.
+      </div>
 
       {error && <div className="banner error">{error}</div>}
+
+      <button style={{ marginBottom: 14 }} onClick={downloadTemplate}>⬇ Download Sample Template (all fields)</button>
 
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 10 }}>Import options</div>

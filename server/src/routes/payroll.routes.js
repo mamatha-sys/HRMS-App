@@ -44,6 +44,10 @@ const SPLIT_POLICY_DEFAULTS = {
   'Bonus % of Basic': 10,
   'Employee PF % of Basic': 12,
   'Employer PF % of Basic': 12,
+  // Statutory EPF wage ceiling (₹15,000 basic × 12%) — once the percentage-based PF hits this,
+  // it stops growing with basic instead of scaling further, matching real EPFO practice.
+  'Employee PF Monthly Cap': 1800,
+  'Employer PF Monthly Cap': 1800,
   'Gratuity % of Basic': 4.81,
   'Professional Tax (flat monthly)': 200
 };
@@ -74,8 +78,8 @@ function splitCtc(ctc) {
   const cfg = splitConfig();
   const basic = Math.round(ctc * cfg['Basic % of CTC'] / 100);
   const hra = Math.round(basic * cfg['HRA % of Basic'] / 100);
-  const employeePf = Math.round(basic * cfg['Employee PF % of Basic'] / 100);
-  const employerPf = Math.round(basic * cfg['Employer PF % of Basic'] / 100);
+  const employeePf = Math.min(Math.round(basic * cfg['Employee PF % of Basic'] / 100), cfg['Employee PF Monthly Cap']);
+  const employerPf = Math.min(Math.round(basic * cfg['Employer PF % of Basic'] / 100), cfg['Employer PF Monthly Cap']);
   const gratuity = Math.round(basic * cfg['Gratuity % of Basic'] / 100);
   const pt = Math.round(cfg['Professional Tax (flat monthly)']);
   const bonus = Math.round(basic * cfg['Bonus % of Basic'] / 100);
@@ -305,28 +309,6 @@ function lopFor(employeeId, month, gross) {
   return { lopDays, deduction: lopDays * perDayRate };
 }
 
-// Per-leave-type breakdown for the "Leave Details" section of a payslip. Payslips don't keep a
-// historical snapshot of leave balances, so opening balance is reconstructed as
-// (today's running balance + what was taken in that payslip's month) — an approximation, but a
-// reasonable one since balances only ever move via that same month's approved leave.
-function leaveDetailsFor(employeeId, month) {
-  const types = db.prepare('SELECT * FROM leave_types WHERE active = 1 ORDER BY id').all();
-  return types.map((t) => {
-    const currentBalance = db.prepare('SELECT balance FROM employee_leave_balances WHERE employee_id = ? AND leave_type_id = ?').get(employeeId, t.id)?.balance ?? t.annual_quota;
-    const takenThisMonth = db.prepare(`
-      SELECT COALESCE(SUM(days), 0) AS d FROM leaves
-      WHERE employee_id = ? AND leave_type_id = ? AND status = 'Approved' AND cancelled = 0 AND strftime('%Y-%m', from_date) = ?
-    `).get(employeeId, t.id, month).d;
-    return {
-      leave_type: t.name,
-      opening_balance: t.unpaid ? null : currentBalance + takenThisMonth,
-      entitlement: t.unpaid ? 'Unpaid' : t.annual_quota,
-      leaves_taken: takenThisMonth,
-      current_balance: t.unpaid ? null : currentBalance
-    };
-  });
-}
-
 // HR runs payroll for a calendar month → one payslip per active employee (idempotent per
 // period). Automatically deducts half a day's pay per late arrival beyond the free monthly
 // allowance (company rule), shown as its own line item on the payslip.
@@ -381,8 +363,8 @@ router.get('/payslips', (req, res) => {
 
 // Full detail for one payslip — everything a printable payslip needs: the itemized
 // earnings/deductions snapshot from when payroll actually ran, the employee's identity/bank/
-// statutory fields as they stand today, a Leave Details breakdown for that month, and the
-// company's own branding (logo/name/address) to print in the header.
+// statutory fields as they stand today, and the company's own branding (logo/name/address) to
+// print in the header.
 router.get('/payslips/:id', (req, res) => {
   const slip = db.prepare('SELECT * FROM payslips WHERE id = ?').get(req.params.id);
   if (!slip) return res.status(404).json({ error: 'Payslip not found' });
@@ -401,7 +383,6 @@ router.get('/payslips/:id', (req, res) => {
       bank_name: emp.bank_name, bank_account_number: emp.bank_account_number, ifsc_code: emp.ifsc_code,
       pan_number: emp.pan_number, uan_number: emp.uan_number, pf_number: emp.pf_number, esi_number: emp.esi_number
     },
-    leaveDetails: slip.month ? leaveDetailsFor(slip.employee_id, slip.month) : [],
     company: getSettings(['company_name', 'company_logo', 'company_address'])
   });
 });

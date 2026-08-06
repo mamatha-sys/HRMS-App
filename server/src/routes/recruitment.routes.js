@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
 import { recomputeOffboardingClearance } from '../utils/offboarding.js';
+import { sendEmail, sendWhatsapp } from '../utils/channels.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -215,15 +216,63 @@ router.get('/overview', (req, res) => {
   });
 });
 
+const CANDIDATE_PROFILE_FIELDS = ['email', 'phone', 'experience_years', 'current_ctc', 'expected_ctc', 'notice_period', 'resume_data_url', 'resume_name', 'linkedin_url', 'location'];
+
 router.post('/candidates', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { name, position_id, panel, source_id } = req.body || {};
   if (!name) return res.status(400).json({ error: 'name is required' });
   const validSource = source_id && activeSources().some((s) => s.id === Number(source_id)) ? Number(source_id) : null;
   const start = firstRound();
-  const info = db.prepare('INSERT INTO candidates (name, position_id, panel, round_id, source_id) VALUES (?, ?, ?, ?, ?)')
-    .run(name.trim(), position_id || null, panel || null, start ? start.id : null, validSource);
+  const profile = CANDIDATE_PROFILE_FIELDS.map((f) => req.body?.[f]?.toString().trim() || null);
+  const info = db.prepare(`
+    INSERT INTO candidates (name, position_id, panel, round_id, source_id, ${CANDIDATE_PROFILE_FIELDS.join(', ')})
+    VALUES (?, ?, ?, ?, ?, ${CANDIDATE_PROFILE_FIELDS.map(() => '?').join(', ')})
+  `).run(name.trim(), position_id || null, panel || null, start ? start.id : null, validSource, ...profile);
   res.status(201).json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(info.lastInsertRowid) });
+});
+
+// Edit a candidate's own profile fields (contact/experience/compensation/resume/links) — kept
+// separate from advance/revert/feedback, which each have their own controlled-transition endpoint.
+router.put('/candidates/:id', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  const sets = [];
+  const values = [];
+  CANDIDATE_PROFILE_FIELDS.forEach((f) => {
+    if (req.body?.[f] !== undefined) { sets.push(`${f} = ?`); values.push(req.body[f]?.toString().trim() || null); }
+  });
+  if (req.body?.name?.trim()) { sets.push('name = ?'); values.push(req.body.name.trim()); }
+  if (!sets.length) return res.status(400).json({ error: 'No editable fields provided' });
+  values.push(req.params.id);
+  db.prepare(`UPDATE candidates SET ${sets.join(', ')} WHERE id = ?`).run(...values);
+  res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id) });
+});
+
+// Manual "Send Update" — HR-composed Email/WhatsApp message straight to a candidate. Candidates
+// aren't employees, so this calls the channel senders directly with the candidate's own
+// email/phone instead of going through dispatchChannels() (which is keyed off employees.email/
+// phone and logs to channel_deliveries, a table this doesn't participate in).
+router.post('/candidates/:id/message', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  const { channel, subject, message } = req.body || {};
+  if (!['email', 'whatsapp'].includes(channel)) return res.status(400).json({ error: 'channel must be "email" or "whatsapp"' });
+  if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
+  try {
+    if (channel === 'email') {
+      if (!candidate.email) throw new Error('This candidate has no email on file');
+      await sendEmail(candidate.email, subject?.trim() || 'Update on your application', message.trim());
+    } else {
+      if (!candidate.phone) throw new Error('This candidate has no phone number on file');
+      await sendWhatsapp(candidate.phone, subject?.trim() || 'Update on your application', message.trim());
+    }
+    res.json({ sent: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Advances a candidate to the next active round in the (dynamic, HR-configurable) pipeline.

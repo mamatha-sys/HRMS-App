@@ -3,6 +3,8 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
+import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -43,42 +45,163 @@ function withFeedback(review) {
   return { ...review, feedback };
 }
 
+const DEFAULT_TARGETS_PER_MONTH = 4;
+function targetsPerMonthFor(departmentId) {
+  if (!departmentId) return DEFAULT_TARGETS_PER_MONTH;
+  const row = db.prepare('SELECT targets_per_month FROM department_target_policies WHERE department_id = ?').get(departmentId);
+  return row?.targets_per_month ?? DEFAULT_TARGETS_PER_MONTH;
+}
+
+const currentMonth = () => db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+// A target counts as "completed" once its progress bar reaches 100 — a lighter-weight signal
+// than the formal review-closing `status` (which also requires both assessments submitted via
+// /reviews/:id/complete). Department-wise rollups care about the target itself being done, not
+// whether the paperwork around it has been formally closed yet.
+const isTargetComplete = (r) => r.status === 'Completed' || r.progress_pct >= 100;
+
+// Nudges for a review sitting with a pending assessment — same lazy, no-background-scheduler
+// idiom as Helpdesk's 24h auto-escalation: runs at the top of every review-list read, and only
+// actually sends once every REMINDER_COOLDOWN_DAYS per review (via last_reminded_at) so loading
+// the dashboard repeatedly doesn't spam the same reminder. Self-assessment pending → nudge the
+// employee directly; manager-assessment pending → a 'staff' broadcast, same audience every other
+// "someone needs to act on this" alert in the app already uses (New Helpdesk Ticket, etc.).
+const REMINDER_COOLDOWN_DAYS = 3;
+function sendPendingAssessmentReminders() {
+  const stale = db.prepare(`
+    SELECT * FROM performance_reviews
+    WHERE status != 'Completed' AND (self_assessment_status = 'Pending' OR manager_assessment_status = 'Pending')
+      AND (last_reminded_at IS NULL OR last_reminded_at <= datetime('now', ?))
+  `).all(`-${REMINDER_COOLDOWN_DAYS} days`);
+  stale.forEach((r) => {
+    if (r.self_assessment_status === 'Pending' && r.employee_id) {
+      notifyEmployee(r.employee_id, 'Self-assessment pending', `Your self-assessment for "${r.goal_text}"${r.month ? ` (${r.month})` : ''} is still pending — please submit it.`);
+    }
+    if (r.manager_assessment_status === 'Pending') {
+      db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
+        .run('Manager Assessment Pending', `"${r.goal_text}" for ${r.employee_name}${r.month ? ` (${r.month})` : ''} is still waiting on a manager assessment.`, 'staff');
+    }
+    db.prepare("UPDATE performance_reviews SET last_reminded_at = datetime('now') WHERE id = ?").run(r.id);
+  });
+}
+
+// Department-wise target progress + each department's top performer for one month, across every
+// active employee with a department on file (not just those with reviews — an employee with zero
+// targets this month still shows up at 0%, rather than silently vanishing). `deptFilter`, when
+// given, narrows to a scoped supervisor's own assigned department(s).
+function departmentProgressFor(month, deptFilter) {
+  let employees = db.prepare(`
+    SELECT e.id AS id, e.name AS name, e.employee_code AS employee_code, e.department AS department, d.id AS department_id
+    FROM employees e LEFT JOIN departments d ON d.name = e.department
+    WHERE e.status = 'Active' AND e.department IS NOT NULL
+  `).all();
+  if (deptFilter) employees = employees.filter((e) => deptFilter.has(e.department));
+  const targets = db.prepare('SELECT employee_id, progress_pct, status FROM performance_reviews WHERE month = ? AND employee_id IS NOT NULL').all(month);
+  const byEmployee = {};
+  targets.forEach((t) => { (byEmployee[t.employee_id] ||= []).push(t); });
+
+  const byDept = {};
+  employees.forEach((e) => {
+    const myTargets = byEmployee[e.id] || [];
+    const completed = myTargets.filter(isTargetComplete).length;
+    const avgProgress = myTargets.length ? Math.round(myTargets.reduce((s, t) => s + t.progress_pct, 0) / myTargets.length) : 0;
+    (byDept[e.department] ||= { departmentId: e.department_id, emps: [] }).emps.push({ employee_id: e.id, name: e.name, employee_code: e.employee_code, targetsAssigned: myTargets.length, targetsCompleted: completed, avgProgress });
+  });
+
+  return Object.entries(byDept).map(([department, { departmentId, emps }]) => {
+    const withTargets = emps.filter((e) => e.targetsAssigned > 0);
+    const avgProgress = withTargets.length ? Math.round(withTargets.reduce((s, e) => s + e.avgProgress, 0) / withTargets.length) : 0;
+    const top = [...withTargets].sort((a, b) => b.avgProgress - a.avgProgress || b.targetsCompleted - a.targetsCompleted)[0] || null;
+    return {
+      department,
+      targetsPerMonth: targetsPerMonthFor(departmentId),
+      avgProgress,
+      employeesWithTargets: withTargets.length,
+      fullyCompletedCount: withTargets.filter((e) => e.targetsAssigned > 0 && e.targetsCompleted === e.targetsAssigned).length,
+      topPerformer: top ? { name: top.name, employee_code: top.employee_code, avgProgress: top.avgProgress, targetsCompleted: top.targetsCompleted, targetsAssigned: top.targetsAssigned } : null
+    };
+  }).sort((a, b) => b.avgProgress - a.avgProgress);
+}
+
 router.get('/overview', (req, res) => {
   if (!canViewPerformance(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  sendPendingAssessmentReminders();
   const scoped = isScopedRole(req.user.role);
   const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
+  const month = /^\d{4}-\d{2}$/.test(req.query?.month) ? req.query.month : currentMonth();
 
   let reviews = db.prepare(`
-    SELECT pr.*, e.department AS employee_department
+    SELECT pr.*, e.department AS employee_department, e.employee_code AS employee_code, e.designation AS employee_designation
     FROM performance_reviews pr LEFT JOIN employees e ON e.id = pr.employee_id
     ORDER BY (pr.status = 'Completed'), pr.created_at DESC
   `).all().map(withFeedback);
   // A review not yet linked to a real employee record can't be attributed to a department —
   // fail closed (hide it) for a scoped role rather than showing an unattributed, unscoped record.
   if (scoped) reviews = reviews.filter((r) => r.employee_department && scopeDeptNames.has(r.employee_department));
+  // Automatic attendance/check-in-check-out reporting, right alongside each review — the same
+  // present-days-÷-days-in-month figure Attendance itself reports, for that review's own month
+  // (not necessarily the current one, since past reviews are shown here too).
+  reviews = reviews.map((r) => (r.employee_id ? { ...r, attendance: monthlyAttendanceSummary(r.employee_id, r.month || month) } : r));
+  // Per-review "Overall Score" (0-100) for the review card: once a manager rating exists, blend
+  // goal progress with the rating (scaled ×20 to a 0-100 base) so both count; before a rating
+  // exists, goal progress is the only signal there is.
+  reviews = reviews.map((r) => ({ ...r, overallScore: r.rating != null ? Math.round((r.progress_pct + r.rating * 20) / 2) : r.progress_pct }));
 
-  const inProgress = reviews.filter((r) => r.status === 'In Progress').length;
-  const rated = reviews.filter((r) => r.rating != null);
-  const avgRating = rated.length ? Math.round((rated.reduce((t, r) => t + r.rating, 0) / rated.length) * 10) / 10 : 0;
+  // Dashboard Summary: Total/Pending/Completed reviews + org-wide average performance score —
+  // averaged from each review's own 0-100 Overall Score, so the summary card and every review
+  // card's "Overall Score" are the same scale (previously this KPI averaged the raw 1-5 manager
+  // rating while cards showed a 0-100 score — two different scales for the same idea).
+  const totalReviews = reviews.length;
+  const completedReviews = reviews.filter((r) => r.status === 'Completed').length;
+  const pendingReviews = totalReviews - completedReviews;
+  const avgOverallScore = totalReviews ? Math.round(reviews.reduce((t, r) => t + r.overallScore, 0) / totalReviews) : 0;
+
+  const departmentProgress = departmentProgressFor(month, scoped ? scopeDeptNames : null);
+  // A scoped supervisor's own standing blends their personal target progress with their
+  // department's average this month — completing targets (their own, or their team's) directly
+  // improves this number, which is the point: "when targets are completed, the TL/STL's own
+  // department-wise progress improves too," not just the raw employee's.
+  let mySupervisorProgress = null;
+  if (scoped) {
+    const me = myEmployee(req.user.sub);
+    const myTargets = me ? db.prepare('SELECT progress_pct, status FROM performance_reviews WHERE employee_id = ? AND month = ?').all(me.id, month) : [];
+    const personalAvgProgress = myTargets.length ? Math.round(myTargets.reduce((s, t) => s + t.progress_pct, 0) / myTargets.length) : 0;
+    const departmentAvgProgress = departmentProgress.length ? Math.round(departmentProgress.reduce((s, d) => s + d.avgProgress, 0) / departmentProgress.length) : 0;
+    mySupervisorProgress = { month, personalAvgProgress, departmentAvgProgress, combined: Math.round((personalAvgProgress + departmentAvgProgress) / 2) };
+  }
 
   res.json({
     banner: scoped ? 'Team/organization performance — view your assigned department(s)/team(s) only; no create, edit, or approval actions here.' : SCOPE_BANNER[req.user.role],
     kpis: [
-      { label: 'Reviews In Progress', value: inProgress, color: 'blue' },
-      { label: 'Avg Rating (Org)', value: avgRating, color: 'green' }
+      { label: 'Total Reviews', value: totalReviews, color: 'blue' },
+      { label: 'Pending Reviews', value: pendingReviews, color: 'gold' },
+      { label: 'Completed Reviews', value: completedReviews, color: 'green' },
+      { label: 'Average Performance Score', value: totalReviews ? `${avgOverallScore}/100` : '—', color: 'blue' }
     ],
+    month,
+    departmentProgress,
+    mySupervisorProgress,
     reviews,
     keyFeatures: KEY_FEATURES,
     fieldAccess: FIELD_ACCESS
   });
 });
 
-// Self-service: an employee's own reviews (for the Self-Appraisal feature).
+// Self-service: an employee's own reviews (for the Self-Appraisal feature), plus their own
+// attendance and this-month target-completion standing (out of their department's configured
+// targets-per-month policy).
 router.get('/my-reviews', (req, res) => {
   const me = myEmployee(req.user.sub);
-  if (!me) return res.json({ reviews: [] });
+  if (!me) return res.json({ reviews: [], attendance: null, thisMonthTargets: { assigned: 0, completed: 0, target: DEFAULT_TARGETS_PER_MONTH } });
+  sendPendingAssessmentReminders();
   const reviews = db.prepare('SELECT * FROM performance_reviews WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map(withFeedback);
-  res.json({ reviews });
+  const month = currentMonth();
+  const thisMonth = reviews.filter((r) => r.month === month);
+  const dept = db.prepare('SELECT id FROM departments WHERE name = ?').get(me.department);
+  res.json({
+    reviews,
+    attendance: monthlyAttendanceSummary(me.id, month),
+    thisMonthTargets: { assigned: thisMonth.length, completed: thisMonth.filter(isTargetComplete).length, target: targetsPerMonthFor(dept?.id) }
+  });
 });
 
 // Single-review detail, used by the dedicated Appraisal / 360° Feedback / Competency / Plan screens.
@@ -89,14 +212,31 @@ router.get('/reviews/:id', (req, res) => {
   res.json({ review: withFeedback(review) });
 });
 
-// Goal Assignment & Tracking: create a new goal (employee, goal text, due date).
+// Goal Assignment & Tracking: create a new goal/target (employee, goal text, due date, and the
+// calendar month it's a target for). Monthly target count is capped per the employee's
+// department (department_target_policies, Super-Admin-configurable — see /target-policy below;
+// defaults to 4 for any department without an explicit override), enforced here rather than a DB
+// constraint, matching how other soft business rules (e.g. Leave's notice period) are validated.
 router.post('/reviews', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { employee_id, employee_name, team, goal_text, kpi_text, due_date } = req.body || {};
+  const { employee_id, employee_name, team, goal_text, kpi_text, due_date, month, target_value, unit } = req.body || {};
   if (!employee_name || !goal_text) return res.status(400).json({ error: 'employee_name and goal_text are required' });
-  const emp = employee_id ? db.prepare('SELECT id FROM employees WHERE id = ?').get(employee_id) : null;
-  const info = db.prepare('INSERT INTO performance_reviews (employee_id, employee_name, team, goal_text, kpi_text, due_date) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(emp ? emp.id : null, employee_name.trim(), team || null, goal_text.trim(), kpi_text || null, due_date || null);
+  const emp = employee_id ? db.prepare('SELECT id, department FROM employees WHERE id = ?').get(employee_id) : null;
+  const targetMonth = /^\d{4}-\d{2}$/.test(month) ? month : currentMonth();
+  if (emp) {
+    const dept = db.prepare('SELECT id FROM departments WHERE name = ?').get(emp.department);
+    const cap = targetsPerMonthFor(dept?.id);
+    const existing = db.prepare('SELECT COUNT(*) AS c FROM performance_reviews WHERE employee_id = ? AND month = ?').get(emp.id, targetMonth).c;
+    if (existing >= cap) return res.status(400).json({ error: `${employee_name.trim()} already has ${cap} target${cap === 1 ? '' : 's'} set for ${targetMonth} — that's ${emp.department || 'their department'}'s monthly limit.` });
+  }
+  // A measurable target (e.g. "20 deals") starts at 0 achieved, not blank — so its progress bar
+  // reads 0% from the start instead of falling back to the legacy manual-percent path.
+  const targetVal = target_value !== undefined && target_value !== '' ? Number(target_value) : null;
+  const info = db.prepare(`
+    INSERT INTO performance_reviews (employee_id, employee_name, team, goal_text, kpi_text, due_date, month, target_value, achieved_value, unit)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(emp ? emp.id : null, employee_name.trim(), team || null, goal_text.trim(), kpi_text || null, due_date || null, targetMonth,
+    Number.isFinite(targetVal) ? targetVal : null, Number.isFinite(targetVal) ? 0 : null, unit?.trim() || null);
   res.status(201).json({ review: db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(info.lastInsertRowid) });
 });
 
@@ -111,13 +251,21 @@ router.put('/reviews/:id', (req, res) => {
   res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
-// Goal Assignment & Tracking: update just the progress bar.
+// Goal Assignment & Tracking: update progress. A measurable target (target_value set) is driven
+// by achieved_value — progress_pct is computed from it, not typed in, so it's a real number
+// instead of a guess. A qualitative goal (no target_value) keeps the old manual progress_pct entry.
 router.put('/reviews/:id/progress', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const review = db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id);
   if (!review) return res.status(404).json({ error: 'Review not found' });
-  const pct = Math.max(0, Math.min(100, parseInt(req.body?.progress_pct, 10) || 0));
-  db.prepare('UPDATE performance_reviews SET progress_pct = ? WHERE id = ?').run(pct, req.params.id);
+  if (review.target_value != null) {
+    const achieved = Math.max(0, Number(req.body?.achieved_value) || 0);
+    const pct = review.target_value > 0 ? Math.round(Math.min(achieved / review.target_value, 1) * 100) : 0;
+    db.prepare('UPDATE performance_reviews SET achieved_value = ?, progress_pct = ? WHERE id = ?').run(achieved, pct, req.params.id);
+  } else {
+    const pct = Math.max(0, Math.min(100, parseInt(req.body?.progress_pct, 10) || 0));
+    db.prepare('UPDATE performance_reviews SET progress_pct = ? WHERE id = ?').run(pct, req.params.id);
+  }
   res.json({ review: withFeedback(db.prepare('SELECT * FROM performance_reviews WHERE id = ?').get(req.params.id)) });
 });
 
@@ -216,6 +364,35 @@ router.get('/reports', (req, res) => {
   const statusCounts = { 'In Progress': reviews.filter((r) => r.status === 'In Progress').length, Completed: reviews.filter((r) => r.status === 'Completed').length };
 
   res.json({ teamStats, distribution, planCounts, statusCounts });
+});
+
+// --- Target Policy: how many monthly targets each department gets. Readable by any HR-tier/
+// scoped role (same as /overview), editable by Super Admin only — matches Payroll's CTC Split
+// Settings and Leave's notice-period pattern (a single company-wide default, overridable per
+// department instead of per-employee).
+router.get('/target-policy', (req, res) => {
+  if (!canViewPerformance(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const scoped = isScopedRole(req.user.role);
+  const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
+  let departments = db.prepare('SELECT id, name FROM departments ORDER BY name').all();
+  if (scoped) departments = departments.filter((d) => scopeDeptNames.has(d.name));
+  res.json({
+    defaultTargetsPerMonth: DEFAULT_TARGETS_PER_MONTH,
+    departments: departments.map((d) => ({ department_id: d.id, department: d.name, targets_per_month: targetsPerMonthFor(d.id) }))
+  });
+});
+
+router.put('/target-policy/:departmentId', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can change target policy' });
+  const dept = db.prepare('SELECT id, name FROM departments WHERE id = ?').get(req.params.departmentId);
+  if (!dept) return res.status(404).json({ error: 'Department not found' });
+  const n = parseInt(req.body?.targets_per_month, 10);
+  if (!Number.isFinite(n) || n < 1) return res.status(400).json({ error: 'targets_per_month must be a positive number' });
+  db.prepare(`
+    INSERT INTO department_target_policies (department_id, targets_per_month, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(department_id) DO UPDATE SET targets_per_month = excluded.targets_per_month, updated_at = excluded.updated_at
+  `).run(dept.id, n);
+  res.json({ department_id: dept.id, department: dept.name, targets_per_month: n });
 });
 
 export default router;

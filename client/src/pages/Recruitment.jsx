@@ -1,7 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+
+// Same base64-data-URL pattern already used for leave documents / expense receipts / employee
+// document uploads.
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 
 // Super Admin is a pure system-administrator account — admin overview only, no own vacancies view.
 const FULL_HR_ROLES = ['super_admin'];
@@ -217,9 +228,22 @@ function HRRecruitment({ compact, sectionLabel }) {
   const [tab, setTab] = useState('dashboard'); // dashboard | pipeline
 
   const [showReqForm, setShowReqForm] = useState(false);
-  const [reqForm, setReqForm] = useState({ department_id: '', title: '', target_headcount: 1 });
+  const [reqForm, setReqForm] = useState({
+    department_id: '', title: '', target_headcount: 1,
+    is_replacement: false, replacement_for: '', replacement_target_date: '',
+    job_description: '', jd_date: ''
+  });
   const [showCandForm, setShowCandForm] = useState(false);
-  const [candForm, setCandForm] = useState({ name: '', position_id: '', panel: '', source_id: '' });
+  const [candForm, setCandForm] = useState({
+    name: '', position_id: '', panel: '', source_id: '',
+    email: '', phone: '', experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '',
+    linkedin_url: '', location: ''
+  });
+  const [candResume, setCandResume] = useState(null);
+  const [messageFor, setMessageFor] = useState(null); // candidate id currently composing a Send Update message
+  const [messageDraft, setMessageDraft] = useState({ channel: 'email', subject: '', message: '' });
+  const [messageStatus, setMessageStatus] = useState('');
+  const navigate = useNavigate();
   const [showHireForm, setShowHireForm] = useState(false);
   const [hireForm, setHireForm] = useState({ employee_id: '', start_date: '' });
   const [showExitForm, setShowExitForm] = useState(false);
@@ -290,8 +314,11 @@ function HRRecruitment({ compact, sectionLabel }) {
 
   async function submitRequisition(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/positions', reqForm); setReqForm({ department_id: '', title: '', target_headcount: 1 }); setShowReqForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not create requisition.'); }
+    try {
+      await api.post('/positions', reqForm);
+      setReqForm({ department_id: '', title: '', target_headcount: 1, is_replacement: false, replacement_for: '', replacement_target_date: '', job_description: '', jd_date: '' });
+      setShowReqForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not create requisition.'); }
   }
   async function decide(id, decision) {
     setError('');
@@ -315,8 +342,31 @@ function HRRecruitment({ compact, sectionLabel }) {
   }
   async function submitCandidate(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/recruitment/candidates', candForm); setCandForm({ name: '', position_id: '', panel: '', source_id: '' }); setShowCandForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not add candidate.'); }
+    try {
+      const resume = candResume ? await readFileAsDataUrl(candResume) : undefined;
+      await api.post('/recruitment/candidates', { ...candForm, resume_data_url: resume, resume_name: candResume?.name });
+      setCandForm({ name: '', position_id: '', panel: '', source_id: '', email: '', phone: '', experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '', linkedin_url: '', location: '' });
+      setCandResume(null); setShowCandForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not add candidate.'); }
+  }
+  // Hired candidates go here rather than being auto-created — a real employee record needs
+  // email/DOJ/bank/login details HR should fill in and review, so this just opens Employees'
+  // Add Employee form pre-filled with what recruitment already knows (name + department). Not
+  // "designation" — that field is actually the employee's system access role (Manager/TL/etc.),
+  // not a free-text job title, so the position's title wouldn't be a valid value there.
+  function convertToEmployee(c) {
+    navigate('/employees', { state: { prefillEmployee: { name: c.name, department: c.position_department || '' } } });
+  }
+  function openMessageFor(c) {
+    setMessageFor(c.id); setMessageStatus('');
+    setMessageDraft({ channel: c.email ? 'email' : 'whatsapp', subject: `Update on your ${c.position_title || ''} application`, message: '' });
+  }
+  async function sendCandidateMessage(id) {
+    setMessageStatus('Sending…');
+    try {
+      await api.post(`/recruitment/candidates/${id}/message`, messageDraft);
+      setMessageStatus('Sent.'); setTimeout(() => { setMessageFor(null); setMessageStatus(''); }, 1200);
+    } catch (err) { setMessageStatus(err.response?.data?.error || 'Could not send message.'); }
   }
   async function advanceCandidate(id) {
     setError('');
@@ -443,14 +493,38 @@ function HRRecruitment({ compact, sectionLabel }) {
             {canRequest && <button onClick={() => setShowReqForm((v) => !v)}>{showReqForm ? 'Cancel' : '+ Add Requisition'}</button>}
           </div>
           {canRequest && showReqForm && (
-            <form onSubmit={submitRequisition} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-              <select value={reqForm.department_id} onChange={(e) => setReqForm({ ...reqForm, department_id: e.target.value })} required style={{ flex: '1 1 140px' }}>
-                <option value="">Select department</option>
-                {myDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
-              <input placeholder="Position title" value={reqForm.title} onChange={(e) => setReqForm({ ...reqForm, title: e.target.value })} required style={{ flex: '1 1 160px' }} />
-              <input type="number" min="1" value={reqForm.target_headcount} onChange={(e) => setReqForm({ ...reqForm, target_headcount: e.target.value })} style={{ flex: '0 1 90px' }} />
-              <button className="primary" type="submit">Create</button>
+            <form onSubmit={submitRequisition} style={{ marginBottom: 12 }}>
+              <div className="row" style={{ flexWrap: 'wrap' }}>
+                <select value={reqForm.department_id} onChange={(e) => setReqForm({ ...reqForm, department_id: e.target.value })} required style={{ flex: '1 1 140px' }}>
+                  <option value="">Select department</option>
+                  {myDepartments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                </select>
+                <input placeholder="Position title" value={reqForm.title} onChange={(e) => setReqForm({ ...reqForm, title: e.target.value })} required style={{ flex: '1 1 160px' }} />
+                <input type="number" min="1" value={reqForm.target_headcount} onChange={(e) => setReqForm({ ...reqForm, target_headcount: e.target.value })} style={{ flex: '0 1 90px' }} />
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
+                <label className="row" style={{ gap: 4, flex: '0 0 auto' }}>
+                  <input type="checkbox" checked={reqForm.is_replacement} onChange={(e) => setReqForm({ ...reqForm, is_replacement: e.target.checked })} />
+                  This is a replacement hire
+                </label>
+                {reqForm.is_replacement && (
+                  <>
+                    <input placeholder="Replacing (employee name)" value={reqForm.replacement_for} onChange={(e) => setReqForm({ ...reqForm, replacement_for: e.target.value })} required style={{ flex: '1 1 160px' }} />
+                    <div style={{ flex: '0 1 170px' }}>
+                      <label className="field-label" style={{ fontSize: 11 }}>Target completion date</label>
+                      <input type="date" value={reqForm.replacement_target_date} onChange={(e) => setReqForm({ ...reqForm, replacement_target_date: e.target.value })} />
+                    </div>
+                  </>
+                )}
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+                <textarea placeholder="Job description (optional)" value={reqForm.job_description} onChange={(e) => setReqForm({ ...reqForm, job_description: e.target.value })} rows={3} style={{ flex: '1 1 260px' }} />
+                <div style={{ flex: '0 1 170px' }}>
+                  <label className="field-label" style={{ fontSize: 11 }}>JD date</label>
+                  <input type="date" value={reqForm.jd_date} onChange={(e) => setReqForm({ ...reqForm, jd_date: e.target.value })} />
+                </div>
+              </div>
+              <div className="row" style={{ marginTop: 8 }}><button className="primary" type="submit">Create</button></div>
             </form>
           )}
           {filteredRequisitions.length === 0 && <div className="empty">No requisitions{ov?.requisitions.length ? ' match this filter.' : ' yet.'}</div>}
@@ -458,11 +532,18 @@ function HRRecruitment({ compact, sectionLabel }) {
             <div key={r.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
               <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
                 <strong>{r.title}</strong>
-                <span className={'status-tag ' + (r.approval_status === 'Pending Approval' ? 'pending' : 'present')}>
-                  {r.approval_status === 'Pending Approval' ? 'Pending Approval' : 'Approved — Posted'}
+                <span className="row" style={{ gap: 6 }}>
+                  {!!r.is_replacement && <span className="status-tag pending">Replacement</span>}
+                  <span className={'status-tag ' + (r.approval_status === 'Pending Approval' ? 'pending' : 'present')}>
+                    {r.approval_status === 'Pending Approval' ? 'Pending Approval' : 'Approved — Posted'}
+                  </span>
                 </span>
               </div>
               <div className="feature-meta">{r.department_name} · {r.target_headcount} position(s){r.requested_by ? ` · requested by ${r.requested_by}` : ''}</div>
+              {!!r.is_replacement && (
+                <div className="feature-meta">Replacing: {r.replacement_for}{r.replacement_target_date ? ` · target completion ${r.replacement_target_date}` : ''}</div>
+              )}
+              {r.job_description && <div className="feature-meta">JD{r.jd_date ? ` (${r.jd_date})` : ''}: {r.job_description}</div>}
               {r.approval_status === 'Approved' && r.posted_boards && <div className="feature-meta">Live on: {boardLabels(r.posted_boards)}</div>}
               {canManage && (
                 <div style={{ marginTop: 6 }}>
@@ -697,6 +778,10 @@ function HRRecruitment({ compact, sectionLabel }) {
           showSourceForm={showSourceForm} setShowSourceForm={setShowSourceForm}
           newSourceLabel={newSourceLabel} setNewSourceLabel={setNewSourceLabel}
           addSource={addSource} toggleSource={toggleSource}
+          candResume={candResume} setCandResume={setCandResume}
+          convertToEmployee={convertToEmployee}
+          messageFor={messageFor} messageDraft={messageDraft} setMessageDraft={setMessageDraft} messageStatus={messageStatus}
+          openMessageFor={openMessageFor} sendCandidateMessage={sendCandidateMessage} setMessageFor={setMessageFor}
         />
       )}
     </div>
@@ -711,7 +796,8 @@ function CandidatePipelineTab({
   ov, canManage, candForm, setCandForm, submitCandidate, showCandForm, setShowCandForm, advanceCandidate, revertCandidate,
   filteredCandidates, pipelinePosition, setPipelinePosition, pipelineDept, setPipelineDept,
   pipelineStage, setPipelineStage, pipelineSource, setPipelineSource, pipelineDeptOptions, pipelineStageOptions,
-  exportCandidatesCsv, showSourceForm, setShowSourceForm, newSourceLabel, setNewSourceLabel, addSource, toggleSource
+  exportCandidatesCsv, showSourceForm, setShowSourceForm, newSourceLabel, setNewSourceLabel, addSource, toggleSource,
+  candResume, setCandResume, convertToEmployee, messageFor, messageDraft, setMessageDraft, messageStatus, openMessageFor, sendCandidateMessage, setMessageFor
 }) {
   return (
     <div>
@@ -743,18 +829,35 @@ function CandidatePipelineTab({
             {canManage && <button onClick={() => setShowCandForm((v) => !v)}>{showCandForm ? 'Cancel' : '+ Add Candidate'}</button>}
           </div>
           {canManage && showCandForm && (
-            <form onSubmit={submitCandidate} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-              <input placeholder="Candidate name" value={candForm.name} onChange={(e) => setCandForm({ ...candForm, name: e.target.value })} required style={{ flex: '1 1 140px' }} />
-              <select value={candForm.position_id} onChange={(e) => setCandForm({ ...candForm, position_id: e.target.value })} style={{ flex: '1 1 140px' }}>
-                <option value="">Applying for…</option>
-                {ov?.requisitions.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
-              </select>
-              <select value={candForm.source_id} onChange={(e) => setCandForm({ ...candForm, source_id: e.target.value })} style={{ flex: '1 1 140px' }}>
-                <option value="">Source…</option>
-                {(ov?.candidateSources || []).filter((s) => !s.paused).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-              </select>
-              <input placeholder="Panel / notes (optional)" value={candForm.panel} onChange={(e) => setCandForm({ ...candForm, panel: e.target.value })} style={{ flex: '1 1 120px' }} />
-              <button className="primary" type="submit">Add</button>
+            <form onSubmit={submitCandidate} style={{ marginBottom: 12 }}>
+              <div className="row" style={{ flexWrap: 'wrap' }}>
+                <input placeholder="Candidate name" value={candForm.name} onChange={(e) => setCandForm({ ...candForm, name: e.target.value })} required style={{ flex: '1 1 140px' }} />
+                <select value={candForm.position_id} onChange={(e) => setCandForm({ ...candForm, position_id: e.target.value })} style={{ flex: '1 1 140px' }}>
+                  <option value="">Applying for…</option>
+                  {ov?.requisitions.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}
+                </select>
+                <select value={candForm.source_id} onChange={(e) => setCandForm({ ...candForm, source_id: e.target.value })} style={{ flex: '1 1 140px' }}>
+                  <option value="">Source…</option>
+                  {(ov?.candidateSources || []).filter((s) => !s.paused).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                </select>
+                <input placeholder="Panel / notes (optional)" value={candForm.panel} onChange={(e) => setCandForm({ ...candForm, panel: e.target.value })} style={{ flex: '1 1 120px' }} />
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+                <input type="email" placeholder="Email" value={candForm.email} onChange={(e) => setCandForm({ ...candForm, email: e.target.value })} style={{ flex: '1 1 160px' }} />
+                <input placeholder="Phone" value={candForm.phone} onChange={(e) => setCandForm({ ...candForm, phone: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <input placeholder="Experience (yrs)" value={candForm.experience_years} onChange={(e) => setCandForm({ ...candForm, experience_years: e.target.value })} style={{ flex: '1 1 100px' }} />
+                <input placeholder="Location" value={candForm.location} onChange={(e) => setCandForm({ ...candForm, location: e.target.value })} style={{ flex: '1 1 120px' }} />
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+                <input placeholder="Current CTC" value={candForm.current_ctc} onChange={(e) => setCandForm({ ...candForm, current_ctc: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <input placeholder="Expected CTC" value={candForm.expected_ctc} onChange={(e) => setCandForm({ ...candForm, expected_ctc: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <input placeholder="Notice period" value={candForm.notice_period} onChange={(e) => setCandForm({ ...candForm, notice_period: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <input placeholder="LinkedIn URL" value={candForm.linkedin_url} onChange={(e) => setCandForm({ ...candForm, linkedin_url: e.target.value })} style={{ flex: '1 1 160px' }} />
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
+                <label className="field-label" style={{ flex: '0 0 auto' }}>Resume <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => setCandResume(e.target.files?.[0] || null)} /></label>
+                <button className="primary" type="submit">Add</button>
+              </div>
             </form>
           )}
           {filteredCandidates.length === 0 && <div className="empty">No candidates{ov?.candidates?.length ? ' match this filter.' : ' yet.'}</div>}
@@ -769,11 +872,40 @@ function CandidatePipelineTab({
                 {c.referred_by_name ? ` — referred by ${c.referred_by_name}` : ''} · {c.feedback_status}
                 {c.panel ? ` · ${c.panel}` : ''}
               </div>
+              {(c.email || c.phone || c.experience_years || c.current_ctc || c.expected_ctc || c.notice_period || c.location || c.linkedin_url || c.resume_data_url) && (
+                <div className="feature-meta">
+                  {c.email ? `✉ ${c.email}` : ''}{c.phone ? ` · ☎ ${c.phone}` : ''}{c.location ? ` · ${c.location}` : ''}
+                  {c.experience_years ? ` · ${c.experience_years} yrs exp` : ''}
+                  {c.current_ctc ? ` · Current CTC ${c.current_ctc}` : ''}{c.expected_ctc ? ` · Expected ${c.expected_ctc}` : ''}
+                  {c.notice_period ? ` · Notice: ${c.notice_period}` : ''}
+                  {c.linkedin_url ? <> · <a href={c.linkedin_url} target="_blank" rel="noreferrer">LinkedIn</a></> : ''}
+                  {c.resume_data_url ? <> · <a href={c.resume_data_url} download={c.resume_name || 'resume'} target="_blank" rel="noreferrer">📎 Resume</a></> : ''}
+                </div>
+              )}
               {canManage && (
-                <span style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                <span style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
                   {c.next_stage && <button onClick={() => advanceCandidate(c.id)}>Move to {c.next_stage}</button>}
                   {c.prev_stage && <button onClick={() => revertCandidate(c.id)}>← Move back to {c.prev_stage}</button>}
+                  {(c.email || c.phone) && <button onClick={() => openMessageFor(c)}>Send Update</button>}
+                  {!!c.is_final && <button className="primary" onClick={() => convertToEmployee(c)}>Convert to Employee →</button>}
                 </span>
+              )}
+              {messageFor === c.id && (
+                <div className="card" style={{ marginTop: 8, background: '#F7F9FC' }}>
+                  <div className="row" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
+                    <select value={messageDraft.channel} onChange={(e) => setMessageDraft({ ...messageDraft, channel: e.target.value })} style={{ flex: '0 1 130px' }}>
+                      {c.email && <option value="email">Email</option>}
+                      {c.phone && <option value="whatsapp">WhatsApp</option>}
+                    </select>
+                    {messageDraft.channel === 'email' && <input placeholder="Subject" value={messageDraft.subject} onChange={(e) => setMessageDraft({ ...messageDraft, subject: e.target.value })} style={{ flex: '1 1 200px' }} />}
+                  </div>
+                  <textarea placeholder="Message" value={messageDraft.message} onChange={(e) => setMessageDraft({ ...messageDraft, message: e.target.value })} rows={2} style={{ width: '100%' }} />
+                  <div className="row" style={{ marginTop: 6, alignItems: 'center' }}>
+                    <button className="primary" onClick={() => sendCandidateMessage(c.id)} disabled={!messageDraft.message.trim()}>Send</button>
+                    <button onClick={() => setMessageFor(null)}>Cancel</button>
+                    {messageStatus && <span className="feature-meta">{messageStatus}</span>}
+                  </div>
+                </div>
               )}
             </div>
           ))}

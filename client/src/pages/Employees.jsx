@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
@@ -350,6 +350,23 @@ export default function Employees() {
   const [showFieldManager, setShowFieldManager] = useState(false);
   const [fieldConfig, setFieldConfig] = useState([]);
   const isSuperAdmin = user?.role === 'super_admin';
+  const [filterId, setFilterId] = useState('');
+  const [filterName, setFilterName] = useState('');
+  const filteredEmployees = employees.filter((e) =>
+    (!filterId || (e.employee_code || '').toLowerCase().includes(filterId.trim().toLowerCase())) &&
+    (!filterName || (e.name || '').toLowerCase().includes(filterName.trim().toLowerCase()))
+  );
+  const [transferFor, setTransferFor] = useState(null); // employee id currently showing the transfer form
+  const [transferForm, setTransferForm] = useState({ department: '', designation: '', team_id: '', transfer_date: new Date().toISOString().slice(0, 10), reason: '' });
+  function startTransfer(emp) {
+    setTransferFor(emp.id);
+    setTransferForm({ department: emp.department || '', designation: emp.designation || '', team_id: emp.team_id || '', transfer_date: new Date().toISOString().slice(0, 10), reason: '' });
+  }
+  async function submitTransfer(e, empId) {
+    e.preventDefault(); setError(''); setInfo('');
+    try { await api.post(`/employees/${empId}/transfer`, transferForm); setInfo('Employee transferred.'); setTransferFor(null); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not transfer employee.'); }
+  }
 
   function loadCustomFields() { api.get('/employees/custom-fields').then((r) => setCustomFields(r.data.fields)).catch(() => {}); }
   function loadFieldConfig() { api.get('/employees/field-config').then((r) => setFieldConfig(r.data.fields)).catch(() => {}); }
@@ -378,6 +395,22 @@ export default function Employees() {
   }
   useEffect(load, []);
   useEffect(loadCustomFields, []);
+
+  // Hired candidates arrive here from Recruitment's "Convert to Employee" button with a
+  // navigation-state prefill (name/department/designation) — opens the Add Employee form
+  // already filled in rather than auto-creating a full employee record sight-unseen (a real
+  // employee needs email/DOJ/bank/etc. HR should still review before saving). Consumed once
+  // via replace so re-visiting/back-navigating here doesn't keep re-opening the form.
+  const location = useLocation();
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (location.state?.prefillEmployee) {
+      setForm({ ...EMPTY_FORM, ...location.state.prefillEmployee });
+      setFormMode('create');
+      navigate(location.pathname, { replace: true, state: {} });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
   useEffect(loadFieldConfig, []);
   useEffect(() => {
     if (!canHR) return;
@@ -453,6 +486,13 @@ export default function Employees() {
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a');
     a.href = url; a.download = 'employees.csv'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  async function downloadOneCsv(emp) {
+    const res = await api.get('/reports/employees.csv', { params: { id: emp.id }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${emp.employee_code || emp.name}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
@@ -543,6 +583,14 @@ export default function Employees() {
         <div className="kpi-card red"><div className="kpi-label">Exited</div><div className="kpi-value">{employees.filter((e) => e.status === 'Exited').length}</div></div>
       </div>
 
+      <div className="filter-bar">
+        <input placeholder="Filter by Employee ID…" value={filterId} onChange={(e) => setFilterId(e.target.value)} style={{ width: 'auto' }} />
+        <input placeholder="Filter by Name…" value={filterName} onChange={(e) => setFilterName(e.target.value)} style={{ width: 'auto' }} />
+        {(filterId || filterName) && <button onClick={() => { setFilterId(''); setFilterName(''); }}>Clear</button>}
+        <div className="spacer" />
+        <span className="feature-meta">{filteredEmployees.length} of {employees.length}</span>
+      </div>
+
       <div className="row" style={{ flexWrap: 'wrap', marginBottom: 14 }}>
         {canManageEmployees && quickActions.map((a) => (
           <Link key={a.label} to={a.to}><button>{a.label}</button></Link>
@@ -615,17 +663,23 @@ export default function Employees() {
       <div className="card">
         {loading && <div className="empty">Loading...</div>}
         {!loading && employees.length === 0 && <div className="empty">No employee records yet.</div>}
-        {!loading && employees.length > 0 && (
+        {!loading && employees.length > 0 && filteredEmployees.length === 0 && <div className="empty">No employees match your filters.</div>}
+        {!loading && filteredEmployees.length > 0 && (
           <table>
             <thead>
               <tr>
-                <th>Code</th><th>Name</th><th>Department</th><th>Team</th><th>Designation</th><th>Status</th><th>Stage</th><th>Actions</th>
+                <th></th><th>Code</th><th>Name</th><th>Department</th><th>Team</th><th>Designation</th><th>Status</th><th>Stage</th><th>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {employees.map((emp) => (
+              {filteredEmployees.map((emp) => (
                 <Fragment key={emp.id}>
                   <tr>
+                    <td>
+                      {emp.photo
+                        ? <img src={emp.photo} alt="" style={{ width: 28, height: 28, objectFit: 'cover', borderRadius: '50%', border: '1px solid #E2E5EA' }} />
+                        : <span style={{ display: 'inline-flex', width: 28, height: 28, borderRadius: '50%', background: '#EEF0F3', color: '#8A93A3', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700 }}>{(emp.name || '?').charAt(0).toUpperCase()}</span>}
+                    </td>
                     <td>{emp.employee_code}</td>
                     <td><a href="#" onClick={(e) => { e.preventDefault(); setExpandedId(expandedId === emp.id ? null : emp.id); }}>{emp.name}</a></td>
                     <td>{emp.department}</td>
@@ -655,10 +709,49 @@ export default function Employees() {
                           {emp.account_active === 0 ? 'Reactivate' : 'Pause'}
                         </button>
                       )}
+                      {canEditEmployee && <button style={{ marginLeft: 6 }} onClick={() => (transferFor === emp.id ? setTransferFor(null) : startTransfer(emp))}>{transferFor === emp.id ? 'Cancel' : 'Transfer'}</button>}
+                      {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneCsv(emp)}>Export</button>}
                     </td>
                   </tr>
+                  {transferFor === emp.id && (
+                    <tr><td colSpan={9} style={{ textAlign: 'left', background: '#F7F8FA' }}>
+                      <form onSubmit={(e) => submitTransfer(e, emp.id)} className="row" style={{ flexWrap: 'wrap', padding: '10px 6px' }}>
+                        <div style={{ flex: '1 1 160px' }}>
+                          <label className="field-label">New Department</label>
+                          <select value={transferForm.department} onChange={(e) => setTransferForm({ ...transferForm, department: e.target.value })}>
+                            {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+                          </select>
+                        </div>
+                        <div style={{ flex: '1 1 160px' }}>
+                          <label className="field-label">New Designation</label>
+                          <select value={transferForm.designation} onChange={(e) => setTransferForm({ ...transferForm, designation: e.target.value })}>
+                            {transferForm.designation && !systemRoles.some((r) => r.name === transferForm.designation) && <option value={transferForm.designation}>{transferForm.designation}</option>}
+                            {systemRoles.map((r) => <option key={r.key} value={r.name}>{r.name}</option>)}
+                          </select>
+                        </div>
+                        <div style={{ flex: '1 1 140px' }}>
+                          <label className="field-label">New Team <span className="note">(optional)</span></label>
+                          <select value={transferForm.team_id} onChange={(e) => setTransferForm({ ...transferForm, team_id: e.target.value })}>
+                            <option value="">No team</option>
+                            {teams.filter((t) => t.department_id === departments.find((d) => d.name === transferForm.department)?.id).map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                          </select>
+                        </div>
+                        <div style={{ flex: '0 1 150px' }}>
+                          <label className="field-label">Transfer date</label>
+                          <input type="date" value={transferForm.transfer_date} onChange={(e) => setTransferForm({ ...transferForm, transfer_date: e.target.value })} required />
+                        </div>
+                        <div style={{ flex: '2 1 200px' }}>
+                          <label className="field-label">Reason <span className="note">(optional)</span></label>
+                          <input value={transferForm.reason} onChange={(e) => setTransferForm({ ...transferForm, reason: e.target.value })} />
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                          <button className="primary" type="submit">Confirm transfer</button>
+                        </div>
+                      </form>
+                    </td></tr>
+                  )}
                   {expandedId === emp.id && (
-                    <tr><td colSpan={8} style={{ textAlign: 'left', background: '#F7F8FA' }}>
+                    <tr><td colSpan={9} style={{ textAlign: 'left', background: '#F7F8FA' }}>
                       <EmployeeDetail emp={emp} />
                     </td></tr>
                   )}
@@ -885,6 +978,10 @@ function EmployeeDetail({ emp }) {
       {emp.photo && <img src={emp.photo} alt={emp.name} style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: '1px solid #E2E5EA', marginBottom: 10 }} />}
       <div className="grid2">
         <div>Employee ID: <strong>{emp.employee_code}</strong></div>
+        <div>
+          Designation: <strong>{emp.designation}</strong>
+          {emp.transfers?.length > 0 && <span className="feature-meta"> (transferred {emp.transfers[0].transfer_date})</span>}
+        </div>
         <div>Branch: <strong>{emp.branch || '—'}</strong></div>
         <div>Shift: <strong>{emp.shift || '—'}</strong></div>
         <div>Reporting manager: <strong>{emp.reporting_manager || '—'}</strong></div>
@@ -901,6 +998,20 @@ function EmployeeDetail({ emp }) {
       {emp.documents && emp.documents.length > 0
         ? emp.documents.map((doc, i) => <a key={i} href={doc.dataUrl} download={doc.name} className="pill" style={{ display: 'inline-block', marginRight: 6 }}>📎 {doc.name}</a>)
         : <div className="note">No documents uploaded.</div>}
+
+      <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Transfer History</div>
+      {emp.transfers && emp.transfers.length > 0 ? (
+        emp.transfers.map((t) => (
+          <div key={t.id} className="rec-row" style={{ alignItems: 'flex-start' }}>
+            <span>
+              {t.from_department !== t.to_department && <>{t.from_department || '—'} → <strong>{t.to_department}</strong>{t.from_designation !== t.to_designation ? ', ' : ''}</>}
+              {t.from_designation !== t.to_designation && <>{t.from_designation || '—'} → <strong>{t.to_designation}</strong></>}
+              {t.reason && <div className="feature-meta">{t.reason}</div>}
+            </span>
+            <span className="feature-meta">{t.transfer_date}</span>
+          </div>
+        ))
+      ) : <div className="note">No transfers on record.</div>}
       <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Bank &amp; statutory details</div>
       {emp.sensitiveFieldsMasked ? (
         <div className="empty">Masked — only Super Admin or the employee can see bank details.</div>
@@ -1021,7 +1132,12 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
   return (
     <div className="card">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-        <div className="feature-name">{emp.name} · {emp.employee_code}</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {form.photo
+            ? <img src={form.photo} alt="" style={{ width: 44, height: 44, objectFit: 'cover', borderRadius: '50%', border: '1px solid #E2E5EA' }} />
+            : <span style={{ display: 'inline-flex', width: 44, height: 44, borderRadius: '50%', background: '#EEF0F3', color: '#8A93A3', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 700 }}>{(emp.name || '?').charAt(0).toUpperCase()}</span>}
+          <div className="feature-name">{emp.name} · {emp.employee_code}</div>
+        </div>
         <span className={'status-tag ' + STAGE_CLASS[emp.stage]}>{STAGE_LABEL[emp.stage]}</span>
       </div>
       <div className="banner info">{banner}</div>

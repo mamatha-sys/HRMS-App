@@ -53,7 +53,7 @@ router.get('/my-departments', (req, res) => {
 const REQUISITION_ROLES = ['super_admin', 'manager', 'assistant_manager', 'stl', 'tl'];
 router.post('/', (req, res) => {
   if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { department_id, title, target_headcount } = req.body || {};
+  const { department_id, title, target_headcount, is_replacement, replacement_for, replacement_target_date, job_description, jd_date } = req.body || {};
   if (!department_id || !title) return res.status(400).json({ error: 'department_id and title are required' });
   const dept = db.prepare('SELECT id, name FROM departments WHERE id = ?').get(department_id);
   if (!dept) return res.status(400).json({ error: 'Unknown department' });
@@ -64,11 +64,17 @@ router.post('/', (req, res) => {
       return res.status(403).json({ error: 'You can only raise a requisition for your own assigned department.' });
     }
   }
+  const replacing = !!is_replacement;
+  if (replacing && !replacement_for?.trim()) return res.status(400).json({ error: 'Replacement requisitions need the departing employee\'s name.' });
 
   const count = Math.max(1, parseInt(target_headcount, 10) || 1);
   const info = db
-    .prepare("INSERT INTO positions (department_id, title, target_headcount, requested_by, approval_status) VALUES (?, ?, ?, ?, 'Pending Approval')")
-    .run(department_id, title, count, req.user.name || null);
+    .prepare(`
+      INSERT INTO positions (department_id, title, target_headcount, requested_by, approval_status, is_replacement, replacement_for, replacement_target_date, job_description, jd_date)
+      VALUES (?, ?, ?, ?, 'Pending Approval', ?, ?, ?, ?, ?)
+    `)
+    .run(department_id, title, count, req.user.name || null, replacing ? 1 : 0, replacing ? replacement_for.trim() : null,
+      replacing ? (replacement_target_date || null) : null, job_description?.trim() || null, jd_date || null);
   res.status(201).json({ position: db.prepare('SELECT * FROM positions WHERE id = ?').get(info.lastInsertRowid) });
 });
 

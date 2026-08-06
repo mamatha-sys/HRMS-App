@@ -44,7 +44,7 @@ export async function sendSms(to, title, message) {
   await client.messages.create({ from: process.env.TWILIO_SMS_FROM, to, body: `${title}: ${message}` });
 }
 
-async function sendWhatsapp(to, title, message) {
+export async function sendWhatsapp(to, title, message) {
   const client = getTwilioClient();
   if (!client) throw new Error('WhatsApp is not configured — set TWILIO_ACCOUNT_SID/AUTH_TOKEN/WHATSAPP_FROM in server/.env');
   if (!process.env.TWILIO_WHATSAPP_FROM) throw new Error('TWILIO_WHATSAPP_FROM is not set in server/.env');
