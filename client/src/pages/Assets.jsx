@@ -529,6 +529,8 @@ function NewAssetScreen({ onDone, onCancel }) {
   const [form, setForm] = useState({ name: '', category: '', cost: '', warranty_expiry: '', serial_number: '' });
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiInfo, setAiInfo] = useState('');
 
   async function submit(e) {
     e.preventDefault(); setError('');
@@ -539,14 +541,40 @@ function NewAssetScreen({ onDone, onCancel }) {
     finally { setSaving(false); }
   }
 
+  // Suggests Category/Cost/Warranty Expiry from just the name typed so far — never touches
+  // Serial Number, since that's specific to the one physical unit being registered and isn't
+  // something the AI could know.
+  async function aiAssist() {
+    setError(''); setAiInfo('');
+    if (!form.name.trim()) { setError('Enter an asset name first, then click AI Assist.'); return; }
+    setAiLoading(true);
+    try {
+      const r = await api.post('/assets/ai-assist', { name: form.name });
+      setForm((f) => ({
+        ...f,
+        category: r.data.category || f.category,
+        cost: r.data.cost != null ? String(r.data.cost) : f.cost,
+        warranty_expiry: r.data.warranty_expiry || f.warranty_expiry
+      }));
+      setAiInfo('AI-suggested Category, Cost and Warranty Expiry filled in below — review and adjust before saving.');
+    } catch (err) { setError(err.response?.data?.error || 'AI Assist could not suggest details.'); }
+    finally { setAiLoading(false); }
+  }
+
   return (
     <div>
       <h1>Add Asset</h1>
       <div className="subtitle">Register a new asset into the inventory.</div>
       {error && <div className="banner error">{error}</div>}
+      {aiInfo && <div className="banner info">{aiInfo}</div>}
       <form onSubmit={submit} className="card" style={{ maxWidth: 480 }}>
         <label className="field-label">Asset Name *</label>
-        <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Dell Latitude 5440" required style={{ marginBottom: 14 }} />
+        <div className="row" style={{ marginBottom: 14, gap: 6 }}>
+          <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="e.g. Dell Latitude 5440" required style={{ flex: 1 }} />
+          <button type="button" onClick={aiAssist} disabled={aiLoading} title="Suggest Category, Cost and Warranty Expiry from the asset name">
+            {aiLoading ? 'Thinking…' : '✨ AI Assist'}
+          </button>
+        </div>
         <label className="field-label">Category</label>
         <input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="e.g. Laptop" style={{ marginBottom: 14 }} />
         <label className="field-label">Serial Number</label>

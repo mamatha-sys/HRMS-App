@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { autoCompleteOffboardingTask } from '../utils/offboarding.js';
+import { suggestAssetInfo } from '../utils/aiAssist.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -194,6 +195,19 @@ router.put('/requests/:id/decide', (req, res) => {
     logHistory(request.asset_id, `${request.type} request rejected`, `By ${req.user.name}`);
   }
   res.json({ request: db.prepare('SELECT * FROM asset_requests WHERE id = ?').get(req.params.id) });
+});
+
+// AI Assist: suggests Category/Cost/Warranty Expiry for the "Add Asset" form from just the name
+// the admin has typed so far — same isHR gate as actually creating the asset, since this is part
+// of that same form. Never invents a serial number (that's specific to the physical unit).
+router.post('/ai-assist', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    const suggestion = await suggestAssetInfo(req.body?.name);
+    res.json(suggestion);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Asset Approval: assets added by Manager/Assistant Manager start Pending Approval and
