@@ -9,3 +9,4 @@ server/data/
 *.db
 *.db-*
 .DS_Store
+server/eng.traineddata

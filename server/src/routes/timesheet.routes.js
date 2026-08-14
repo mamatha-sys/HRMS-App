@@ -3,6 +3,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { sendEmail } from '../utils/channels.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -63,6 +64,22 @@ router.post('/', (req, res) => {
   const info = db.prepare('INSERT INTO timesheet_entries (employee_id, project_id, date, task_description, hours) VALUES (?, ?, ?, ?, ?)')
     .run(me.id, project_id, date, task_description?.trim() || null, h);
   res.status(201).json({ entry: withDetails([db.prepare('SELECT * FROM timesheet_entries WHERE id = ?').get(info.lastInsertRowid)])[0] });
+
+  // Notify the submitter's manager by email that a timesheet entry is waiting on them — best
+  // effort, after responding, never blocks/fails the submission itself. `reporting_manager` is a
+  // free-text name (not a real FK — see employees.routes.js), so this is a best-effort name match,
+  // not a guaranteed lookup; it silently does nothing if there's no match or no email on file.
+  if (me.reporting_manager?.trim()) {
+    const manager = db.prepare('SELECT email FROM employees WHERE name = ?').get(me.reporting_manager.trim());
+    if (manager?.email) {
+      const projectName = db.prepare('SELECT name FROM projects WHERE id = ?').get(project_id)?.name || 'a project';
+      sendEmail(
+        manager.email,
+        `Timesheet entry submitted — ${me.name}`,
+        `Hi,\n\n${me.name} logged ${h} hour(s) on ${date} for ${projectName}${task_description?.trim() ? `:\n"${task_description.trim()}"` : '.'}\n\nIt's awaiting your review in the Timesheet module.`
+      ).catch(() => {});
+    }
+  }
 });
 
 // HR: pending queue + everything, for approval.

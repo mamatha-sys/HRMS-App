@@ -4,6 +4,7 @@ import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 import { isJobBoardConnected, listJobBoards, jobBoardKeys } from '../utils/jobBoards.js';
+import { suggestJobDescription } from '../utils/aiAssist.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -51,6 +52,18 @@ router.get('/my-departments', (req, res) => {
 // other scoped feature in this app (Leave, Attendance, Vacancies). Approval/posting stay
 // HR-tier-only (see /:id/decide and /:id/posting below) — this only affects who can create one.
 const REQUISITION_ROLES = ['super_admin', 'manager', 'assistant_manager', 'stl', 'tl'];
+
+router.post('/ai-assist', async (req, res) => {
+  if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    const dept = req.body?.department_id ? db.prepare('SELECT name FROM departments WHERE id = ?').get(req.body.department_id) : null;
+    const suggestion = await suggestJobDescription(req.body?.title, dept?.name);
+    res.json(suggestion);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.post('/', (req, res) => {
   if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { department_id, title, target_headcount, is_replacement, replacement_for, replacement_target_date, job_description, jd_date } = req.body || {};

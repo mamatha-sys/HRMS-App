@@ -29,6 +29,7 @@ export default function Announcements() {
   const [channels, setChannels] = useState([]);
   const [options, setOptions] = useState({ departments: [], employees: [] });
   const [deliveries, setDeliveries] = useState([]);
+  const [aiLoading, setAiLoading] = useState(false);
 
   function load() { api.get('/announcements').then((r) => setAnnouncements(r.data.announcements)).catch(() => setError('Could not load announcements.')); }
   useEffect(load, []);
@@ -42,6 +43,16 @@ export default function Announcements() {
   function toggleChannel(key) { setChannels((prev) => (prev.includes(key) ? prev.filter((c) => c !== key) : [...prev, key])); }
   function toggleEmployee(id) { setEmployeeIds((prev) => (prev.includes(id) ? prev.filter((e) => e !== id) : [...prev, id])); }
 
+  async function aiAssist() {
+    setError('');
+    if (!form.title.trim()) { setError('Enter a title first, then click AI Assist.'); return; }
+    setAiLoading(true);
+    try {
+      const r = await api.post('/announcements/ai-assist', { title: form.title, category: form.category });
+      setForm((f) => ({ ...f, body: r.data.body || f.body }));
+    } catch (err) { setError(err.response?.data?.error || 'AI Assist could not draft an announcement.'); }
+    finally { setAiLoading(false); }
+  }
   async function submit(e) {
     e.preventDefault(); setError('');
     if (!form.title.trim() || !form.body.trim()) { setError('Title and body are both required.'); return; }
@@ -110,8 +121,13 @@ export default function Announcements() {
             <form onSubmit={submit}>
               <label className="field-label">Title *</label>
               <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required style={{ marginBottom: 10 }} />
+              <div className="row" style={{ marginBottom: 6 }}>
+                <button type="button" onClick={aiAssist} disabled={aiLoading} title="Draft the body from the title and category">
+                  {aiLoading ? 'Thinking…' : '✨ AI Assist'}
+                </button>
+              </div>
               <label className="field-label">Body *</label>
-              <input value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} required style={{ marginBottom: 10 }} />
+              <textarea value={form.body} onChange={(e) => setForm({ ...form, body: e.target.value })} required rows={4} style={{ marginBottom: 10, width: '100%' }} />
               <label className="field-label">Category</label>
               <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} style={{ marginBottom: 10 }}>
                 {['General', 'Policy', 'Event', 'Holiday'].map((c) => <option key={c} value={c}>{c}</option>)}

@@ -6,6 +6,9 @@ import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames }
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
 import { recomputeOffboardingClearance } from '../utils/offboarding.js';
 import { sendEmail, sendWhatsapp } from '../utils/channels.js';
+import { generateInterviewQuestions } from '../utils/aiAssist.js';
+import { extractResumeText, screenResume } from '../utils/resumeScreen.js';
+import crypto from 'node:crypto';
 
 const router = Router();
 router.use(requireAuth);
@@ -218,10 +221,85 @@ router.get('/overview', (req, res) => {
 
 const CANDIDATE_PROFILE_FIELDS = ['email', 'phone', 'experience_years', 'current_ctc', 'expected_ctc', 'notice_period', 'resume_data_url', 'resume_name', 'linkedin_url', 'location'];
 
-router.post('/candidates', (req, res) => {
+// Runs once, right after candidate creation, only when a resume was attached — reads it and asks
+// the AI whether this looks like a fit worth auto-inviting to interview, or something a human
+// should glance at first. Best-effort like everything else here: a screening failure defaults to
+// "proceed" (see resumeScreen.js) so a flaky model never silently blocks a real candidate.
+async function runResumeScreen(candidate) {
+  if (!candidate.resume_data_url) return null;
+  try {
+    const position = candidate.position_id ? db.prepare('SELECT title, job_description FROM positions WHERE id = ?').get(candidate.position_id) : null;
+    const text = await extractResumeText(candidate.resume_data_url, candidate.resume_name);
+    const result = await screenResume(text, position?.title, position?.job_description);
+    db.prepare('UPDATE candidates SET resume_screen_score = ?, resume_screen_recommendation = ?, resume_screen_summary = ? WHERE id = ?')
+      .run(result.score, result.recommendation, result.summary, candidate.id);
+    return result;
+  } catch (err) {
+    // Extraction failure (unsupported format, unreadable file) — same "don't block on a technical
+    // hiccup" reasoning as a scoring failure, just record why for HR's benefit.
+    db.prepare('UPDATE candidates SET resume_screen_recommendation = ?, resume_screen_summary = ? WHERE id = ?')
+      .run('proceed', `Could not screen resume automatically (${err.message}).`, candidate.id);
+    return { recommendation: 'proceed' };
+  }
+}
+
+// After creating the candidate, an AI video-interview invite is generated and emailed
+// automatically (no HR review step, per how this was scoped) — but neither AI question
+// generation nor the email send can ever fail the candidate creation itself; both are wrapped and
+// best-effort, since the candidate record is the source of truth and must always get created.
+async function createInterviewInvite(candidate, customQuestions) {
+  const position = candidate.position_id ? db.prepare('SELECT title, job_description FROM positions WHERE id = ?').get(candidate.position_id) : null;
+  const jobTitle = position?.title || 'Open Position';
+
+  // HR can supply their own question set instead of AI-generated ones — skips the AI call
+  // entirely when provided, since there's nothing for it to generate.
+  let questions = customQuestions?.length ? customQuestions : null;
+  if (!questions) {
+    try {
+      questions = await generateInterviewQuestions(jobTitle, position?.job_description);
+    } catch {
+      questions = null; // generateInterviewQuestions already falls back internally; null only if it threw before reaching its own fallback
+    }
+  }
+  if (!questions?.length) return;
+
+  const token = crypto.randomUUID();
+  db.prepare('INSERT INTO candidate_interviews (candidate_id, token, questions) VALUES (?, ?, ?)')
+    .run(candidate.id, token, JSON.stringify(questions));
+
+  if (!candidate.email) return;
+  const link = `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${token}`;
+  try {
+    await sendEmail(
+      candidate.email,
+      `Interview invitation — ${jobTitle}`,
+      `Hi ${candidate.name},\n\nThank you for applying for the ${jobTitle} position. Please complete a short video interview at your convenience using the link below:\n\n${link}\n\nYou'll need a working camera and microphone. It takes about 10-15 minutes.\n\nBest of luck!`
+    );
+  } catch {
+    // Email not configured / send failed — the interview link still exists and works if shared
+    // manually from the candidate's record; this just silently skips the auto-email step.
+  }
+}
+
+const REAPPLY_COOLDOWN_DAYS = 90; // ~3 months
+
+router.post('/candidates', async (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { name, position_id, panel, source_id } = req.body || {};
+  const { name, position_id, panel, source_id, interview_questions } = req.body || {};
+  const customQuestions = Array.isArray(interview_questions) ? interview_questions.map((q) => q?.toString().trim()).filter(Boolean) : null;
   if (!name) return res.status(400).json({ error: 'name is required' });
+
+  // Same email applying again within the cooldown window isn't accepted — surfaced as a clear
+  // validation error (with when they last applied) rather than silently creating a duplicate.
+  const email = req.body?.email?.toString().trim();
+  if (email) {
+    const recent = db.prepare("SELECT created_at FROM candidates WHERE email = ? AND created_at >= datetime('now', ?) ORDER BY created_at DESC LIMIT 1")
+      .get(email, `-${REAPPLY_COOLDOWN_DAYS} days`);
+    if (recent) {
+      return res.status(400).json({ error: `This email already applied on ${recent.created_at.slice(0, 10)} — reapplying within ${REAPPLY_COOLDOWN_DAYS} days (~3 months) of a previous application isn't accepted.` });
+    }
+  }
+
   const validSource = source_id && activeSources().some((s) => s.id === Number(source_id)) ? Number(source_id) : null;
   const start = firstRound();
   const profile = CANDIDATE_PROFILE_FIELDS.map((f) => req.body?.[f]?.toString().trim() || null);
@@ -229,7 +307,61 @@ router.post('/candidates', (req, res) => {
     INSERT INTO candidates (name, position_id, panel, round_id, source_id, ${CANDIDATE_PROFILE_FIELDS.join(', ')})
     VALUES (?, ?, ?, ?, ?, ${CANDIDATE_PROFILE_FIELDS.map(() => '?').join(', ')})
   `).run(name.trim(), position_id || null, panel || null, start ? start.id : null, validSource, ...profile);
-  res.status(201).json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(info.lastInsertRowid) });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(info.lastInsertRowid);
+  res.status(201).json({ candidate });
+  // Fire-and-forget, after responding — HR shouldn't wait on AI+email for the create call to
+  // return. Resume screening (if a resume was attached) runs first; only a 'review' verdict holds
+  // the auto-invite back for HR to send manually via POST /candidates/:id/send-interview-invite.
+  (async () => {
+    const screen = await runResumeScreen(candidate);
+    if (screen?.recommendation === 'review') return;
+    await createInterviewInvite(candidate, customQuestions);
+  })().catch(() => {});
+});
+
+// Manual override for when resume screening recommended a human look first — HR reviewed and
+// wants to send the AI interview invite anyway. Also works as a plain "(re)send invite" for any
+// candidate that doesn't have one yet (e.g. no resume was attached, so screening never ran).
+router.post('/candidates/:id/send-interview-invite', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  res.json({ ok: true });
+  createInterviewInvite(candidate).catch(() => {});
+});
+
+// Deletes just the stored video for one interview answer (transcript/question/score are kept —
+// this is for reclaiming storage or a privacy request, not undoing the interview itself). The
+// candidate's own recorded video, once HR has reviewed it, doesn't need to stay forever.
+router.delete('/candidates/interview-answers/:answerId/video', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const info = db.prepare('UPDATE candidate_interview_answers SET video_data_url = NULL WHERE id = ?').run(req.params.answerId);
+  if (info.changes === 0) return res.status(404).json({ error: 'Answer not found' });
+  res.json({ ok: true });
+});
+
+// AI video interview status/results for one candidate — the most recent invite if more than one
+// ever existed (there shouldn't normally be more than one, but nothing prevents re-inviting).
+router.get('/candidates/:id/interview', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const interview = db.prepare('SELECT * FROM candidate_interviews WHERE candidate_id = ? ORDER BY id DESC LIMIT 1').get(req.params.id);
+  if (!interview) return res.json({ interview: null });
+  const answers = db.prepare('SELECT id, question_index, question, transcript, video_data_url FROM candidate_interview_answers WHERE interview_id = ? ORDER BY question_index').all(interview.id);
+  res.json({
+    interview: {
+      status: interview.status,
+      totalQuestions: JSON.parse(interview.questions).length,
+      currentIndex: interview.current_index,
+      score: interview.score,
+      communicationScore: interview.communication_score,
+      eligible: interview.eligible === null ? null : !!interview.eligible,
+      summary: interview.summary,
+      createdAt: interview.created_at,
+      completedAt: interview.completed_at,
+      link: `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${interview.token}`,
+      answers
+    }
+  });
 });
 
 // Edit a candidate's own profile fields (contact/experience/compensation/resume/links) — kept

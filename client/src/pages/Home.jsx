@@ -58,7 +58,7 @@ export default function Home() {
     <div className="home-page">
       <nav className="home-navbar">
         <div className="home-wordmark">
-          {branding?.company_logo && <img src={branding.company_logo} alt="" className="brand-logo" style={{ height: 28 }} />}
+          {branding?.company_logo && <img src={branding.company_logo} alt="" className="brand-logo" />}
           Teamlink
         </div>
         <button className="home-login-btn" onClick={() => navigate('/login')}>Login</button>

@@ -3,7 +3,7 @@ import db from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { getSetting, getSettings, setSetting } from '../utils/integrationSettings.js';
 import { notifyWebhooks, recentWebhookDeliveries } from '../utils/webhooks.js';
-import { recentDeliveries } from '../utils/channels.js';
+import { recentDeliveries, sendEmail } from '../utils/channels.js';
 import { processPunchLine, mapPunch } from '../utils/biometricPunch.js';
 import * as googleCalendar from '../utils/googleCalendar.js';
 import { listJobBoards, connectJobBoard, disconnectJobBoard, addJobBoard, jobBoardKeys } from '../utils/jobBoards.js';
@@ -46,15 +46,60 @@ router.get('/overview', (req, res) => {
   });
 });
 
-// ---------- Email / SMS / WhatsApp (already live — this is a read-only status view) ----------
+// ---------- Email / SMS / WhatsApp ----------
+// Credentials can come from either the DB (set via the form below, so any company running this
+// app can self-configure their own provider through the UI — no server/.env access needed) or
+// env vars (for existing deployments set up before this UI existed). `cfg` checks both, same
+// precedence as channels.js itself.
+const cfg = (dbKey, envKey) => getSetting(dbKey) || process.env[envKey];
+
 router.get('/channels/status', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   res.json({
-    email: { configured: !!process.env.EMAIL_SMTP_HOST, envVars: ['EMAIL_SMTP_HOST', 'EMAIL_SMTP_USER', 'EMAIL_SMTP_PASS', 'EMAIL_FROM'] },
-    sms: { configured: !!process.env.TWILIO_ACCOUNT_SID && !!process.env.TWILIO_SMS_FROM, envVars: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_SMS_FROM'] },
-    whatsapp: { configured: !!process.env.TWILIO_ACCOUNT_SID && !!process.env.TWILIO_WHATSAPP_FROM, envVars: ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_WHATSAPP_FROM'] },
+    email: { configured: !!cfg('email_smtp_host', 'EMAIL_SMTP_HOST') && !!cfg('email_smtp_user', 'EMAIL_SMTP_USER') && !!cfg('email_smtp_pass', 'EMAIL_SMTP_PASS') },
+    sms: { configured: !!cfg('twilio_account_sid', 'TWILIO_ACCOUNT_SID') && !!cfg('twilio_sms_from', 'TWILIO_SMS_FROM') },
+    whatsapp: { configured: !!cfg('twilio_account_sid', 'TWILIO_ACCOUNT_SID') && !!cfg('twilio_whatsapp_from', 'TWILIO_WHATSAPP_FROM') },
     recentDeliveries: recentDeliveries(20)
   });
+});
+
+// Field names in the DB-settings form. Secret fields are never sent back to the browser in GET —
+// only whether one is currently set — so a saved password/token can't leak back out over the wire
+// just by opening this screen; leaving a secret field blank on save keeps the existing value.
+const CHANNEL_FIELDS = ['email_smtp_host', 'email_smtp_port', 'email_smtp_secure', 'email_smtp_user', 'email_smtp_pass', 'email_from', 'twilio_account_sid', 'twilio_auth_token', 'twilio_sms_from', 'twilio_whatsapp_from'];
+const CHANNEL_SECRET_FIELDS = ['email_smtp_pass', 'twilio_auth_token'];
+
+router.get('/channels/settings', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const out = {};
+  CHANNEL_FIELDS.forEach((f) => {
+    const value = getSetting(f);
+    out[f] = CHANNEL_SECRET_FIELDS.includes(f) ? '' : (value || '');
+    if (CHANNEL_SECRET_FIELDS.includes(f)) out[`${f}_set`] = !!value;
+  });
+  res.json(out);
+});
+
+router.post('/channels/test-email', async (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    await sendEmail(req.body?.to, 'HRMS test email', 'This is a test email from your HRMS Integrations settings — if you received this, email delivery is working correctly.');
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.put('/channels/settings', (req, res) => {
+  if (!isSuperAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  CHANNEL_FIELDS.forEach((f) => {
+    if (req.body?.[f] === undefined) return;
+    // Blank secret field = "leave the saved one alone", not "clear it" — otherwise every save
+    // that doesn't re-type the password would silently wipe it out.
+    if (CHANNEL_SECRET_FIELDS.includes(f) && !req.body[f]) return;
+    setSetting(f, req.body[f]?.toString() ?? '');
+  });
+  res.json({ ok: true });
 });
 
 // ---------- Biometric Device Integration (eSSL / ADMS-iClock protocol) ----------

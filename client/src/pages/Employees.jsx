@@ -19,7 +19,7 @@ const STAGE_LABEL = { draft: 'Draft', assigned: 'Assigned', submitted: 'Submitte
 const STAGE_CLASS = { draft: 'pending', assigned: 'info', submitted: 'present', locked: 'locked' };
 
 const EMPTY_FORM = {
-  employee_code: '', name: '', email: '', password: '', phone: '', phone_verified: false, photo: '', date_of_birth: '',
+  employee_code: '', name: '', email: '', email_verified: false, password: '', phone: '', phone_verified: false, photo: '', date_of_birth: '',
   emergency_contact_name: '', emergency_contact_relation: '', emergency_contact_number: '',
   address_type: '', address_line1: '', address_line2: '',
   address_city: '', address_district: '', address_state: '', address_country: '', address_pincode: '',
@@ -57,6 +57,19 @@ function sanitizeFieldValue(key, value) {
   return max ? v.slice(0, max) : v;
 }
 
+// Indian bank account numbers vary by bank (no universal checksum) but are always 9–18 digits —
+// this is a format sanity check, not real-time confirmation the account exists at the bank (that
+// would need a paid penny-drop/bank-verification API, not something available for free).
+function bankAccountHint(value) {
+  if (!value) return null;
+  const valid = value.length >= 9 && value.length <= 18;
+  return (
+    <div className="note" style={{ color: valid ? '#1E8E5A' : '#B3401E', marginTop: 2 }}>
+      {valid ? `✓ Valid format (${value.length} digits)` : `⚠ Invalid — account numbers are 9–18 digits (currently ${value.length})`}
+    </div>
+  );
+}
+
 const SHIFT_OPTIONS = ['General (9:00 AM – 6:00 PM)'];
 
 // Document names offered when attaching a file — scoped to Fresher vs Experienced so, e.g., a
@@ -72,10 +85,14 @@ function docNameOptionsFor(employmentType) {
 }
 
 // Shared by the HR edit form and the employee's own self-service form: pick what a document IS
-// before attaching it, rather than defaulting its label to the raw filename.
-function DocumentsEditor({ documents, employmentType, editable, onAdd, onRename, onRemove }) {
+// before attaching it, rather than defaulting its label to the raw filename. `employeeName` is
+// the currently-typed name on the form (not necessarily saved yet) — used for the AI "Verify
+// name" check, which cross-reads the document's own text via OCR rather than trusting the label.
+function DocumentsEditor({ documents, employmentType, editable, employeeName, onAdd, onRename, onRemove }) {
   const [pickName, setPickName] = useState('');
   const [customName, setCustomName] = useState('');
+  const [verifying, setVerifying] = useState(null); // index currently being checked
+  const [results, setResults] = useState({}); // index -> { match, note, extractedText } | { error }
   const options = docNameOptionsFor(employmentType);
   const resolvedName = (pickName === '__other__' ? customName : pickName).trim();
 
@@ -86,16 +103,42 @@ function DocumentsEditor({ documents, employmentType, editable, onAdd, onRename,
     setPickName(''); setCustomName('');
   }
 
+  async function verifyDoc(idx) {
+    if (!employeeName?.trim()) { setResults((r) => ({ ...r, [idx]: { error: 'Enter the employee name first.' } })); return; }
+    setVerifying(idx);
+    setResults((r) => ({ ...r, [idx]: null }));
+    try {
+      const res = await api.post('/employees/verify-document', { name: employeeName, dataUrl: documents[idx].dataUrl });
+      setResults((r) => ({ ...r, [idx]: res.data }));
+    } catch (err) {
+      setResults((r) => ({ ...r, [idx]: { error: err.response?.data?.error || 'Could not verify this document.' } }));
+    } finally {
+      setVerifying(null);
+    }
+  }
+
   return (
     <div>
       {documents.length === 0 && <div className="note" style={{ marginBottom: 6 }}>No documents added yet.</div>}
-      {documents.map((doc, idx) => (
-        <div key={idx} className="row" style={{ marginBottom: 6 }}>
-          <input value={doc.name} disabled={!editable} onChange={(e) => onRename(idx, e.target.value)} placeholder="Document label" style={{ flex: '2 1 200px' }} />
-          <a href={doc.dataUrl} download={doc.name} className="crumb" style={{ flexShrink: 0 }}>view</a>
-          {editable && <button type="button" onClick={() => onRemove(idx)} style={{ flexShrink: 0 }}>Remove</button>}
-        </div>
-      ))}
+      {documents.map((doc, idx) => {
+        const result = results[idx];
+        return (
+          <div key={idx} style={{ marginBottom: 6 }}>
+            <div className="row">
+              <input value={doc.name} disabled={!editable} onChange={(e) => onRename(idx, e.target.value)} placeholder="Document label" style={{ flex: '2 1 200px' }} />
+              <a href={doc.dataUrl} download={doc.name} className="crumb" style={{ flexShrink: 0 }}>view</a>
+              <button type="button" onClick={() => verifyDoc(idx)} disabled={verifying === idx} style={{ flexShrink: 0 }} title="AI-check whether this document's text matches the typed name">
+                {verifying === idx ? 'Checking…' : '🔍 Verify name'}
+              </button>
+              {editable && <button type="button" onClick={() => onRemove(idx)} style={{ flexShrink: 0 }}>Remove</button>}
+            </div>
+            {result?.error && <div className="note" style={{ color: '#B3401E', marginTop: 2 }}>⚠ {result.error}</div>}
+            {result && !result.error && result.match === true && <div className="note" style={{ color: '#1E8E5A', marginTop: 2 }}>✓ Name matches this document{result.note ? ` — ${result.note}` : ''}</div>}
+            {result && !result.error && result.match === false && <div className="note" style={{ color: '#B3401E', marginTop: 2 }}>⚠ Possible name mismatch{result.note ? ` — ${result.note}` : ''}</div>}
+            {result && !result.error && result.match === null && <div className="note" style={{ color: '#8A5A0A', marginTop: 2 }}>? {result.note}</div>}
+          </div>
+        );
+      })}
       {editable && (
         <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
           <select value={pickName} onChange={(e) => setPickName(e.target.value)} style={{ flex: '1 1 200px' }}>
@@ -143,6 +186,52 @@ function PhoneVerification({ employeeId, phone, verified, editable }) {
     setMsg('');
     try {
       await api.post(`/employees/${employeeId}/phone/verify-otp`, { otp });
+      setOtpSent(false); setOtp(''); setJustVerified(true);
+    } catch (err) { setMsg(err.response?.data?.error || 'Could not verify OTP.'); }
+  }
+
+  return (
+    <span style={{ marginLeft: 6, display: 'inline-flex', gap: 4, alignItems: 'center', flexWrap: 'wrap' }}>
+      {!otpSent
+        ? <button type="button" onClick={sendOtp} disabled={sending}>{sending ? 'Sending...' : 'Send OTP'}</button>
+        : (
+          <>
+            <input value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} placeholder="OTP" style={{ width: 70 }} />
+            <button type="button" onClick={verifyOtp}>Verify</button>
+          </>
+        )}
+      {msg && <span className="note">{msg}</span>}
+    </span>
+  );
+}
+
+// Same shape as PhoneVerification, just for an email address — an OTP mailed to the address on
+// file rather than texted. Re-verification is required after any edit to it (handled server-side:
+// changing the email clears email_verified).
+function EmailVerification({ employeeId, email, verified, editable }) {
+  const [otpSent, setOtpSent] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [msg, setMsg] = useState('');
+  const [sending, setSending] = useState(false);
+  const [justVerified, setJustVerified] = useState(false);
+
+  if (!editable) return null;
+  if (verified || justVerified) return <span className="status-tag present" style={{ marginLeft: 6 }}>Verified</span>;
+  if (!email) return null;
+
+  async function sendOtp() {
+    setMsg(''); setSending(true);
+    try {
+      const res = await api.post(`/employees/${employeeId}/email/send-otp`);
+      setOtpSent(true);
+      setMsg(res.data.message);
+    } catch (err) { setMsg(err.response?.data?.error || 'Could not send OTP.'); }
+    finally { setSending(false); }
+  }
+  async function verifyOtp() {
+    setMsg('');
+    try {
+      await api.post(`/employees/${employeeId}/email/verify-otp`, { otp });
       setOtpSent(false); setOtp(''); setJustVerified(true);
     } catch (err) { setMsg(err.response?.data?.error || 'Could not verify OTP.'); }
   }
@@ -527,7 +616,12 @@ export default function Employees() {
     return (
       <div>
         <label className="field-label">{labelFor(key, label)}</label>
-        <input type={type} value={form[key]} onChange={(e) => setForm({ ...form, [key]: sanitizeFieldValue(key, e.target.value) })} />
+        <span className="row" style={{ alignItems: 'center' }}>
+          <input type={type} value={form[key]} style={{ flex: 1 }}
+            onChange={(e) => setForm({ ...form, [key]: sanitizeFieldValue(key, e.target.value), ...(key === 'email' ? { email_verified: false } : {}) })} />
+          {key === 'email' && <EmailVerification employeeId={editingId} email={form.email} verified={form.email_verified} editable />}
+        </span>
+        {key === 'bank_account_number' && bankAccountHint(form[key])}
       </div>
     );
   };
@@ -960,7 +1054,7 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, teams
       {!hidden('documents') && (
         <>
           <div className="section-label" style={{ paddingLeft: 0 }}>{label('documents', 'Documents')} <span className="note">(choose what each document is before attaching it)</span></div>
-          <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable
+          <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable employeeName={form.name}
             onAdd={handleAddDocuments} onRename={renameDocument} onRemove={removeDocument} />
         </>
       )}
@@ -986,6 +1080,7 @@ function EmployeeDetail({ emp }) {
         <div>Shift: <strong>{emp.shift || '—'}</strong></div>
         <div>Reporting manager: <strong>{emp.reporting_manager || '—'}</strong></div>
         <div>Phone: <strong>{emp.phone ? `+91 ${emp.phone}` : '—'}</strong>{emp.phone && (emp.phone_verified ? <span className="status-tag present" style={{ marginLeft: 6 }}>Verified</span> : <span className="status-tag pending" style={{ marginLeft: 6 }}>Unverified</span>)}</div>
+        <div>Email: <strong>{emp.email || '—'}</strong>{emp.email && (emp.email_verified ? <span className="status-tag present" style={{ marginLeft: 6 }}>Verified</span> : <span className="status-tag pending" style={{ marginLeft: 6 }}>Unverified</span>)}</div>
         <div>Date of birth: <strong>{emp.date_of_birth || '—'}</strong></div>
         <div>Address{emp.address_type ? ` (${emp.address_type})` : ''}: <strong>{addr || '—'}</strong></div>
         <div>Emergency: <strong>{emp.emergency_contact_name ? `${emp.emergency_contact_name} (${emp.emergency_contact_relation}) — ${emp.emergency_contact_number}` : '—'}</strong></div>
@@ -1080,7 +1175,12 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
     return (
       <div>
         <label className="field-label">{label(key, fallbackLabel)}</label>
-        <input type={type} value={form[key]} disabled={!editable} onChange={(e) => setForm({ ...form, [key]: sanitizeFieldValue(key, e.target.value) })} />
+        <span className="row" style={{ alignItems: 'center' }}>
+          <input type={type} value={form[key]} disabled={!editable} style={{ flex: 1 }}
+            onChange={(e) => setForm({ ...form, [key]: sanitizeFieldValue(key, e.target.value), ...(key === 'email' ? { email_verified: false } : {}) })} />
+          {key === 'email' && <EmailVerification employeeId={emp.id} email={form.email} verified={form.email_verified} editable={editable} />}
+        </span>
+        {key === 'bank_account_number' && bankAccountHint(form[key])}
       </div>
     );
   };
@@ -1231,7 +1331,7 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
         {!hidden('documents') && (
           <>
             <div className="section-label" style={{ paddingLeft: 0 }}>{label('documents', 'Documents')}</div>
-            <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable={editable}
+            <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable={editable} employeeName={form.name}
               onAdd={handleAddDocuments} onRename={renameDocument} onRemove={removeDocument} />
           </>
         )}

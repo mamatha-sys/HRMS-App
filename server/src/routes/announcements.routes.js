@@ -6,6 +6,7 @@ import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils
 import { notifyAll, employeesForTarget } from '../utils/notify.js';
 import { dispatchChannels, recentDeliveries } from '../utils/channels.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
+import { suggestAnnouncementBody } from '../utils/aiAssist.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -68,6 +69,16 @@ router.get('/compose-options', (req, res) => {
 router.get('/deliveries', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   res.json({ deliveries: recentDeliveries(50) });
+});
+
+router.post('/ai-assist', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    const suggestion = await suggestAnnouncementBody(req.body?.title, req.body?.category);
+    res.json(suggestion);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 router.post('/', async (req, res) => {

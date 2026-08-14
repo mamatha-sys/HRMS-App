@@ -917,7 +917,10 @@ function migrate() {
     ['email', 'TEXT'], ['phone', 'TEXT'], ['experience_years', 'TEXT'],
     ['current_ctc', 'TEXT'], ['expected_ctc', 'TEXT'], ['notice_period', 'TEXT'],
     ['resume_data_url', 'TEXT'], ['resume_name', 'TEXT'],
-    ['linkedin_url', 'TEXT'], ['location', 'TEXT']
+    ['linkedin_url', 'TEXT'], ['location', 'TEXT'],
+    // AI resume screen, run once when a resume is attached and before the interview invite goes
+    // out — recommendation is 'proceed'/'review'/NULL (not screened, e.g. no resume was given).
+    ['resume_screen_score', 'INTEGER'], ['resume_screen_recommendation', 'TEXT'], ['resume_screen_summary', 'TEXT']
   ].forEach(([col, type]) => { if (!candCols.includes(col)) db.exec(`ALTER TABLE candidates ADD COLUMN ${col} ${type}`); });
 
   // Job requisitions: replacement-hire tracking (who's leaving, target date to backfill them)
@@ -929,6 +932,43 @@ function migrate() {
   if (!posCols2.includes('replacement_target_date')) db.exec('ALTER TABLE positions ADD COLUMN replacement_target_date TEXT');
   if (!posCols2.includes('job_description')) db.exec('ALTER TABLE positions ADD COLUMN job_description TEXT');
   if (!posCols2.includes('jd_date')) db.exec('ALTER TABLE positions ADD COLUMN jd_date TEXT');
+
+  // --- AI video interview: one row per candidate invited to the async AI interview (public,
+  // token-based link — the candidate never logs in). `questions` is a JSON array generated once
+  // at invite time from the position's job_description; `current_index` tracks progress so a
+  // candidate can resume if they close the tab. Scoring fields are filled in once by the AI after
+  // the last answer is submitted, never before — HR should never see a partial/premature score.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS candidate_interviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+      token TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','in_progress','completed')),
+      questions TEXT NOT NULL,
+      current_index INTEGER NOT NULL DEFAULT 0,
+      score INTEGER,
+      summary TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS candidate_interview_answers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      interview_id INTEGER NOT NULL REFERENCES candidate_interviews(id) ON DELETE CASCADE,
+      question_index INTEGER NOT NULL,
+      question TEXT NOT NULL,
+      transcript TEXT,
+      video_data_url TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // AI interview scoring, split out beyond the single overall `score`: a dedicated communication
+  // score, and a plain pass/fail-style eligibility recommendation (NULL when scoring didn't
+  // produce a usable result, matching how `score` itself already handles that case).
+  const civCols = db.prepare('PRAGMA table_info(candidate_interviews)').all().map((c) => c.name);
+  if (!civCols.includes('communication_score')) db.exec('ALTER TABLE candidate_interviews ADD COLUMN communication_score INTEGER');
+  if (!civCols.includes('eligible')) db.exec('ALTER TABLE candidate_interviews ADD COLUMN eligible INTEGER');
 
   // --- Onboarding / offboarding checklists: named responsibilities per new hire / exit,
   // each independently checkable, driving the overall onboarding_pct / clearance counts.
@@ -1651,6 +1691,10 @@ function migrateTeamsAndScopes() {
   if (!empCols.includes('phone_verified')) db.exec('ALTER TABLE employees ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0');
   if (!empCols.includes('phone_otp_code')) db.exec('ALTER TABLE employees ADD COLUMN phone_otp_code TEXT');
   if (!empCols.includes('phone_otp_expires')) db.exec('ALTER TABLE employees ADD COLUMN phone_otp_expires TEXT');
+  // Email verification — same OTP shape as phone, just delivered by email instead of SMS.
+  if (!empCols.includes('email_verified')) db.exec('ALTER TABLE employees ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0');
+  if (!empCols.includes('email_otp_code')) db.exec('ALTER TABLE employees ADD COLUMN email_otp_code TEXT');
+  if (!empCols.includes('email_otp_expires')) db.exec('ALTER TABLE employees ADD COLUMN email_otp_expires TEXT');
 
   // Statutory identifiers shown on a real payslip alongside the existing PAN number.
   if (!empCols.includes('uan_number')) db.exec('ALTER TABLE employees ADD COLUMN uan_number TEXT');

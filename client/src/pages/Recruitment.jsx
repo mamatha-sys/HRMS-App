@@ -233,7 +233,10 @@ function HRRecruitment({ compact, sectionLabel }) {
     is_replacement: false, replacement_for: '', replacement_target_date: '',
     job_description: '', jd_date: ''
   });
+  const [jdAiLoading, setJdAiLoading] = useState(false);
   const [showCandForm, setShowCandForm] = useState(false);
+  const [interviewMode, setInterviewMode] = useState('ai'); // 'ai' = AI generates the questions | 'custom' = HR supplies their own
+  const [customQuestionsText, setCustomQuestionsText] = useState('');
   const [candForm, setCandForm] = useState({
     name: '', position_id: '', panel: '', source_id: '',
     email: '', phone: '', experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '',
@@ -243,6 +246,9 @@ function HRRecruitment({ compact, sectionLabel }) {
   const [messageFor, setMessageFor] = useState(null); // candidate id currently composing a Send Update message
   const [messageDraft, setMessageDraft] = useState({ channel: 'email', subject: '', message: '' });
   const [messageStatus, setMessageStatus] = useState('');
+  const [interviewData, setInterviewData] = useState({}); // candidate id -> { interview } | { loading: true } | { error }
+  const [selectedCandidateId, setSelectedCandidateId] = useState(null); // candidate id currently open in the detail view (list vs. detail split)
+  const [inviteStatus, setInviteStatus] = useState('');
   const navigate = useNavigate();
   const [showHireForm, setShowHireForm] = useState(false);
   const [hireForm, setHireForm] = useState({ employee_id: '', start_date: '' });
@@ -312,6 +318,16 @@ function HRRecruitment({ compact, sectionLabel }) {
     });
   }
 
+  async function aiAssistJd() {
+    setError('');
+    if (!reqForm.title.trim()) { setError('Enter a position title first, then click AI Assist.'); return; }
+    setJdAiLoading(true);
+    try {
+      const r = await api.post('/positions/ai-assist', { title: reqForm.title, department_id: reqForm.department_id });
+      setReqForm((f) => ({ ...f, job_description: r.data.job_description || f.job_description }));
+    } catch (err) { setError(err.response?.data?.error || 'AI Assist could not draft a job description.'); }
+    finally { setJdAiLoading(false); }
+  }
   async function submitRequisition(e) {
     e.preventDefault(); setError('');
     try {
@@ -344,9 +360,15 @@ function HRRecruitment({ compact, sectionLabel }) {
     e.preventDefault(); setError('');
     try {
       const resume = candResume ? await readFileAsDataUrl(candResume) : undefined;
-      await api.post('/recruitment/candidates', { ...candForm, resume_data_url: resume, resume_name: candResume?.name });
+      const customQuestions = interviewMode === 'custom'
+        ? customQuestionsText.split('\n').map((q) => q.trim()).filter(Boolean)
+        : undefined;
+      if (interviewMode === 'custom' && (!customQuestions || customQuestions.length < 1)) {
+        setError('Enter at least one interview question, or switch back to AI-generated.'); return;
+      }
+      await api.post('/recruitment/candidates', { ...candForm, resume_data_url: resume, resume_name: candResume?.name, interview_questions: customQuestions });
       setCandForm({ name: '', position_id: '', panel: '', source_id: '', email: '', phone: '', experience_years: '', current_ctc: '', expected_ctc: '', notice_period: '', linkedin_url: '', location: '' });
-      setCandResume(null); setShowCandForm(false); load();
+      setCandResume(null); setShowCandForm(false); setInterviewMode('ai'); setCustomQuestionsText(''); load();
     } catch (err) { setError(err.response?.data?.error || 'Could not add candidate.'); }
   }
   // Hired candidates go here rather than being auto-created — a real employee record needs
@@ -367,6 +389,31 @@ function HRRecruitment({ compact, sectionLabel }) {
       await api.post(`/recruitment/candidates/${id}/message`, messageDraft);
       setMessageStatus('Sent.'); setTimeout(() => { setMessageFor(null); setMessageStatus(''); }, 1200);
     } catch (err) { setMessageStatus(err.response?.data?.error || 'Could not send message.'); }
+  }
+  function loadInterviewData(id) {
+    setInterviewData((d) => ({ ...d, [id]: { loading: true } }));
+    api.get(`/recruitment/candidates/${id}/interview`)
+      .then((r) => setInterviewData((d) => ({ ...d, [id]: { interview: r.data.interview } })))
+      .catch((err) => setInterviewData((d) => ({ ...d, [id]: { error: err.response?.data?.error || 'Could not load interview.' } })));
+  }
+  function openCandidateDetail(id) {
+    setSelectedCandidateId(id);
+    setMessageFor(null); setInviteStatus('');
+    if (!interviewData[id]) loadInterviewData(id);
+  }
+  async function sendInterviewInviteManually(id) {
+    setInviteStatus('Sending…');
+    try {
+      await api.post(`/recruitment/candidates/${id}/send-interview-invite`);
+      setInviteStatus('Invite queued — it can take a few moments to generate and send.');
+      setTimeout(() => loadInterviewData(id), 4000);
+    } catch (err) { setInviteStatus(err.response?.data?.error || 'Could not send invite.'); }
+  }
+  async function deleteAnswerVideo(candidateId, answerId) {
+    try {
+      await api.delete(`/recruitment/candidates/interview-answers/${answerId}/video`);
+      loadInterviewData(candidateId);
+    } catch (err) { setError(err.response?.data?.error || 'Could not delete video.'); }
   }
   async function advanceCandidate(id) {
     setError('');
@@ -517,12 +564,17 @@ function HRRecruitment({ compact, sectionLabel }) {
                   </>
                 )}
               </div>
-              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+              <div className="row" style={{ flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-start' }}>
                 <textarea placeholder="Job description (optional)" value={reqForm.job_description} onChange={(e) => setReqForm({ ...reqForm, job_description: e.target.value })} rows={3} style={{ flex: '1 1 260px' }} />
                 <div style={{ flex: '0 1 170px' }}>
                   <label className="field-label" style={{ fontSize: 11 }}>JD date</label>
                   <input type="date" value={reqForm.jd_date} onChange={(e) => setReqForm({ ...reqForm, jd_date: e.target.value })} />
                 </div>
+              </div>
+              <div className="row" style={{ marginTop: 6 }}>
+                <button type="button" onClick={aiAssistJd} disabled={jdAiLoading} title="Draft a job description from the position title">
+                  {jdAiLoading ? 'Thinking…' : '✨ AI Assist'}
+                </button>
               </div>
               <div className="row" style={{ marginTop: 8 }}><button className="primary" type="submit">Create</button></div>
             </form>
@@ -763,6 +815,8 @@ function HRRecruitment({ compact, sectionLabel }) {
           candForm={candForm}
           setCandForm={setCandForm}
           submitCandidate={submitCandidate}
+          interviewMode={interviewMode} setInterviewMode={setInterviewMode}
+          customQuestionsText={customQuestionsText} setCustomQuestionsText={setCustomQuestionsText}
           showCandForm={showCandForm}
           setShowCandForm={setShowCandForm}
           advanceCandidate={advanceCandidate}
@@ -782,8 +836,145 @@ function HRRecruitment({ compact, sectionLabel }) {
           convertToEmployee={convertToEmployee}
           messageFor={messageFor} messageDraft={messageDraft} setMessageDraft={setMessageDraft} messageStatus={messageStatus}
           openMessageFor={openMessageFor} sendCandidateMessage={sendCandidateMessage} setMessageFor={setMessageFor}
+          interviewData={interviewData}
+          selectedCandidateId={selectedCandidateId} openCandidateDetail={openCandidateDetail} closeCandidateDetail={() => setSelectedCandidateId(null)}
+          sendInterviewInviteManually={sendInterviewInviteManually} inviteStatus={inviteStatus}
+          deleteAnswerVideo={deleteAnswerVideo}
         />
       )}
+    </div>
+  );
+}
+
+// Resume screening badge — a plain 0-100 fit signal + proceed/review verdict, shown wherever a
+// candidate's resume screening result needs to appear (compact row and detail view alike).
+function ResumeScreenBadge({ c }) {
+  if (c.resume_screen_score == null && !c.resume_screen_recommendation) return null;
+  const isReview = c.resume_screen_recommendation === 'review';
+  return (
+    <span className={'status-tag ' + (isReview ? 'pending' : 'present')} title={c.resume_screen_summary || ''}>
+      Resume screen{c.resume_screen_score != null ? `: ${c.resume_screen_score}/100` : ''}{isReview ? ' — needs review' : ''}
+    </span>
+  );
+}
+
+// One candidate's full profile, actions, and AI interview results — its own screen (not an
+// inline-expanding list row) so a candidate with a completed interview (transcript + video per
+// question) has room to breathe instead of stretching the whole list.
+function CandidateDetail({
+  c, canManage, onBack, advanceCandidate, revertCandidate, convertToEmployee,
+  messageDraft, setMessageDraft, messageStatus, messageOpen, openMessage, closeMessage, sendCandidateMessage,
+  interviewInfo, sendInterviewInviteManually, inviteStatus, deleteAnswerVideo
+}) {
+  const iv = interviewInfo?.interview;
+  return (
+    <div className="card">
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Candidate Pipeline</button>
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4, flexWrap: 'wrap', gap: 6 }}>
+        <h1 style={{ margin: 0 }}>{c.name}</h1>
+        <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          <span className="status-tag info">{c.stage || '—'}</span>
+          <ResumeScreenBadge c={c} />
+        </span>
+      </div>
+      <div className="subtitle">
+        Applying for: {c.position_title || '—'}{c.position_department ? ` (${c.position_department})` : ''} · Source: {c.source_label || '—'}
+        {c.referred_by_name ? ` — referred by ${c.referred_by_name}` : ''} · {c.feedback_status}{c.panel ? ` · ${c.panel}` : ''}
+      </div>
+
+      <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+        <div className="feature-name" style={{ marginBottom: 6 }}>Profile</div>
+        <div className="feature-meta">
+          {c.email ? `✉ ${c.email}` : 'No email on file'}{c.phone ? ` · ☎ ${c.phone}` : ''}{c.location ? ` · ${c.location}` : ''}<br />
+          {c.experience_years ? `${c.experience_years} yrs exp` : ''}{c.current_ctc ? ` · Current CTC ${c.current_ctc}` : ''}{c.expected_ctc ? ` · Expected ${c.expected_ctc}` : ''}{c.notice_period ? ` · Notice: ${c.notice_period}` : ''}
+          {(c.linkedin_url || c.resume_data_url) && <br />}
+          {c.linkedin_url ? <a href={c.linkedin_url} target="_blank" rel="noreferrer">LinkedIn</a> : ''}
+          {c.linkedin_url && c.resume_data_url ? ' · ' : ''}
+          {c.resume_data_url ? <a href={c.resume_data_url} download={c.resume_name || 'resume'} target="_blank" rel="noreferrer">📎 Resume</a> : ''}
+        </div>
+        {c.resume_screen_summary && <div className="feature-meta" style={{ marginTop: 6 }}>AI resume screen: {c.resume_screen_summary}</div>}
+      </div>
+
+      {canManage && (
+        <div className="row" style={{ gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
+          {c.next_stage && <button onClick={() => advanceCandidate(c.id)}>Move to {c.next_stage}</button>}
+          {c.prev_stage && <button onClick={() => revertCandidate(c.id)}>← Move back to {c.prev_stage}</button>}
+          {(c.email || c.phone) && <button onClick={() => (messageOpen ? closeMessage() : openMessage())}>{messageOpen ? 'Cancel message' : 'Send Update'}</button>}
+          {!!c.is_final && <button className="primary" onClick={() => convertToEmployee(c)}>Convert to Employee →</button>}
+        </div>
+      )}
+
+      {messageOpen && (
+        <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+          <div className="feature-name" style={{ marginBottom: 6 }}>Send Update</div>
+          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
+            <select value={messageDraft.channel} onChange={(e) => setMessageDraft({ ...messageDraft, channel: e.target.value })} style={{ flex: '0 1 130px' }}>
+              {c.email && <option value="email">Email</option>}
+              {c.phone && <option value="whatsapp">WhatsApp</option>}
+            </select>
+            {messageDraft.channel === 'email' && <input placeholder="Subject" value={messageDraft.subject} onChange={(e) => setMessageDraft({ ...messageDraft, subject: e.target.value })} style={{ flex: '1 1 200px' }} />}
+          </div>
+          <textarea placeholder="Message" value={messageDraft.message} onChange={(e) => setMessageDraft({ ...messageDraft, message: e.target.value })} rows={2} style={{ width: '100%' }} />
+          <div className="row" style={{ marginTop: 6, alignItems: 'center' }}>
+            <button className="primary" onClick={() => sendCandidateMessage(c.id)} disabled={!messageDraft.message.trim()}>Send</button>
+            {messageStatus && <span className="feature-meta">{messageStatus}</span>}
+          </div>
+        </div>
+      )}
+
+      <div className="card" style={{ background: '#F7F9FC' }}>
+        <div className="feature-name" style={{ marginBottom: 6 }}>AI Video Interview</div>
+        {interviewInfo?.loading && <div className="note">Loading…</div>}
+        {interviewInfo?.error && <div className="note" style={{ color: '#B3401E' }}>{interviewInfo.error}</div>}
+        {iv === null && (
+          <div>
+            <div className="note" style={{ marginBottom: 8 }}>
+              {c.resume_screen_recommendation === 'review'
+                ? 'Resume screening flagged this candidate for a human look before auto-inviting — review the resume above, then send the invite yourself if you\'d like to proceed.'
+                : 'No AI interview has been created for this candidate yet (needs an email on file).'}
+            </div>
+            {canManage && c.email && (
+              <button onClick={() => sendInterviewInviteManually(c.id)}>Send Interview Invite</button>
+            )}
+            {inviteStatus && <div className="feature-meta" style={{ marginTop: 6 }}>{inviteStatus}</div>}
+          </div>
+        )}
+        {iv && (
+          <div>
+            <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
+              <strong>{iv.status === 'completed' ? 'Completed' : iv.status === 'in_progress' ? `In progress (${iv.currentIndex}/${iv.totalQuestions})` : 'Invite sent, not started'}</strong>
+              {iv.status === 'completed' && (
+                <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  {iv.score != null && <span className="status-tag present">Overall: {iv.score}/100</span>}
+                  {iv.communicationScore != null && <span className="status-tag info">Communication: {iv.communicationScore}/100</span>}
+                  {iv.eligible != null && <span className={'status-tag ' + (iv.eligible ? 'present' : 'absent')}>{iv.eligible ? '✓ Eligible' : '✗ Not eligible'}</span>}
+                </span>
+              )}
+            </div>
+            {iv.status !== 'completed' && <div className="feature-meta" style={{ marginBottom: 6 }}>Interview link: <a href={iv.link} target="_blank" rel="noreferrer">{iv.link}</a></div>}
+            {iv.summary && <div className="feature-meta" style={{ marginBottom: 8 }}>{iv.summary}</div>}
+            {iv.answers?.length > 0 && iv.answers.map((a) => (
+              <div key={a.question_index} style={{ marginBottom: 10 }}>
+                <div className="feature-meta" style={{ fontWeight: 600 }}>Q{a.question_index + 1}: {a.question}</div>
+                {a.video_data_url && (
+                  <>
+                    <video src={a.video_data_url} controls style={{ width: 240, borderRadius: 6, marginTop: 4, display: 'block' }} />
+                    {canManage && (
+                      <button
+                        style={{ marginTop: 4 }}
+                        onClick={() => { if (window.confirm('Delete this recorded video? The transcript and score are kept.')) deleteAnswerVideo(c.id, a.id); }}
+                      >
+                        🗑 Delete video
+                      </button>
+                    )}
+                  </>
+                )}
+                {a.transcript && <div className="feature-meta" style={{ marginTop: 4 }}>Transcript: {a.transcript}</div>}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -792,13 +983,42 @@ function HRRecruitment({ compact, sectionLabel }) {
 // Department/Stage/Source) live in the parent's state so they persist across candidate actions;
 // moving someone to Hired reloads the list but never resets which position/stage you were
 // looking at, since load() only replaces `ov`, not the filter state.
+//
+// Split into three separately-scoped pieces rather than one long card: "Add Candidate" (its own
+// toggleable form), the candidate list (compact rows — click one to open its own detail screen
+// with full profile/messaging/AI interview, instead of expanding two different panels inline),
+// and "Candidate Sources" management, already its own card.
 function CandidatePipelineTab({
   ov, canManage, candForm, setCandForm, submitCandidate, showCandForm, setShowCandForm, advanceCandidate, revertCandidate,
   filteredCandidates, pipelinePosition, setPipelinePosition, pipelineDept, setPipelineDept,
   pipelineStage, setPipelineStage, pipelineSource, setPipelineSource, pipelineDeptOptions, pipelineStageOptions,
   exportCandidatesCsv, showSourceForm, setShowSourceForm, newSourceLabel, setNewSourceLabel, addSource, toggleSource,
-  candResume, setCandResume, convertToEmployee, messageFor, messageDraft, setMessageDraft, messageStatus, openMessageFor, sendCandidateMessage, setMessageFor
+  candResume, setCandResume, convertToEmployee, messageFor, messageDraft, setMessageDraft, messageStatus, setMessageFor, openMessageFor, sendCandidateMessage,
+  interviewData,
+  interviewMode, setInterviewMode, customQuestionsText, setCustomQuestionsText,
+  selectedCandidateId, openCandidateDetail, closeCandidateDetail, sendInterviewInviteManually, inviteStatus, deleteAnswerVideo
 }) {
+  const selected = selectedCandidateId ? (ov?.candidates || []).find((c) => c.id === selectedCandidateId) : null;
+  if (selected) {
+    return (
+      <CandidateDetail
+        c={selected}
+        canManage={canManage}
+        onBack={closeCandidateDetail}
+        advanceCandidate={advanceCandidate}
+        revertCandidate={revertCandidate}
+        convertToEmployee={convertToEmployee}
+        messageDraft={messageDraft} setMessageDraft={setMessageDraft} messageStatus={messageStatus}
+        messageOpen={messageFor === selected.id} openMessage={() => openMessageFor(selected)} closeMessage={() => setMessageFor(null)}
+        sendCandidateMessage={sendCandidateMessage}
+        interviewInfo={interviewData[selected.id]}
+        sendInterviewInviteManually={sendInterviewInviteManually}
+        inviteStatus={inviteStatus}
+        deleteAnswerVideo={deleteAnswerVideo}
+      />
+    );
+  }
+
   return (
     <div>
       <div className="filter-bar">
@@ -822,14 +1042,14 @@ function CandidatePipelineTab({
         <button className="primary" onClick={exportCandidatesCsv}>Export</button>
       </div>
 
-      <div className="dashboard-grid">
-        <div className="card" style={{ gridColumn: 'span 2' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div className="feature-name">Candidate Pipeline</div>
-            {canManage && <button onClick={() => setShowCandForm((v) => !v)}>{showCandForm ? 'Cancel' : '+ Add Candidate'}</button>}
+      {canManage && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: showCandForm ? 8 : 0 }}>
+            <div className="feature-name">Add Candidate</div>
+            <button onClick={() => setShowCandForm((v) => !v)}>{showCandForm ? 'Cancel' : '+ Add Candidate'}</button>
           </div>
-          {canManage && showCandForm && (
-            <form onSubmit={submitCandidate} style={{ marginBottom: 12 }}>
+          {showCandForm && (
+            <form onSubmit={submitCandidate}>
               <div className="row" style={{ flexWrap: 'wrap' }}>
                 <input placeholder="Candidate name" value={candForm.name} onChange={(e) => setCandForm({ ...candForm, name: e.target.value })} required style={{ flex: '1 1 140px' }} />
                 <select value={candForm.position_id} onChange={(e) => setCandForm({ ...candForm, position_id: e.target.value })} style={{ flex: '1 1 140px' }}>
@@ -854,59 +1074,52 @@ function CandidatePipelineTab({
                 <input placeholder="Notice period" value={candForm.notice_period} onChange={(e) => setCandForm({ ...candForm, notice_period: e.target.value })} style={{ flex: '1 1 120px' }} />
                 <input placeholder="LinkedIn URL" value={candForm.linkedin_url} onChange={(e) => setCandForm({ ...candForm, linkedin_url: e.target.value })} style={{ flex: '1 1 160px' }} />
               </div>
+              <div style={{ marginTop: 10, padding: 10, background: '#F7F9FC', borderRadius: 8 }}>
+                <div className="field-label" style={{ marginBottom: 6 }}>AI video interview questions</div>
+                <label className="row" style={{ gap: 6, marginBottom: 4 }}>
+                  <input type="radio" checked={interviewMode === 'ai'} onChange={() => setInterviewMode('ai')} />
+                  Let AI generate them from the position's title/job description
+                </label>
+                <label className="row" style={{ gap: 6 }}>
+                  <input type="radio" checked={interviewMode === 'custom'} onChange={() => setInterviewMode('custom')} />
+                  I'll write my own questions
+                </label>
+                {interviewMode === 'custom' && (
+                  <textarea
+                    placeholder={'One question per line, e.g.\nTell me about yourself.\nDescribe a challenging project you led.'}
+                    value={customQuestionsText}
+                    onChange={(e) => setCustomQuestionsText(e.target.value)}
+                    rows={4}
+                    style={{ width: '100%', marginTop: 8 }}
+                  />
+                )}
+              </div>
               <div className="row" style={{ flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
                 <label className="field-label" style={{ flex: '0 0 auto' }}>Resume <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={(e) => setCandResume(e.target.files?.[0] || null)} /></label>
                 <button className="primary" type="submit">Add</button>
               </div>
+              <div className="note" style={{ marginTop: 6 }}>If a resume is attached, AI screens it first — a clear fit goes straight to the interview invite; anything unclear waits here for you to review and send manually.</div>
             </form>
           )}
+        </div>
+      )}
+
+      <div className="dashboard-grid">
+        <div className="card" style={{ gridColumn: 'span 2' }}>
+          <div className="feature-name" style={{ marginBottom: 8 }}>Candidates</div>
           {filteredCandidates.length === 0 && <div className="empty">No candidates{ov?.candidates?.length ? ' match this filter.' : ' yet.'}</div>}
           {filteredCandidates.map((c) => (
-            <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
-              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
+            <div key={c.id} className="rec-row" style={{ cursor: 'pointer', alignItems: 'flex-start' }} onClick={() => openCandidateDetail(c.id)}>
+              <span>
                 <strong>{c.name}</strong>
-                <span className="status-tag info">{c.stage || '—'}</span>
-              </div>
-              <div className="feature-meta">
-                Applying for: {c.position_title || '—'}{c.position_department ? ` (${c.position_department})` : ''} · Source: {c.source_label || '—'}
-                {c.referred_by_name ? ` — referred by ${c.referred_by_name}` : ''} · {c.feedback_status}
-                {c.panel ? ` · ${c.panel}` : ''}
-              </div>
-              {(c.email || c.phone || c.experience_years || c.current_ctc || c.expected_ctc || c.notice_period || c.location || c.linkedin_url || c.resume_data_url) && (
                 <div className="feature-meta">
-                  {c.email ? `✉ ${c.email}` : ''}{c.phone ? ` · ☎ ${c.phone}` : ''}{c.location ? ` · ${c.location}` : ''}
-                  {c.experience_years ? ` · ${c.experience_years} yrs exp` : ''}
-                  {c.current_ctc ? ` · Current CTC ${c.current_ctc}` : ''}{c.expected_ctc ? ` · Expected ${c.expected_ctc}` : ''}
-                  {c.notice_period ? ` · Notice: ${c.notice_period}` : ''}
-                  {c.linkedin_url ? <> · <a href={c.linkedin_url} target="_blank" rel="noreferrer">LinkedIn</a></> : ''}
-                  {c.resume_data_url ? <> · <a href={c.resume_data_url} download={c.resume_name || 'resume'} target="_blank" rel="noreferrer">📎 Resume</a></> : ''}
+                  {c.position_title || '—'}{c.position_department ? ` (${c.position_department})` : ''} · {c.source_label || '—'}{c.email ? ` · ✉ ${c.email}` : ''}
                 </div>
-              )}
-              {canManage && (
-                <span style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
-                  {c.next_stage && <button onClick={() => advanceCandidate(c.id)}>Move to {c.next_stage}</button>}
-                  {c.prev_stage && <button onClick={() => revertCandidate(c.id)}>← Move back to {c.prev_stage}</button>}
-                  {(c.email || c.phone) && <button onClick={() => openMessageFor(c)}>Send Update</button>}
-                  {!!c.is_final && <button className="primary" onClick={() => convertToEmployee(c)}>Convert to Employee →</button>}
-                </span>
-              )}
-              {messageFor === c.id && (
-                <div className="card" style={{ marginTop: 8, background: '#F7F9FC' }}>
-                  <div className="row" style={{ flexWrap: 'wrap', marginBottom: 6 }}>
-                    <select value={messageDraft.channel} onChange={(e) => setMessageDraft({ ...messageDraft, channel: e.target.value })} style={{ flex: '0 1 130px' }}>
-                      {c.email && <option value="email">Email</option>}
-                      {c.phone && <option value="whatsapp">WhatsApp</option>}
-                    </select>
-                    {messageDraft.channel === 'email' && <input placeholder="Subject" value={messageDraft.subject} onChange={(e) => setMessageDraft({ ...messageDraft, subject: e.target.value })} style={{ flex: '1 1 200px' }} />}
-                  </div>
-                  <textarea placeholder="Message" value={messageDraft.message} onChange={(e) => setMessageDraft({ ...messageDraft, message: e.target.value })} rows={2} style={{ width: '100%' }} />
-                  <div className="row" style={{ marginTop: 6, alignItems: 'center' }}>
-                    <button className="primary" onClick={() => sendCandidateMessage(c.id)} disabled={!messageDraft.message.trim()}>Send</button>
-                    <button onClick={() => setMessageFor(null)}>Cancel</button>
-                    {messageStatus && <span className="feature-meta">{messageStatus}</span>}
-                  </div>
-                </div>
-              )}
+              </span>
+              <span style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <ResumeScreenBadge c={c} />
+                <span className="status-tag info">{c.stage || '—'}</span>
+              </span>
             </div>
           ))}
         </div>

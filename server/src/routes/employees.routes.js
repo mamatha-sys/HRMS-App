@@ -4,11 +4,12 @@ import bcrypt from 'bcryptjs';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
-import { sendSms } from '../utils/channels.js';
+import { sendSms, sendEmail } from '../utils/channels.js';
 import { isScopedRole, filterToScope } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { CSV_FIELDS, DIRECT_COLUMN_KEYS } from '../utils/employeeCsvFields.js';
+import { verifyDocumentName } from '../utils/documentVerify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -110,12 +111,12 @@ function transfersFor(employeeId) {
 function hydrate(emp) {
   let documents = [];
   if (emp.documents) { try { documents = JSON.parse(emp.documents); } catch { documents = []; } }
-  // phone_otp_code/phone_otp_expires are a one-time secret in transit to the employee's own phone
-  // via SMS — never echo them back over the API to anyone (HR included) viewing this record.
-  const { phone_otp_code, phone_otp_expires, ...rest } = emp;
+  // phone_otp_code/phone_otp_expires and their email equivalents are one-time secrets in transit
+  // to the employee — never echo them back over the API to anyone (HR included) viewing this record.
+  const { phone_otp_code, phone_otp_expires, email_otp_code, email_otp_expires, ...rest } = emp;
   const editRequests = editRequestsFor(emp.name);
   return {
-    ...rest, documents, phone_verified: !!emp.phone_verified, custom_fields: customFieldValuesFor(emp.id),
+    ...rest, documents, phone_verified: !!emp.phone_verified, email_verified: !!emp.email_verified, custom_fields: customFieldValuesFor(emp.id),
     edit_requests: editRequests,
     edit_request_count: editRequests.length,
     // Derived, not the raw column — a Pending row in the chain is the actual source of truth now.
@@ -148,6 +149,19 @@ const present = (emp, requester) => maskEmployee(hydrate(emp), requester);
 // the Employee list can show/toggle Pause-Reactivate without a separate trip to User Management.
 const EMP_WITH_TEAM = 'SELECT e.*, t.name AS team_name, u.active AS account_active FROM employees e LEFT JOIN teams t ON t.id = e.team_id LEFT JOIN users u ON u.id = e.user_id';
 const getEmp = (id) => db.prepare(`${EMP_WITH_TEAM} WHERE e.id = ?`).get(id);
+
+// AI-assisted document check: OCRs the document the caller is already looking at (sent in the
+// request body, not fetched from the DB) and cross-checks the name. Open to any authenticated
+// user rather than HR-only, since both the HR "Add/Edit Employee" form and the employee's own
+// self-service form use it, on a document the requester already has in front of them either way.
+router.post('/verify-document', async (req, res) => {
+  try {
+    const result = await verifyDocumentName(req.body?.name, req.body?.dataUrl);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
@@ -370,6 +384,17 @@ router.post('/', requireHR, (req, res) => {
   const info = createBoth();
 
   res.status(201).json({ employee: present(getEmp(info.lastInsertRowid), req.user) });
+
+  // Welcome email — best-effort, after responding, never blocks/fails employee creation itself if
+  // email isn't configured or the send fails (same fire-and-forget shape as the AI interview
+  // invite in recruitment.routes.js). Includes the login the HR admin just set so the new hire can
+  // sign in immediately — a normal "here are your account details" onboarding email.
+  const loginUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/login`;
+  sendEmail(
+    email,
+    'Welcome — your HRMS account is ready',
+    `Hi ${body.name.trim()},\n\nWelcome aboard! Your HRMS account has been created.\n\nLogin: ${loginUrl}\nEmail: ${email}\nPassword: ${body.password}\n\nWe recommend changing your password after your first login.\n\nLooking forward to having you on the team!`
+  ).catch(() => {});
 });
 
 // Bulk import — inserts already-onboarded (locked) records. Full-field: every column CSV_FIELDS
@@ -535,10 +560,26 @@ router.put('/:id', (req, res) => {
   const updated = { ...emp };
   allowed.forEach((f) => { if (req.body?.[f] !== undefined) updated[f] = serializeField(f, req.body[f]); });
 
-  // Changing the phone number invalidates any earlier OTP verification of the old number.
+  // Changing the phone number invalidates any earlier OTP verification of the old number; changing
+  // the email does the same for email verification.
   const phoneChanged = req.body?.phone !== undefined && req.body.phone !== emp.phone;
   if (phoneChanged) { updated.phone_verified = 0; updated.phone_otp_code = null; updated.phone_otp_expires = null; }
-  const setCols = phoneChanged ? [...allowed, 'phone_verified', 'phone_otp_code', 'phone_otp_expires'] : allowed;
+  const emailChanged = req.body?.email !== undefined && req.body.email !== emp.email;
+  if (emailChanged) { updated.email_verified = 0; updated.email_otp_code = null; updated.email_otp_expires = null; }
+  const setCols = [
+    ...allowed,
+    ...(phoneChanged ? ['phone_verified', 'phone_otp_code', 'phone_otp_expires'] : []),
+    ...(emailChanged ? ['email_verified', 'email_otp_code', 'email_otp_expires'] : [])
+  ];
+
+  // Keep the linked login (users.email) in sync whenever the employee's own email is edited —
+  // without this, users.email silently drifts from what's shown on the profile, and anything
+  // keyed off login email (password reset, future "sign in" flows) quietly breaks for that person.
+  if (emailChanged && emp.user_id && updated.email) {
+    const conflict = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(updated.email, emp.user_id);
+    if (conflict) return res.status(409).json({ error: 'A login account with this email already exists' });
+    db.prepare('UPDATE users SET email = ? WHERE id = ?').run(updated.email, emp.user_id);
+  }
 
   db.prepare(`UPDATE employees SET ${setCols.map((f) => `${f} = @${f}`).join(', ')} WHERE id = @id`).run(updated);
   saveCustomFieldValues(emp.id, req.body?.custom_fields);
@@ -594,6 +635,43 @@ router.post('/:id/phone/verify-otp', (req, res) => {
   if (otp !== emp.phone_otp_code) return res.status(400).json({ error: 'Incorrect OTP.' });
 
   db.prepare('UPDATE employees SET phone_verified = 1, phone_otp_code = NULL, phone_otp_expires = NULL WHERE id = ?').run(emp.id);
+  res.json({ employee: present(getEmp(emp.id), req.user) });
+});
+
+// Email verification — same OTP shape as phone, delivered by email instead of SMS.
+router.post('/:id/email/send-otp', async (req, res) => {
+  const emp = getEmp(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  const own = emp.user_id === req.user.sub;
+  if (!isHR(req.user.role) && !own) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!emp.email) return res.status(400).json({ error: 'Add an email address first.' });
+
+  const otp = String(crypto.randomInt(100000, 1000000));
+  const expires = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  db.prepare('UPDATE employees SET email_otp_code = ?, email_otp_expires = ? WHERE id = ?').run(otp, expires, emp.id);
+
+  try {
+    await sendEmail(emp.email, 'Verify your email address', `Your OTP is ${otp}. It expires in 10 minutes.`);
+  } catch (err) {
+    console.log(`[email-otp] Could not email ${emp.email} (${err.message}). OTP: ${otp}`);
+  }
+  res.json({ message: 'OTP sent to the email address on file.' });
+});
+
+router.post('/:id/email/verify-otp', (req, res) => {
+  const emp = getEmp(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  const own = emp.user_id === req.user.sub;
+  if (!isHR(req.user.role) && !own) return res.status(403).json({ error: 'Insufficient permissions' });
+
+  const { otp } = req.body || {};
+  if (!otp) return res.status(400).json({ error: 'Enter the OTP sent to the email.' });
+  if (!emp.email_otp_code || !emp.email_otp_expires || new Date(emp.email_otp_expires) < new Date()) {
+    return res.status(400).json({ error: 'OTP expired or not requested — send a new one.' });
+  }
+  if (otp !== emp.email_otp_code) return res.status(400).json({ error: 'Incorrect OTP.' });
+
+  db.prepare('UPDATE employees SET email_verified = 1, email_otp_code = NULL, email_otp_expires = NULL WHERE id = ?').run(emp.id);
   res.json({ employee: present(getEmp(emp.id), req.user) });
 });
 

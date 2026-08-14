@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import Home from './pages/Home.jsx';
 import Login from './pages/Login.jsx';
 import ResetPassword from './pages/ResetPassword.jsx';
+import CandidateInterview from './pages/CandidateInterview.jsx';
 import Dashboard from './pages/Dashboard.jsx';
 import Employees from './pages/Employees.jsx';
 import Recruitment from './pages/Recruitment.jsx';
@@ -43,6 +44,7 @@ export default function App() {
       <Route path="/" element={<Home />} />
       <Route path="/login" element={<Login />} />
       <Route path="/reset-password" element={<ResetPassword />} />
+      <Route path="/interview/:token" element={<CandidateInterview />} />
       <Route
         element={
           <ProtectedRoute>

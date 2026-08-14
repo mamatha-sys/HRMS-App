@@ -68,31 +68,141 @@ function StatusPill({ label, ok }) {
   return <span className={'status-tag ' + (ok ? 'present' : 'locked')}>{label}: {ok ? 'Configured' : 'Not configured'}</span>;
 }
 
-// ---------- Email / SMS / WhatsApp status ----------
+// ---------- Email / SMS / WhatsApp: status + self-service credential form ----------
+// Any company running this app configures their OWN provider here — nothing requires server/.env
+// access. Secret fields (SMTP password, Twilio auth token) are never sent back from the server
+// once saved, only whether one is set; leaving a secret field blank on Save keeps the existing
+// value rather than clearing it.
+const EMPTY_CHANNEL_FORM = {
+  email_smtp_host: '', email_smtp_port: '587', email_smtp_secure: 'false', email_smtp_user: '', email_smtp_pass: '', email_from: '',
+  twilio_account_sid: '', twilio_auth_token: '', twilio_sms_from: '', twilio_whatsapp_from: ''
+};
+
 function ChannelsScreen({ onBack }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
-  useEffect(() => { api.get('/integrations/channels/status').then((r) => setData(r.data)).catch(() => setError('Could not load channel status.')); }, []);
+  const [form, setForm] = useState(EMPTY_CHANNEL_FORM);
+  const [secretsSet, setSecretsSet] = useState({});
+  const [savedMsg, setSavedMsg] = useState('');
+  const [testStatus, setTestStatus] = useState('');
+
+  function loadStatus() { api.get('/integrations/channels/status').then((r) => setData(r.data)).catch(() => setError('Could not load channel status.')); }
+  function loadSettings() {
+    api.get('/integrations/channels/settings').then((r) => {
+      setForm((f) => ({ ...f, ...r.data }));
+      setSecretsSet({ email_smtp_pass: r.data.email_smtp_pass_set, twilio_auth_token: r.data.twilio_auth_token_set });
+    }).catch(() => {});
+  }
+  useEffect(() => { loadStatus(); loadSettings(); }, []);
+
+  async function save(e) {
+    e.preventDefault(); setError(''); setSavedMsg('');
+    try {
+      await api.put('/integrations/channels/settings', form);
+      setSavedMsg('Saved.');
+      setForm((f) => ({ ...f, email_smtp_pass: '', twilio_auth_token: '' }));
+      loadStatus(); loadSettings();
+      setTimeout(() => setSavedMsg(''), 2000);
+    } catch (err) { setError(err.response?.data?.error || 'Could not save settings.'); }
+  }
+
+  async function sendTestEmail() {
+    setTestStatus('Sending…');
+    try {
+      const to = window.prompt('Send a test email to which address?', form.email_smtp_user || '');
+      if (!to) { setTestStatus(''); return; }
+      await api.post('/integrations/channels/test-email', { to });
+      setTestStatus('Sent — check that inbox.');
+      loadStatus();
+    } catch (err) { setTestStatus(err.response?.data?.error || 'Could not send test email.'); }
+  }
 
   return (
     <div>
       <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Integrations</button>
       <h1>Email, SMS & WhatsApp</h1>
-      <div className="subtitle">Real delivery already wired into Announcements &amp; Notifications — this is a status view.</div>
+      <div className="subtitle">Configure your own provider below — used by Announcements, candidate messages, and the AI interview invites.</div>
       {error && <div className="banner error">{error}</div>}
       {data && (
         <div className="card" style={{ marginBottom: 14 }}>
           {['email', 'sms', 'whatsapp'].map((k) => (
             <div key={k} className="rec-row">
               <span style={{ textTransform: 'capitalize' }}>{k}</span>
-              <span>
-                <span className={'status-tag ' + (data[k].configured ? 'present' : 'locked')} style={{ marginRight: 8 }}>{data[k].configured ? 'Configured' : 'Not configured'}</span>
-                <span className="feature-meta">env: {data[k].envVars.join(', ')}</span>
-              </span>
+              <span className={'status-tag ' + (data[k].configured ? 'present' : 'locked')}>{data[k].configured ? 'Configured' : 'Not configured'}</span>
             </div>
           ))}
         </div>
       )}
+
+      <form onSubmit={save}>
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="feature-name" style={{ marginBottom: 8 }}>Email (SMTP)</div>
+          <div className="grid2">
+            <div>
+              <label className="field-label">SMTP host</label>
+              <input placeholder="e.g. smtp.yourhost.com" value={form.email_smtp_host} onChange={(e) => setForm({ ...form, email_smtp_host: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">Port</label>
+              <input value={form.email_smtp_port} onChange={(e) => setForm({ ...form, email_smtp_port: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">Security</label>
+              <select value={form.email_smtp_secure} onChange={(e) => setForm({ ...form, email_smtp_secure: e.target.value })}>
+                <option value="true">SSL (usually port 465)</option>
+                <option value="false">STARTTLS (usually port 587)</option>
+              </select>
+            </div>
+            <div>
+              <label className="field-label">Email address</label>
+              <input placeholder="e.g. hr@yourcompany.com" value={form.email_smtp_user} onChange={(e) => setForm({ ...form, email_smtp_user: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">Password {secretsSet.email_smtp_pass && <span className="note">(saved — leave blank to keep it)</span>}</label>
+              <input type="password" placeholder={secretsSet.email_smtp_pass ? '••••••••' : ''} value={form.email_smtp_pass} onChange={(e) => setForm({ ...form, email_smtp_pass: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">From address <span className="note">(optional, defaults to Email address above)</span></label>
+              <input placeholder="e.g. no-reply@yourcompany.com" value={form.email_from} onChange={(e) => setForm({ ...form, email_from: e.target.value })} />
+            </div>
+          </div>
+          {data?.email?.configured && (
+            <div className="row" style={{ marginTop: 10, alignItems: 'center' }}>
+              <button type="button" onClick={sendTestEmail}>Send test email</button>
+              {testStatus && <span className="feature-meta">{testStatus}</span>}
+            </div>
+          )}
+        </div>
+
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="feature-name" style={{ marginBottom: 4 }}>SMS &amp; WhatsApp (Twilio)</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>Get these from your Twilio Console at <a href="https://www.twilio.com/console" target="_blank" rel="noreferrer">twilio.com/console</a>.</div>
+          <div className="grid2">
+            <div>
+              <label className="field-label">Account SID</label>
+              <input placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" value={form.twilio_account_sid} onChange={(e) => setForm({ ...form, twilio_account_sid: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">Auth token {secretsSet.twilio_auth_token && <span className="note">(saved — leave blank to keep it)</span>}</label>
+              <input type="password" placeholder={secretsSet.twilio_auth_token ? '••••••••' : ''} value={form.twilio_auth_token} onChange={(e) => setForm({ ...form, twilio_auth_token: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">SMS sender number</label>
+              <input placeholder="+1XXXXXXXXXX" value={form.twilio_sms_from} onChange={(e) => setForm({ ...form, twilio_sms_from: e.target.value })} />
+            </div>
+            <div>
+              <label className="field-label">WhatsApp sender number</label>
+              <input placeholder="+1XXXXXXXXXX" value={form.twilio_whatsapp_from} onChange={(e) => setForm({ ...form, twilio_whatsapp_from: e.target.value })} />
+            </div>
+          </div>
+        </div>
+
+        <div className="row" style={{ marginBottom: 14, alignItems: 'center' }}>
+          <button className="primary" type="submit">Save</button>
+          {savedMsg && <span className="feature-meta">{savedMsg}</span>}
+        </div>
+      </form>
+
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>Recent deliveries</div>
         {(!data?.recentDeliveries?.length) && <div className="empty">No deliveries yet.</div>}

@@ -1,55 +1,79 @@
 import nodemailer from 'nodemailer';
 import twilio from 'twilio';
 import db from '../db.js';
+import { getSetting } from './integrationSettings.js';
 
-// Real Email/SMS/WhatsApp delivery, driven entirely by env vars — see server/.env.example.
-// Every send attempt (success or failure) is logged to channel_deliveries so HR can see exactly
-// what went out, to whom, and why something failed (e.g. a provider simply isn't configured yet).
+// Real Email/SMS/WhatsApp delivery. Credentials come from the `integration_settings` table first
+// (so any company running this app can self-configure their own provider through Integrations →
+// Email, SMS & WhatsApp — no developer/server access needed), falling back to env vars for
+// existing deployments that were set up before that UI existed. Every send attempt (success or
+// failure) is logged to channel_deliveries so HR can see exactly what went out and why something
+// failed (e.g. a provider simply isn't configured yet).
+//
+// No client caching here on purpose — settings can change at runtime via the UI, and a cached
+// transport/client from before a save would silently keep using stale credentials.
 
-let mailTransport = null;
-function getMailTransport() {
-  if (mailTransport) return mailTransport;
-  const { EMAIL_SMTP_HOST, EMAIL_SMTP_PORT, EMAIL_SMTP_USER, EMAIL_SMTP_PASS } = process.env;
-  if (!EMAIL_SMTP_HOST || !EMAIL_SMTP_USER || !EMAIL_SMTP_PASS) return null;
-  mailTransport = nodemailer.createTransport({
-    host: EMAIL_SMTP_HOST,
-    port: Number(EMAIL_SMTP_PORT) || 587,
-    secure: String(process.env.EMAIL_SMTP_SECURE).toLowerCase() === 'true',
-    auth: { user: EMAIL_SMTP_USER, pass: EMAIL_SMTP_PASS }
-  });
-  return mailTransport;
+function emailConfig() {
+  return {
+    host: getSetting('email_smtp_host') || process.env.EMAIL_SMTP_HOST,
+    port: getSetting('email_smtp_port') || process.env.EMAIL_SMTP_PORT,
+    secure: getSetting('email_smtp_secure') ?? process.env.EMAIL_SMTP_SECURE,
+    user: getSetting('email_smtp_user') || process.env.EMAIL_SMTP_USER,
+    pass: getSetting('email_smtp_pass') || process.env.EMAIL_SMTP_PASS,
+    from: getSetting('email_from') || process.env.EMAIL_FROM
+  };
 }
 
-let twilioClient = null;
+function twilioConfig() {
+  return {
+    sid: getSetting('twilio_account_sid') || process.env.TWILIO_ACCOUNT_SID,
+    token: getSetting('twilio_auth_token') || process.env.TWILIO_AUTH_TOKEN,
+    smsFrom: getSetting('twilio_sms_from') || process.env.TWILIO_SMS_FROM,
+    whatsappFrom: getSetting('twilio_whatsapp_from') || process.env.TWILIO_WHATSAPP_FROM
+  };
+}
+
+function getMailTransport() {
+  const cfg = emailConfig();
+  if (!cfg.host || !cfg.user || !cfg.pass) return null;
+  return nodemailer.createTransport({
+    host: cfg.host,
+    port: Number(cfg.port) || 587,
+    secure: String(cfg.secure).toLowerCase() === 'true',
+    auth: { user: cfg.user, pass: cfg.pass }
+  });
+}
+
 function getTwilioClient() {
-  if (twilioClient) return twilioClient;
-  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN } = process.env;
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) return null;
-  twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
-  return twilioClient;
+  const cfg = twilioConfig();
+  if (!cfg.sid || !cfg.token) return null;
+  return twilio(cfg.sid, cfg.token);
 }
 
 export async function sendEmail(to, subject, message) {
   const transport = getMailTransport();
-  if (!transport) throw new Error('Email is not configured — set EMAIL_SMTP_HOST/USER/PASS in server/.env');
+  if (!transport) throw new Error('Email is not configured — set it up under Integrations → Email, SMS & WhatsApp');
   if (!to) throw new Error('This employee has no email on file');
-  await transport.sendMail({ from: process.env.EMAIL_FROM || process.env.EMAIL_SMTP_USER, to, subject, text: message });
+  const cfg = emailConfig();
+  await transport.sendMail({ from: cfg.from || cfg.user, to, subject, text: message });
 }
 
 export async function sendSms(to, title, message) {
   const client = getTwilioClient();
-  if (!client) throw new Error('SMS is not configured — set TWILIO_ACCOUNT_SID/AUTH_TOKEN/SMS_FROM in server/.env');
-  if (!process.env.TWILIO_SMS_FROM) throw new Error('TWILIO_SMS_FROM is not set in server/.env');
+  if (!client) throw new Error('SMS is not configured — set it up under Integrations → Email, SMS & WhatsApp');
+  const cfg = twilioConfig();
+  if (!cfg.smsFrom) throw new Error('SMS sender number is not set — configure it under Integrations → Email, SMS & WhatsApp');
   if (!to) throw new Error('This employee has no phone number on file');
-  await client.messages.create({ from: process.env.TWILIO_SMS_FROM, to, body: `${title}: ${message}` });
+  await client.messages.create({ from: cfg.smsFrom, to, body: `${title}: ${message}` });
 }
 
 export async function sendWhatsapp(to, title, message) {
   const client = getTwilioClient();
-  if (!client) throw new Error('WhatsApp is not configured — set TWILIO_ACCOUNT_SID/AUTH_TOKEN/WHATSAPP_FROM in server/.env');
-  if (!process.env.TWILIO_WHATSAPP_FROM) throw new Error('TWILIO_WHATSAPP_FROM is not set in server/.env');
+  if (!client) throw new Error('WhatsApp is not configured — set it up under Integrations → Email, SMS & WhatsApp');
+  const cfg = twilioConfig();
+  if (!cfg.whatsappFrom) throw new Error('WhatsApp sender number is not set — configure it under Integrations → Email, SMS & WhatsApp');
   if (!to) throw new Error('This employee has no phone number on file');
-  await client.messages.create({ from: `whatsapp:${process.env.TWILIO_WHATSAPP_FROM}`, to: `whatsapp:${to}`, body: `${title}: ${message}` });
+  await client.messages.create({ from: `whatsapp:${cfg.whatsappFrom}`, to: `whatsapp:${to}`, body: `${title}: ${message}` });
 }
 
 const SENDERS = { email: sendEmail, sms: sendSms, whatsapp: sendWhatsapp };
