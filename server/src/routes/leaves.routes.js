@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -34,6 +35,148 @@ function reasonLabelsOf(approvalReasonIds) {
   if (!Array.isArray(ids) || !ids.length) return null;
   const all = allReasons();
   return ids.map((id) => all.find((r) => r.id === id)?.label).filter(Boolean);
+}
+
+// Concurrent Leave Cap: HR-configurable ceiling on what % of a department can be off at the same
+// time. Stored in the generic `policies` table (category 'setting'), same getter/setter shape as
+// Payroll's split-config % and Recruitment's notice period — a dedicated GET/PUT pair below rather
+// than the free-text Configuration Policies screen, so the value is validated as a real percentage.
+const CONCURRENT_LEAVE_LIMIT_NAME = 'Max concurrent leave % per department';
+const DEFAULT_CONCURRENT_LEAVE_LIMIT_PCT = 30;
+function getConcurrentLeaveLimitPct() {
+  const row = db.prepare("SELECT value FROM policies WHERE category = 'setting' AND name = ?").get(CONCURRENT_LEAVE_LIMIT_NAME);
+  const pct = row ? parseInt(row.value, 10) : NaN;
+  return Number.isFinite(pct) && pct >= 1 && pct <= 100 ? pct : DEFAULT_CONCURRENT_LEAVE_LIMIT_PCT;
+}
+function setConcurrentLeaveLimitPct(pct) {
+  const existing = db.prepare("SELECT id FROM policies WHERE category = 'setting' AND name = ?").get(CONCURRENT_LEAVE_LIMIT_NAME);
+  if (existing) db.prepare('UPDATE policies SET value = ? WHERE id = ?').run(String(pct), existing.id);
+  else db.prepare("INSERT INTO policies (category, name, value) VALUES ('setting', ?, ?)").run(CONCURRENT_LEAVE_LIMIT_NAME, String(pct));
+}
+
+// A flat absolute-headcount ceiling on top of the percentage above — whichever is stricter wins
+// (see the min() in POST /leaves below). Exists because a percentage alone can still let a small
+// department's whole team slip out at once (e.g. 30% of a 3-person team rounds to 1, but a
+// 10-person department's 30% is 3) — this caps it at a fixed number company-wide regardless of
+// department size. Same getter/setter shape as the percentage setting.
+const CONCURRENT_LEAVE_MAX_COUNT_NAME = 'Max concurrent leave headcount per department';
+const DEFAULT_CONCURRENT_LEAVE_MAX_COUNT = 2;
+function getConcurrentLeaveMaxCount() {
+  const row = db.prepare("SELECT value FROM policies WHERE category = 'setting' AND name = ?").get(CONCURRENT_LEAVE_MAX_COUNT_NAME);
+  const n = row ? parseInt(row.value, 10) : NaN;
+  return Number.isFinite(n) && n >= 1 ? n : DEFAULT_CONCURRENT_LEAVE_MAX_COUNT;
+}
+function setConcurrentLeaveMaxCount(n) {
+  const existing = db.prepare("SELECT id FROM policies WHERE category = 'setting' AND name = ?").get(CONCURRENT_LEAVE_MAX_COUNT_NAME);
+  if (existing) db.prepare('UPDATE policies SET value = ? WHERE id = ?').run(String(n), existing.id);
+  else db.prepare("INSERT INTO policies (category, name, value) VALUES ('setting', ?, ?)").run(CONCURRENT_LEAVE_MAX_COUNT_NAME, String(n));
+}
+
+// How many OTHER active employees in this employee's department already have a Pending or
+// Approved (non-cancelled) leave overlapping the given date range — counted at submission time
+// (not just Approved) so two people can't both slip in on the same day before either is decided,
+// only to have the department end up over its cap once both get approved later. Standard interval-
+// overlap predicate: two ranges overlap unless one ends before the other starts.
+// Stale-pending-approval reminder: a leave sitting Pending too long without a decision means the
+// requester has no idea whether it's being looked at, which is exactly what leads to them
+// resubmitting the same request out of frustration. Same lazy, no-background-scheduler idiom as
+// Helpdesk's 24h auto-escalation and Performance's assessment reminders — runs at the top of
+// every leave-list read, only fires once per LEAVE_REMINDER_COOLDOWN_DAYS per request (via
+// last_reminded_at) so repeated page loads don't spam it. Reassures the requester (their request
+// wasn't lost, no need to resubmit) AND nudges whoever needs to act on it.
+const LEAVE_REMINDER_COOLDOWN_DAYS = 2;
+function sendPendingLeaveReminders() {
+  const stale = db.prepare(`
+    SELECT * FROM leaves
+    WHERE status = 'Pending' AND cancelled = 0
+      AND COALESCE(last_reminded_at, created_at) <= datetime('now', ?)
+  `).all(`-${LEAVE_REMINDER_COOLDOWN_DAYS} days`);
+  stale.forEach((l) => {
+    const emp = empOf(l.employee_id);
+    notifyEmployee(l.employee_id, 'Leave request still pending', `Your ${l.type} request (${l.from_date} to ${l.to_date}) is still awaiting approval — it hasn't been missed, no need to submit it again.`);
+    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
+      .run('Leave Approval Pending', `${emp.name || 'An employee'}'s ${l.type} request (${l.from_date} to ${l.to_date}) has been pending for ${LEAVE_REMINDER_COOLDOWN_DAYS}+ days — please review.`, 'staff');
+    db.prepare("UPDATE leaves SET last_reminded_at = datetime('now') WHERE id = ?").run(l.id);
+  });
+}
+
+// Approval Suggestion: gives whoever is deciding a pending request the same three signals a
+// manager would informally weigh before approving — this month's goal progress, this month's
+// attendance, and how much leave the employee has already taken this calendar year — without
+// making the decision for them. Purely advisory: always shows the real numbers alongside the
+// verdict so the approver can override it, same "numbers first, judgment stays human" spirit as
+// the Progress Score in Performance Management (whose High/Medium/Low bands this reuses).
+const LEAVE_YTD_REVIEW_THRESHOLD_DAYS = 24; // ~2 days/month average — past this, worth a second look, not a hard rule.
+
+function targetsScoreFor(employeeId, month) {
+  const targets = db.prepare('SELECT progress_pct FROM performance_reviews WHERE employee_id = ? AND month = ?').all(employeeId, month);
+  return targets.length ? Math.round(targets.reduce((s, t) => s + t.progress_pct, 0) / targets.length) : null;
+}
+
+function leaveDaysThisYear(employeeId, excludeLeaveId) {
+  const year = new Date().getFullYear();
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(days), 0) AS total FROM leaves
+    WHERE employee_id = ? AND id != ? AND cancelled = 0 AND status IN ('Pending', 'Approved')
+      AND strftime('%Y', from_date) = ?
+  `).get(employeeId, excludeLeaveId || 0, String(year));
+  return row.total;
+}
+
+function approvalSuggestionFor(leave) {
+  const month = leave.from_date.slice(0, 7);
+  const targetsScore = targetsScoreFor(leave.employee_id, month);
+  const attendanceScore = monthlyAttendanceSummary(leave.employee_id, month).attendancePct;
+  const leaveDaysYtd = leaveDaysThisYear(leave.employee_id, leave.id) + leave.days;
+
+  const reasons = [];
+  if (targetsScore != null && targetsScore < 50) reasons.push(`goal progress is low this month (${targetsScore}%)`);
+  if (attendanceScore < 50) reasons.push(`attendance is low this month (${attendanceScore}%)`);
+  if (leaveDaysYtd > LEAVE_YTD_REVIEW_THRESHOLD_DAYS) reasons.push(`already at ${leaveDaysYtd} leave days this year including this request`);
+
+  return {
+    targetsScore, attendanceScore, leaveDaysYtd,
+    recommendation: reasons.length ? 'Review' : 'Approve',
+    reasons
+  };
+}
+
+// Work Handover — who's eligible to receive it: normally a colleague in the SAME department
+// (handing work to someone unrelated to it doesn't make sense), with one exception — a Team
+// Lead may hand over to another Team Lead in a DIFFERENT department too, since a small
+// department/team often has no second TL to receive it. Role lives on `users`, not `employees`,
+// so this always resolves it via the linked user row rather than trusting anything the client sends.
+const roleOfEmployee = (employeeId) => db.prepare('SELECT u.role FROM employees e JOIN users u ON u.id = e.user_id WHERE e.id = ?').get(employeeId)?.role || null;
+
+function isValidHandoverTarget(ownerEmployeeId, ownerDepartment, targetId) {
+  if (!targetId || Number(targetId) === ownerEmployeeId) return false;
+  const target = db.prepare("SELECT id, department, status FROM employees WHERE id = ?").get(targetId);
+  if (!target || target.status !== 'Active') return false;
+  if (target.department === ownerDepartment) return true;
+  return roleOfEmployee(ownerEmployeeId) === 'tl' && roleOfEmployee(target.id) === 'tl';
+}
+
+function handoverCandidatesFor(ownerEmployeeId, ownerDepartment) {
+  const sameDept = db.prepare("SELECT id, name, employee_code, department FROM employees WHERE department = ? AND status = 'Active' AND id != ?").all(ownerDepartment, ownerEmployeeId);
+  if (roleOfEmployee(ownerEmployeeId) !== 'tl') return sameDept;
+  const otherTls = db.prepare(`
+    SELECT e.id, e.name, e.employee_code, e.department FROM employees e JOIN users u ON u.id = e.user_id
+    WHERE u.role = 'tl' AND e.status = 'Active' AND e.id != ?
+  `).all(ownerEmployeeId);
+  const seen = new Set(sameDept.map((c) => c.id));
+  otherTls.forEach((c) => { if (!seen.has(c.id)) { sameDept.push(c); seen.add(c.id); } });
+  return sameDept;
+}
+
+function overlappingDeptLeaveCount(employee, fromDate, toDate) {
+  const row = db.prepare(`
+    SELECT COUNT(DISTINCT l.employee_id) AS n
+    FROM leaves l JOIN employees e ON e.id = l.employee_id
+    WHERE e.department = ? AND l.employee_id != ? AND e.status = 'Active'
+      AND l.status IN ('Pending', 'Approved') AND l.cancelled = 0
+      AND l.from_date <= ? AND l.to_date >= ?
+  `).get(employee.department, employee.id, toDate, fromDate);
+  return row.n;
 }
 
 function ensureBalances(employeeId) {
@@ -133,7 +276,8 @@ const withName = (rows) => rows.map((r) => {
     team_name: teamNameOf(e.team_id),
     current_stage_name: roleNameOf(r.current_stage_role_id),
     decided_by_name: decidedByName(r.decided_by),
-    approval_reason_labels: reasonLabelsOf(r.approval_reason_ids)
+    approval_reason_labels: reasonLabelsOf(r.approval_reason_ids),
+    handover_to_name: r.handover_to_employee_id ? empOf(r.handover_to_employee_id).name : null
   };
 });
 
@@ -147,6 +291,7 @@ const SCOPE_BANNER = {
 // HR overview: KPIs + approval chain + leave types + on-leave-by-department.
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  sendPendingLeaveReminders();
   const myEmpId = myEmployee(req.user.sub)?.id;
 
   // For a scoped role (stl/tl), every KPI/widget below is derived from filtered row sets
@@ -161,7 +306,8 @@ router.get('/overview', (req, res) => {
   const chainList = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC").all()), req.user.role, myEmpId)
     .slice(0, 8)
     .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, team_name: teamNameOf(l.team_id), current_stage_name: roleNameOf(l.current_stage_role_id) }))
-    .map((l) => ({ ...l, waiting_on: l.current_stage_name || bottomRole()?.name }));
+    .map((l) => ({ ...l, waiting_on: l.current_stage_name || bottomRole()?.name }))
+    .map((l) => ({ ...l, approvalSuggestion: approvalSuggestionFor(l) }));
 
   const byDept = {};
   let deptNames = db.prepare('SELECT name FROM departments ORDER BY name').all().map((d) => d.name);
@@ -199,6 +345,27 @@ router.get('/overview', (req, res) => {
 
 // --- Leave types: read by anyone authed; edit/pause/add by Super Admin only ---
 router.get('/types', (req, res) => res.json({ leaveTypes: allTypes() }));
+
+// Concurrent Leave Cap setting — everyone can read it (shown as context on the apply form),
+// only Super Admin can change it, same gate as leave-type management just below.
+router.get('/concurrent-limit', (req, res) => res.json({ limitPct: getConcurrentLeaveLimitPct() }));
+router.put('/concurrent-limit', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can change this setting' });
+  const pct = parseInt(req.body?.limitPct, 10);
+  if (!Number.isFinite(pct) || pct < 1 || pct > 100) return res.status(400).json({ error: 'limitPct must be a whole number between 1 and 100.' });
+  setConcurrentLeaveLimitPct(pct);
+  res.json({ limitPct: pct });
+});
+
+// Flat headcount ceiling — same read/write gate as the percentage above.
+router.get('/concurrent-max-count', (req, res) => res.json({ maxCount: getConcurrentLeaveMaxCount() }));
+router.put('/concurrent-max-count', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can change this setting' });
+  const n = parseInt(req.body?.maxCount, 10);
+  if (!Number.isFinite(n) || n < 1) return res.status(400).json({ error: 'maxCount must be a whole number of at least 1.' });
+  setConcurrentLeaveMaxCount(n);
+  res.json({ maxCount: n });
+});
 
 router.post('/types', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can add leave types' });
@@ -371,11 +538,13 @@ router.post('/cancellations/:id/reject', decideCancel('Rejected'));
 
 // --- Main list + apply ---
 router.get('/', (req, res) => {
+  sendPendingLeaveReminders();
   if (isHR(req.user.role)) {
     const rows = db.prepare("SELECT * FROM leaves ORDER BY (status='Pending') DESC, created_at DESC").all();
     const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
     const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
-    return res.json({ leaves: withName(scoped) });
+    const named = withName(scoped).map((l) => (l.status === 'Pending' ? { ...l, approvalSuggestion: approvalSuggestionFor(l) } : l));
+    return res.json({ leaves: named });
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ leaves: [], balances: [] });
@@ -398,6 +567,7 @@ router.get('/mine', (req, res) => {
   // from /overview, which is HR-only) so a plain employee's ChainStepper can actually render
   // instead of silently failing to load it.
   if (!me) return res.json({ leaves: [], balances: [], history: [], chainLabel: approvalChainLabel() });
+  sendPendingLeaveReminders();
   const rows = db.prepare('SELECT * FROM leaves WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
   const balances = balancesFor(me.id); // must run first — this is what triggers/logs the lazy accrual the history query below reads
   const history = db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(me.id);
@@ -407,11 +577,16 @@ router.get('/mine', (req, res) => {
 router.post('/', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { leave_type_id, from_date, to_date, reason, document_data_url, document_name } = req.body || {};
+  const { leave_type_id, from_date, to_date, reason, document_data_url, document_name, is_emergency, handover_to_employee_id, handover_notes, handover_attachment_data_url, handover_attachment_name } = req.body || {};
   const lt = leave_type_id ? typeById(leave_type_id) : null;
   if (!lt || !from_date || !to_date) return res.status(400).json({ error: 'leave_type_id, from_date and to_date are required' });
   if (!lt.active) return res.status(400).json({ error: `${lt.name} is currently paused and cannot be applied for.` });
   if (to_date < from_date) return res.status(400).json({ error: 'End date cannot be before start date' });
+  const emergency = !!is_emergency;
+  if (emergency && !reason?.trim()) return res.status(400).json({ error: 'A reason is required for emergency leave.' });
+  if (handover_to_employee_id && !isValidHandoverTarget(me.id, me.department, handover_to_employee_id)) {
+    return res.status(400).json({ error: 'Handover must go to a colleague in your own department — or, if you\'re a Team Lead, another Team Lead in any department.' });
+  }
 
   const days = daysBetween(from_date, to_date);
   if (!lt.unpaid) {
@@ -419,12 +594,74 @@ router.post('/', (req, res) => {
     if (bal < days) return res.status(400).json({ error: `Not enough ${lt.name} balance (${bal} left, ${days} requested)` });
   }
 
+  // Concurrent Leave Cap: compare against every other employee in the same department — if too
+  // many people would be out at once for these dates, the request is normally blocked outright
+  // rather than silently approved and discovered short-staffed later. Two independent ceilings
+  // both apply and whichever is stricter wins: a percentage of the department AND a flat
+  // headcount (a % alone can still let a small department's whole team out at once). Emergency
+  // leave is the one exception — a genuine emergency shouldn't be held up by a headcount rule —
+  // but if it would have exceeded either cap, HR still gets alerted so the conflict is visible,
+  // not silent.
+  const deptTotal = db.prepare("SELECT COUNT(*) AS n FROM employees WHERE department = ? AND status = 'Active'").get(me.department).n;
+  const limitPct = getConcurrentLeaveLimitPct();
+  const maxCount = getConcurrentLeaveMaxCount();
+  const maxConcurrent = Math.min(Math.max(1, Math.floor(deptTotal * limitPct / 100)), maxCount);
+  const alreadyOut = overlappingDeptLeaveCount(me, from_date, to_date);
+  const overCap = alreadyOut + 1 > maxConcurrent;
+  if (overCap && !emergency) {
+    return res.status(400).json({
+      error: `Too many people in ${me.department} are already scheduled off during these dates (${alreadyOut} of ${deptTotal} employees, over the limit of ${maxConcurrent}) — please pick different dates, check with HR, or mark this as an emergency if it can't wait.`
+    });
+  }
+
   const stage = bottomRole();
   const info = db.prepare(`
-    INSERT INTO leaves (employee_id, leave_type_id, type, from_date, to_date, days, reason, current_stage_role_id, document_data_url, document_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(me.id, lt.id, lt.name, from_date, to_date, days, reason || null, stage ? stage.id : null, document_data_url || null, document_name || null);
+    INSERT INTO leaves (employee_id, leave_type_id, type, from_date, to_date, days, reason, current_stage_role_id, document_data_url, document_name, is_emergency, handover_to_employee_id, handover_notes, handover_attachment_data_url, handover_attachment_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(me.id, lt.id, lt.name, from_date, to_date, days, reason || null, stage ? stage.id : null, document_data_url || null, document_name || null, emergency ? 1 : 0, handover_to_employee_id || null, handover_notes?.trim() || null, handover_attachment_data_url || null, handover_attachment_name || null);
+
+  if (overCap && emergency) {
+    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)').run(
+      'Emergency Leave — Department Over Capacity',
+      `${me.name}'s emergency ${lt.name} request (${from_date} to ${to_date}) was let through despite ${me.department} already having ${alreadyOut} of ${deptTotal} employees out (over the limit of ${maxConcurrent}). Reason: ${reason.trim()}`,
+      'staff'
+    );
+  }
+
+  if (handover_to_employee_id) {
+    notifyEmployee(handover_to_employee_id, 'You\'ve been asked to cover a leave', `${me.name} has named you to cover their work while on ${lt.name} from ${from_date} to ${to_date}.${handover_notes?.trim() ? ` Notes: ${handover_notes.trim()}` : ''}`);
+  }
+
   res.status(201).json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(info.lastInsertRowid)])[0] });
+});
+
+// Employee sets/updates who covers their work — only while the request is still Pending (once
+// decided, the point of naming a handover before approval has already passed).
+router.put('/:id/handover', (req, res) => {
+  const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
+  if (!leave) return res.status(404).json({ error: 'Leave request not found' });
+  const me = myEmployee(req.user.sub);
+  if (!isHR(req.user.role) && leave.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (leave.status !== 'Pending') return res.status(400).json({ error: 'Only a still-pending request\'s handover can be changed.' });
+  const { handover_to_employee_id, handover_notes, handover_attachment_data_url, handover_attachment_name } = req.body || {};
+  if (!handover_to_employee_id) return res.status(400).json({ error: 'A handover assignee is required.' });
+  const owner = empOf(leave.employee_id);
+  if (!isValidHandoverTarget(leave.employee_id, owner.department, handover_to_employee_id)) {
+    return res.status(400).json({ error: 'Handover must go to a colleague in the requester\'s own department — or, if they\'re a Team Lead, another Team Lead in any department.' });
+  }
+  db.prepare('UPDATE leaves SET handover_to_employee_id = ?, handover_notes = ?, handover_attachment_data_url = ?, handover_attachment_name = ? WHERE id = ?')
+    .run(handover_to_employee_id, handover_notes?.trim() || null, handover_attachment_data_url || null, handover_attachment_name || null, leave.id);
+  notifyEmployee(handover_to_employee_id, 'You\'ve been asked to cover a leave', `${owner.name || 'A colleague'} has named you to cover their work while on ${leave.type} from ${leave.from_date} to ${leave.to_date}.${handover_notes?.trim() ? ` Notes: ${handover_notes.trim()}` : ''}`);
+  res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
+});
+
+// Colleagues this user is allowed to hand their work over to — their own department, plus (if
+// they're a Team Lead) every other Team Lead company-wide, since a small department may not have
+// a second TL to receive it.
+router.get('/handover-candidates', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.json({ candidates: [] });
+  res.json({ candidates: handoverCandidatesFor(me.id, me.department) });
 });
 
 // Employee (or HR on their behalf) requests cancellation of an already-approved, active leave.
@@ -462,6 +699,12 @@ function decide(finalStatus) {
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
     if (!leave) return res.status(404).json({ error: 'Leave request not found' });
     if (leave.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
+
+    // Work Handover: a leave can't be approved until someone is named to cover the requester's
+    // work — no gate on Reject, since a rejected request never goes out anyway.
+    if (finalStatus === 'Approved' && !leave.handover_to_employee_id) {
+      return res.status(400).json({ error: 'This request needs a handover assignee before it can be approved — ask the employee to name who will cover their work.' });
+    }
 
     // A Senior Team Lead/Team Lead may only act on requests from employees within their
     // assigned departments/teams — even though the chain says it's their turn — unlike every

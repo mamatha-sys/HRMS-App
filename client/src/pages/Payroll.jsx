@@ -49,6 +49,7 @@ function payslipHtml({ payslip, employee, company }) {
   const deductionLines = [...(payslip.deductions || [])];
   if (payslip.late_deduction) deductionLines.push({ label: 'Late Arrival Half-day Cut', amount: payslip.late_deduction });
   if (payslip.lop_deduction) deductionLines.push({ label: `Loss of Pay (${payslip.lop_days} day${payslip.lop_days === 1 ? '' : 's'})`, amount: payslip.lop_deduction });
+  if (payslip.sandwich_lop_deduction) deductionLines.push({ label: `Weekend Loss of Pay — Sandwich Rule (${payslip.sandwich_lop_days} day${payslip.sandwich_lop_days === 1 ? '' : 's'})`, amount: payslip.sandwich_lop_deduction });
   const grossSalary = earnings.reduce((t, l) => t + l.amount, 0);
   const totalDeductions = deductionLines.reduce((t, l) => t + l.amount, 0);
   const rowCount = Math.max(earnings.length, deductionLines.length, 1);
@@ -471,6 +472,70 @@ function HRPayroll({ compact, sectionLabel }) {
   );
 }
 
+function PayrollComparison() {
+  const [cmp, setCmp] = useState(null);
+  const [error, setError] = useState('');
+  const [explanation, setExplanation] = useState('');
+  const [explaining, setExplaining] = useState(false);
+
+  useEffect(() => { api.get('/payroll/monthly-comparison').then((r) => setCmp(r.data)).catch(() => setError('Could not load monthly comparison.')); }, []);
+
+  async function explain() {
+    setExplaining(true);
+    setExplanation('');
+    try {
+      const res = await api.post('/payroll/monthly-comparison/explain', {
+        current: cmp.current, previous: cmp.previous, newHires: cmp.newHires, exited: cmp.exited, biggestChanges: cmp.biggestChanges
+      });
+      setExplanation(res.data.explanation);
+    } catch {
+      setExplanation('Could not generate an AI explanation right now — the numbers above are still accurate.');
+    } finally {
+      setExplaining(false);
+    }
+  }
+
+  if (error) return <div className="card"><div className="banner error">{error}</div></div>;
+  if (!cmp) return null;
+
+  if (!cmp.available) {
+    return (
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>AI Monthly Comparison</div>
+        <div className="empty">{cmp.message}</div>
+      </div>
+    );
+  }
+
+  const netDelta = cmp.current.totalNet - cmp.previous.totalNet;
+
+  return (
+    <div className="card">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+        <div className="feature-name">AI Monthly Comparison — {cmp.current.month} vs {cmp.previous.month}</div>
+        <button onClick={explain} disabled={explaining}>{explaining ? 'Thinking…' : 'AI Assist: Explain change'}</button>
+      </div>
+      <table>
+        <thead><tr><th>Month</th><th>Employees</th><th>Total Net</th><th>Deductions</th><th>LOP</th><th>Late</th></tr></thead>
+        <tbody>
+          <tr><td>{cmp.previous.month}</td><td>{cmp.previous.headcount}</td><td>{inr(cmp.previous.totalNet)}</td><td>{inr(cmp.previous.totalDeductions)}</td><td>{inr(cmp.previous.totalLop)}</td><td>{inr(cmp.previous.totalLate)}</td></tr>
+          <tr><td>{cmp.current.month}</td><td>{cmp.current.headcount}</td><td>{inr(cmp.current.totalNet)}</td><td>{inr(cmp.current.totalDeductions)}</td><td>{inr(cmp.current.totalLop)}</td><td>{inr(cmp.current.totalLate)}</td></tr>
+        </tbody>
+      </table>
+      <div style={{ marginTop: 8 }}>
+        Net payout change: <strong style={{ color: netDelta >= 0 ? 'var(--green, #16a34a)' : 'var(--red, #dc2626)' }}>{netDelta >= 0 ? '+' : ''}{inr(netDelta)}</strong>
+      </div>
+      {(cmp.newHires.length > 0 || cmp.exited.length > 0) && (
+        <div style={{ marginTop: 6, fontSize: 13, color: 'var(--muted, #666)' }}>
+          {cmp.newHires.length > 0 && <div>New hires: {cmp.newHires.join(', ')}</div>}
+          {cmp.exited.length > 0 && <div>No longer on payroll: {cmp.exited.join(', ')}</div>}
+        </div>
+      )}
+      {explanation && <div className="banner" style={{ marginTop: 10 }}>{explanation}</div>}
+    </div>
+  );
+}
+
 function PayrollReports() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -486,6 +551,8 @@ function PayrollReports() {
     <div>
       {error && <div className="banner error">{error}</div>}
       <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 10 }}><button className="primary" onClick={exportCsv}>Export full report</button></div>
+
+      <PayrollComparison />
 
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>Payroll by Period</div>

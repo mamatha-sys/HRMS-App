@@ -22,6 +22,21 @@ const SCOPED_ROLES = ['stl', 'tl'];
 const SELF_AND_TEAM_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const tag = (s) => s === 'Approved' ? 'present' : s === 'Rejected' ? 'absent' : 'pending';
 
+// Approval Suggestion: advisory context for whoever is deciding a pending request — this
+// month's goal progress, this month's attendance, and leave days already taken this year
+// (including this request). Never blocks or auto-decides anything, just surfaces the same
+// signals a manager would informally check before approving.
+function ApprovalSuggestion({ s }) {
+  if (!s) return null;
+  const isApprove = s.recommendation === 'Approve';
+  return (
+    <div className={'banner ' + (isApprove ? 'info' : 'error')} style={{ margin: '4px 0', padding: '6px 10px', fontSize: 12 }}>
+      {isApprove ? '✅ Looks fine to approve' : '⚠️ Worth a second look'} — Targets {s.targetsScore != null ? `${s.targetsScore}%` : 'none this month'} · Attendance {s.attendanceScore}% · {s.leaveDaysYtd} leave day{s.leaveDaysYtd === 1 ? '' : 's'} this year
+      {s.reasons.length > 0 && <div>{s.reasons.map((r) => `• ${r}`).join('  ')}</div>}
+    </div>
+  );
+}
+
 // Groups one leave type's ledger entries (each already tagged with the calendar month it belongs
 // to via period_month) into a month-by-month table: what was earned, what was taken, and the
 // balance standing at the end of that month — ascending so the balance rolls forward correctly.
@@ -85,10 +100,15 @@ function MyLeave({ compact }) {
   const [chainLabel, setChainLabel] = useState('');
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
-  const [form, setForm] = useState({ leave_type_id: '', from_date: '', to_date: '', reason: '' });
+  const [form, setForm] = useState({ leave_type_id: '', from_date: '', to_date: '', reason: '', is_emergency: false, handover_to_employee_id: '', handover_notes: '' });
   const [document, setDocument] = useState(null);
   const [showForm, setShowForm] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [colleagues, setColleagues] = useState([]);
+  const [handoverFor, setHandoverFor] = useState(null);
+  const [handoverDraft, setHandoverDraft] = useState({ handover_to_employee_id: '', handover_notes: '' });
+  const [handoverFile, setHandoverFile] = useState(null);
+  const [handoverEditFile, setHandoverEditFile] = useState(null);
 
   function load() {
     api.get('/leaves/mine').then((r) => {
@@ -100,14 +120,26 @@ function MyLeave({ compact }) {
     }).catch(() => setError('Could not load leaves.'));
   }
   useEffect(load, []);
+  // Scoped server-side to the requester's own department, plus (for Team Leads) every other
+  // Team Lead — not the full company employee list, matching what the server will actually accept.
+  useEffect(() => { api.get('/leaves/handover-candidates').then((r) => setColleagues(r.data.candidates)).catch(() => {}); }, []);
 
   async function apply(e) {
     e.preventDefault(); setError(''); setInfo('');
     try {
       const document_data_url = document ? await readFileAsDataUrl(document) : undefined;
-      await api.post('/leaves', { ...form, document_data_url, document_name: document?.name });
-      setInfo('Leave applied.'); setForm({ ...form, from_date: '', to_date: '', reason: '' }); setDocument(null); setShowForm(false); load();
+      const handover_attachment_data_url = handoverFile ? await readFileAsDataUrl(handoverFile) : undefined;
+      await api.post('/leaves', { ...form, document_data_url, document_name: document?.name, handover_attachment_data_url, handover_attachment_name: handoverFile?.name });
+      setInfo('Leave applied.'); setForm({ ...form, from_date: '', to_date: '', reason: '', is_emergency: false, handover_to_employee_id: '', handover_notes: '' }); setDocument(null); setHandoverFile(null); setShowForm(false); load();
     } catch (err) { setError(err.response?.data?.error || 'Could not apply.'); }
+  }
+  async function saveHandover(id) {
+    setError('');
+    try {
+      const handover_attachment_data_url = handoverEditFile ? await readFileAsDataUrl(handoverEditFile) : undefined;
+      await api.put(`/leaves/${id}/handover`, { ...handoverDraft, handover_attachment_data_url, handover_attachment_name: handoverEditFile?.name });
+      setHandoverFor(null); setHandoverEditFile(null); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not set handover.'); }
   }
   async function requestCancel(id) {
     setError(''); setInfo('');
@@ -185,7 +217,27 @@ function MyLeave({ compact }) {
                 <label className="field-label">Supporting document <span className="note">(optional — e.g. medical certificate)</span></label>
                 <input type="file" accept="image/*,application/pdf" onChange={(e) => setDocument(e.target.files?.[0] || null)} />
               </div>
+              <div>
+                <label className="field-label">Hand over work to <span className="note">(required before this can be approved — your department, or another Team Lead if you're one)</span></label>
+                <select value={form.handover_to_employee_id} onChange={(e) => setForm({ ...form, handover_to_employee_id: e.target.value })}>
+                  <option value="">Select colleague…</option>
+                  {colleagues.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.employee_code}){c.department ? ` — ${c.department}` : ''}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="field-label">Handover notes <span className="note">(optional)</span></label>
+                <input placeholder="e.g. what to watch for while I'm out" value={form.handover_notes} onChange={(e) => setForm({ ...form, handover_notes: e.target.value })} />
+              </div>
+              <div>
+                <label className="field-label">Handover file <span className="note">(optional — e.g. status notes, docs)</span></label>
+                <input type="file" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx" onChange={(e) => setHandoverFile(e.target.files?.[0] || null)} />
+              </div>
             </div>
+            <label className="row" style={{ alignItems: 'center', gap: 6, marginTop: 8 }}>
+              <input type="checkbox" checked={form.is_emergency} onChange={(e) => setForm({ ...form, is_emergency: e.target.checked })} style={{ width: 16, height: 16 }} />
+              <span>This is an emergency — let it through even if the team's concurrent-leave limit is full</span>
+            </label>
+            {form.is_emergency && <div className="feature-meta" style={{ marginBottom: 8 }}>A reason is required for emergency leave — HR is notified if this pushes your department over its usual limit.</div>}
             <div className="row" style={{ marginTop: 12 }}><button className="primary" type="submit">Submit application</button></div>
           </form>
         </div>
@@ -197,13 +249,41 @@ function MyLeave({ compact }) {
         {leaves.map((l) => (
           <div key={l.id} className="card" style={{ background: '#FBFCFE' }}>
             <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6 }}>
-              <span>{l.type} — {l.from_date} to {l.to_date} ({l.days}d){l.reason ? ` — ${l.reason}` : ''}</span>
+              <span>
+                {l.type} — {l.from_date} to {l.to_date} ({l.days}d){l.reason ? ` — ${l.reason}` : ''}
+                {!!l.is_emergency && <span className="status-tag absent" style={{ marginLeft: 6 }}>Emergency</span>}
+              </span>
               <span className={'status-tag ' + tag(l.status)}>{l.cancelled ? 'Cancelled' : l.status}{l.cancel_requested ? ' · cancel pending' : ''}</span>
             </div>
             {l.document_data_url && (
               <a className="pill" href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginBottom: 6 }}>
                 📎 {l.document_name || 'Attachment'}
               </a>
+            )}
+            <div className="feature-meta" style={{ marginBottom: 6 }}>
+              {l.handover_to_name ? `Handover: ${l.handover_to_name}${l.handover_notes ? ` — ${l.handover_notes}` : ''}` : (
+                l.status === 'Pending' ? <span style={{ color: '#B3401E' }}>No handover assigned yet — required before this can be approved.</span> : 'No handover was assigned.'
+              )}
+              {l.handover_attachment_data_url && (
+                <a href={l.handover_attachment_data_url} download={l.handover_attachment_name || 'handover-file'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.handover_attachment_name || 'Handover file'}</a>
+              )}
+              {l.status === 'Pending' && (
+                <button style={{ marginLeft: 8 }} onClick={() => { setHandoverFor(l.id); setHandoverDraft({ handover_to_employee_id: l.handover_to_employee_id || '', handover_notes: l.handover_notes || '' }); setHandoverEditFile(null); }}>
+                  {l.handover_to_name ? 'Change' : 'Set handover'}
+                </button>
+              )}
+            </div>
+            {handoverFor === l.id && (
+              <div className="row" style={{ flexWrap: 'wrap', marginBottom: 6, gap: 6, alignItems: 'center' }}>
+                <select value={handoverDraft.handover_to_employee_id} onChange={(e) => setHandoverDraft({ ...handoverDraft, handover_to_employee_id: e.target.value })}>
+                  <option value="">Select colleague…</option>
+                  {colleagues.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.employee_code}){c.department ? ` — ${c.department}` : ''}</option>)}
+                </select>
+                <input placeholder="Notes (optional)" value={handoverDraft.handover_notes} onChange={(e) => setHandoverDraft({ ...handoverDraft, handover_notes: e.target.value })} style={{ flex: '1 1 160px' }} />
+                <input type="file" accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx" onChange={(e) => setHandoverEditFile(e.target.files?.[0] || null)} style={{ flex: '1 1 160px' }} />
+                <button className="primary" onClick={() => saveHandover(l.id)} disabled={!handoverDraft.handover_to_employee_id}>Save</button>
+                <button onClick={() => setHandoverFor(null)}>Cancel</button>
+              </div>
             )}
             {l.status === 'Pending' && chainLabel && <ChainStepper chainLabel={chainLabel} currentStageName={l.current_stage_name} status={l.status} />}
             {l.status !== 'Pending' && l.decided_by_name && (
@@ -296,11 +376,23 @@ function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
     <>
       <tr>
         <td>{l.employee_name}</td><td>{l.team_name || '—'}</td>
-        <td>{l.type}{l.document_data_url && <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" title={l.document_name || 'Attachment'} style={{ marginLeft: 4 }}>📎</a>}</td>
+        <td>
+          {l.type}{!!l.is_emergency && <span className="status-tag absent" style={{ marginLeft: 4 }}>Emergency</span>}{l.document_data_url && <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" title={l.document_name || 'Attachment'} style={{ marginLeft: 4 }}>📎</a>}
+          {l.status === 'Pending' && (l.handover_to_name ? <div className="feature-meta">Handover: {l.handover_to_name}</div> : <div className="feature-meta" style={{ color: '#B3401E' }}>No handover</div>)}
+        </td>
+        <td>{l.reason?.trim() || '—'}</td>
         <td>{l.from_date}</td><td>{l.to_date}</td><td>{l.days}</td>
         <td>
           <span className={'status-tag ' + tag(l.status)}>{l.cancelled ? 'Cancelled' : l.status}</span>
           {l.status !== 'Pending' && l.decided_by_name && <div className="feature-meta">by {l.decided_by_name}</div>}
+          {l.approvalSuggestion && (
+            <div
+              className="feature-meta"
+              title={`Targets ${l.approvalSuggestion.targetsScore != null ? l.approvalSuggestion.targetsScore + '%' : 'none this month'} · Attendance ${l.approvalSuggestion.attendanceScore}% · ${l.approvalSuggestion.leaveDaysYtd} leave days this year${l.approvalSuggestion.reasons.length ? ' — ' + l.approvalSuggestion.reasons.join('; ') : ''}`}
+            >
+              {l.approvalSuggestion.recommendation === 'Approve' ? '✅ Good to approve' : '⚠️ Worth a look'}
+            </div>
+          )}
         </td>
         <td>{l.status === 'Pending' ? (
           !open && (
@@ -313,7 +405,7 @@ function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
       </tr>
       {open && (
         <tr>
-          <td colSpan={8}>
+          <td colSpan={9}>
             <div style={{ background: '#F4F7FB', border: '1px solid #EEF0F3', borderRadius: 8, padding: 10, textAlign: 'left' }}>
               <div className="feature-meta" style={{ marginBottom: 8 }}>Reason for approving this {l.days}-day request:</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 18px', marginBottom: 10 }}>
@@ -354,6 +446,12 @@ function HRLeave({ compact, sectionLabel }) {
   const [reasons, setReasons] = useState([]);
   const [showAddReason, setShowAddReason] = useState(false);
   const [newReason, setNewReason] = useState('');
+  const [limitPct, setLimitPct] = useState(null);
+  const [limitDraft, setLimitDraft] = useState('');
+  const [editingLimit, setEditingLimit] = useState(false);
+  const [maxCount, setMaxCount] = useState(null);
+  const [maxCountDraft, setMaxCountDraft] = useState('');
+  const [editingMaxCount, setEditingMaxCount] = useState(false);
 
   function load() {
     api.get('/leaves/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load leave overview.'));
@@ -364,6 +462,21 @@ function HRLeave({ compact, sectionLabel }) {
   useEffect(load, []);
   useEffect(loadReasons, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
+  useEffect(() => { api.get('/leaves/concurrent-limit').then((r) => setLimitPct(r.data.limitPct)).catch(() => {}); }, []);
+  useEffect(() => { api.get('/leaves/concurrent-max-count').then((r) => setMaxCount(r.data.maxCount)).catch(() => {}); }, []);
+
+  async function saveLimit() {
+    setError('');
+    const pct = parseInt(limitDraft, 10);
+    try { await api.put('/leaves/concurrent-limit', { limitPct: pct }); setLimitPct(pct); setEditingLimit(false); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
+  async function saveMaxCount() {
+    setError('');
+    const n = parseInt(maxCountDraft, 10);
+    try { await api.put('/leaves/concurrent-max-count', { maxCount: n }); setMaxCount(n); setEditingMaxCount(false); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save.'); }
+  }
 
   async function decide(id, verb, body) {
     setError('');
@@ -459,10 +572,21 @@ function HRLeave({ compact, sectionLabel }) {
                       onReject={() => decide(l.id, 'reject')}
                       header={
                         <span>
-                          {l.employee_name}{l.team_name && <span className="feature-meta"> ({l.team_name})</span>} — {l.type} ({l.days}d)
-                          {l.document_data_url && (
-                            <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.document_name || 'Attachment'}</a>
-                          )}
+                          <span>
+                            {l.employee_name}{l.team_name && <span className="feature-meta"> ({l.team_name})</span>} — {l.type} ({l.days}d)
+                            {!!l.is_emergency && <span className="status-tag absent" style={{ marginLeft: 6 }}>Emergency</span>}
+                            {l.document_data_url && (
+                              <a href={l.document_data_url} download={l.document_name || 'document'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.document_name || 'Attachment'}</a>
+                            )}
+                          </span>
+                          <div className="feature-meta">Reason: {l.reason?.trim() || '—'}</div>
+                          <div className="feature-meta">
+                            {l.handover_to_name ? `Handover: ${l.handover_to_name}` : <span style={{ color: '#B3401E', fontWeight: 600 }}>No handover assigned — cannot be approved yet.</span>}
+                            {l.handover_attachment_data_url && (
+                              <a href={l.handover_attachment_data_url} download={l.handover_attachment_name || 'handover-file'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.handover_attachment_name || 'Handover file'}</a>
+                            )}
+                          </div>
+                          <ApprovalSuggestion s={l.approvalSuggestion} />
                         </span>
                       }
                     />
@@ -528,6 +652,45 @@ function HRLeave({ compact, sectionLabel }) {
                     )}
                   </div>
                 ))}
+
+                <div className="rec-row" style={{ marginTop: 4, borderTop: '1px solid #EEF0F3', paddingTop: 10 }}>
+                  <span>
+                    Concurrent Leave Cap
+                    <div className="feature-meta">Max % of a department that can be on leave for the same dates at once — blocks new applications past this.</div>
+                  </span>
+                  {editingLimit ? (
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input type="number" min="1" max="100" value={limitDraft} onChange={(e) => setLimitDraft(e.target.value)} style={{ width: 60 }} />
+                      <span>%</span>
+                      <button className="primary" onClick={saveLimit}>Save</button>
+                      <button onClick={() => setEditingLimit(false)}>Cancel</button>
+                    </span>
+                  ) : (
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span className="feature-meta" style={{ fontWeight: 700 }}>{limitPct ?? '—'}%</span>
+                      {user?.role === 'super_admin' && <button onClick={() => { setLimitDraft(String(limitPct ?? '')); setEditingLimit(true); }}>Edit</button>}
+                    </span>
+                  )}
+                </div>
+
+                <div className="rec-row" style={{ borderTop: '1px solid #EEF0F3', paddingTop: 10 }}>
+                  <span>
+                    Concurrent Leave Cap — Flat Headcount
+                    <div className="feature-meta">Absolute max people from one department on leave at once, regardless of department size — whichever cap (this or the % above) is stricter wins.</div>
+                  </span>
+                  {editingMaxCount ? (
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input type="number" min="1" value={maxCountDraft} onChange={(e) => setMaxCountDraft(e.target.value)} style={{ width: 60 }} />
+                      <button className="primary" onClick={saveMaxCount}>Save</button>
+                      <button onClick={() => setEditingMaxCount(false)}>Cancel</button>
+                    </span>
+                  ) : (
+                    <span style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span className="feature-meta" style={{ fontWeight: 700 }}>{maxCount ?? '—'}</span>
+                      {user?.role === 'super_admin' && <button onClick={() => { setMaxCountDraft(String(maxCount ?? '')); setEditingMaxCount(true); }}>Edit</button>}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -593,7 +756,7 @@ function HRLeave({ compact, sectionLabel }) {
             {showAll && (
               filteredLeaves.length === 0 ? <div className="empty">No leave requests{leaves.length ? ' match this filter.' : '.'}</div> : (
                 <table>
-                  <thead><tr><th>Employee</th><th>Team</th><th>Type</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Action</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Team</th><th>Type</th><th>Reason</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Action</th></tr></thead>
                   <tbody>{filteredLeaves.map((l) => (
                     <LeaveTableRow key={l.id} l={l} reasons={reasons} isSuperAdmin={user?.role === 'super_admin'} onDecide={decide} onError={setError} />
                   ))}</tbody>

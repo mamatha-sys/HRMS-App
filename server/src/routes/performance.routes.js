@@ -122,6 +122,58 @@ function departmentProgressFor(month, deptFilter) {
   }).sort((a, b) => b.avgProgress - a.avgProgress);
 }
 
+// Per-employee disciplinary standing: starts at 100 and deducts per case, scaled by how serious
+// the category is (a Termination case costs far more than a Warning) and halved once a case is
+// Resolved rather than still Open — a settled matter shouldn't weigh as heavily as an active one,
+// but a clean-now record that had real history still isn't treated as if nothing ever happened.
+const DISCIPLINARY_SEVERITY = { Warning: 10, Suspension: 30, Termination: 100, Other: 10 };
+function disciplinaryScoreFor(employeeId) {
+  const cases = db.prepare('SELECT category, status FROM disciplinary_cases WHERE employee_id = ?').all(employeeId);
+  const openCases = cases.filter((c) => c.status === 'Open').length;
+  const deduction = cases.reduce((sum, c) => sum + (DISCIPLINARY_SEVERITY[c.category] || DISCIPLINARY_SEVERITY.Other) * (c.status === 'Open' ? 1 : 0.5), 0);
+  return { score: Math.max(0, Math.round(100 - deduction)), openCases, resolvedCases: cases.length - openCases };
+}
+
+// The Employee Progress Score: one 0-100 number blending three independent signals — how much of
+// this month's assigned goals are done (50%), attendance reliability this month (30%), and
+// disciplinary record (20%). Goals matter most, but strong attendance/conduct can lift a score and
+// a poor one can drag it down, same reasoning a manager would weigh them by. If no targets are
+// assigned yet this month, goals is excluded entirely (not scored as 0%, since having nothing
+// assigned isn't the employee's fault) and the remaining two weights are renormalized so they
+// still sum to 100%.
+const PROGRESS_WEIGHTS = { goals: 0.5, attendance: 0.3, disciplinary: 0.2 };
+function progressScoreFor(employeeId, month) {
+  const targets = db.prepare('SELECT progress_pct FROM performance_reviews WHERE employee_id = ? AND month = ?').all(employeeId, month);
+  const goalsScore = targets.length ? Math.round(targets.reduce((s, t) => s + t.progress_pct, 0) / targets.length) : null;
+  const attendanceScore = monthlyAttendanceSummary(employeeId, month).attendancePct;
+  const { score: disciplinaryScore, openCases, resolvedCases } = disciplinaryScoreFor(employeeId);
+
+  const parts = [
+    goalsScore != null ? { score: goalsScore, weight: PROGRESS_WEIGHTS.goals } : null,
+    { score: attendanceScore, weight: PROGRESS_WEIGHTS.attendance },
+    { score: disciplinaryScore, weight: PROGRESS_WEIGHTS.disciplinary }
+  ].filter(Boolean);
+  const totalWeight = parts.reduce((s, p) => s + p.weight, 0);
+  const overall = Math.round(parts.reduce((s, p) => s + p.score * p.weight, 0) / totalWeight);
+  const band = overall >= 75 ? 'High' : overall >= 50 ? 'Medium' : 'Low';
+
+  return {
+    overall, band,
+    goalsScore, targetsAssigned: targets.length, targetsCompleted: targets.filter(isTargetComplete).length,
+    attendanceScore, disciplinaryScore, openCases, resolvedCases
+  };
+}
+
+// Flat, sorted list (highest first) of every active employee's Progress Score for one month —
+// the HR-facing rollup, same active+has-department employee set as departmentProgressFor above.
+function employeeProgressList(month, deptFilter) {
+  let employees = db.prepare("SELECT id, name, employee_code, department FROM employees WHERE status = 'Active' AND department IS NOT NULL").all();
+  if (deptFilter) employees = employees.filter((e) => deptFilter.has(e.department));
+  return employees
+    .map((e) => ({ employee_id: e.id, name: e.name, employee_code: e.employee_code, department: e.department, ...progressScoreFor(e.id, month) }))
+    .sort((a, b) => b.overall - a.overall);
+}
+
 router.get('/overview', (req, res) => {
   if (!canViewPerformance(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   sendPendingAssessmentReminders();
@@ -156,6 +208,8 @@ router.get('/overview', (req, res) => {
   const avgOverallScore = totalReviews ? Math.round(reviews.reduce((t, r) => t + r.overallScore, 0) / totalReviews) : 0;
 
   const departmentProgress = departmentProgressFor(month, scoped ? scopeDeptNames : null);
+  const employeeProgress = employeeProgressList(month, scoped ? scopeDeptNames : null);
+  const avgProgressScore = employeeProgress.length ? Math.round(employeeProgress.reduce((s, e) => s + e.overall, 0) / employeeProgress.length) : 0;
   // A scoped supervisor's own standing blends their personal target progress with their
   // department's average this month — completing targets (their own, or their team's) directly
   // improves this number, which is the point: "when targets are completed, the TL/STL's own
@@ -175,10 +229,12 @@ router.get('/overview', (req, res) => {
       { label: 'Total Reviews', value: totalReviews, color: 'blue' },
       { label: 'Pending Reviews', value: pendingReviews, color: 'gold' },
       { label: 'Completed Reviews', value: completedReviews, color: 'green' },
-      { label: 'Average Performance Score', value: totalReviews ? `${avgOverallScore}/100` : '—', color: 'blue' }
+      { label: 'Average Performance Score', value: totalReviews ? `${avgOverallScore}/100` : '—', color: 'blue' },
+      { label: 'Average Progress Score', value: employeeProgress.length ? `${avgProgressScore}%` : '—', color: 'green' }
     ],
     month,
     departmentProgress,
+    employeeProgress,
     mySupervisorProgress,
     reviews,
     keyFeatures: KEY_FEATURES,
@@ -191,7 +247,7 @@ router.get('/overview', (req, res) => {
 // targets-per-month policy).
 router.get('/my-reviews', (req, res) => {
   const me = myEmployee(req.user.sub);
-  if (!me) return res.json({ reviews: [], attendance: null, thisMonthTargets: { assigned: 0, completed: 0, target: DEFAULT_TARGETS_PER_MONTH } });
+  if (!me) return res.json({ reviews: [], attendance: null, thisMonthTargets: { assigned: 0, completed: 0, target: DEFAULT_TARGETS_PER_MONTH }, progressScore: null });
   sendPendingAssessmentReminders();
   const reviews = db.prepare('SELECT * FROM performance_reviews WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map(withFeedback);
   const month = currentMonth();
@@ -200,7 +256,8 @@ router.get('/my-reviews', (req, res) => {
   res.json({
     reviews,
     attendance: monthlyAttendanceSummary(me.id, month),
-    thisMonthTargets: { assigned: thisMonth.length, completed: thisMonth.filter(isTargetComplete).length, target: targetsPerMonthFor(dept?.id) }
+    thisMonthTargets: { assigned: thisMonth.length, completed: thisMonth.filter(isTargetComplete).length, target: targetsPerMonthFor(dept?.id) },
+    progressScore: progressScoreFor(me.id, month)
   });
 });
 

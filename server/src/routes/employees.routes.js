@@ -10,6 +10,7 @@ import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { CSV_FIELDS, DIRECT_COLUMN_KEYS } from '../utils/employeeCsvFields.js';
 import { verifyDocumentName } from '../utils/documentVerify.js';
+import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -108,6 +109,22 @@ function transfersFor(employeeId) {
   return db.prepare('SELECT * FROM employee_transfers WHERE employee_id = ? ORDER BY transfer_date DESC, created_at DESC').all(employeeId);
 }
 
+// Fields that meaningfully indicate a profile is actually filled in — deliberately not every
+// column (e.g. skips optional ones like education/experience/skills) so 100% represents "the
+// stuff that actually matters for onboarding/payroll/compliance", not "every field touched".
+const PROFILE_COMPLETION_FIELDS = [
+  'phone', 'email', 'date_of_birth', 'photo',
+  'address_line1', 'address_city', 'address_state', 'address_pincode',
+  'emergency_contact_name', 'emergency_contact_number',
+  'bank_name', 'bank_account_number', 'ifsc_code', 'pan_number', 'aadhaar_number',
+  'reporting_manager', 'date_of_joining'
+];
+function profileCompletionPct(emp, documents) {
+  const filled = PROFILE_COMPLETION_FIELDS.filter((f) => emp[f]?.toString().trim()).length + (documents.length > 0 ? 1 : 0);
+  const total = PROFILE_COMPLETION_FIELDS.length + 1; // +1 for "has at least one document"
+  return Math.round((filled / total) * 100);
+}
+
 function hydrate(emp) {
   let documents = [];
   if (emp.documents) { try { documents = JSON.parse(emp.documents); } catch { documents = []; } }
@@ -117,6 +134,7 @@ function hydrate(emp) {
   const editRequests = editRequestsFor(emp.name);
   return {
     ...rest, documents, phone_verified: !!emp.phone_verified, email_verified: !!emp.email_verified, custom_fields: customFieldValuesFor(emp.id),
+    profile_completion: profileCompletionPct(emp, documents),
     edit_requests: editRequests,
     edit_request_count: editRequests.length,
     // Derived, not the raw column — a Pending row in the chain is the actual source of truth now.
@@ -145,6 +163,35 @@ function maskEmployee(emp, requester) {
 
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 const present = (emp, requester) => maskEmployee(hydrate(emp), requester);
+
+// Attrition Risk: an HR/manager-only advisory signal (never shown to the employee themself — see
+// GET / below, which only attaches this on the HR/scoped-role branches) blending three things
+// already tracked elsewhere in the app — this month's attendance, open disciplinary cases, and
+// how much leave was taken in the last 90 days (a recent-pace check, distinct from Leave's own
+// year-to-date "Approval Suggestion" number). Purely advisory, same spirit as Progress Score and
+// Approval Suggestion: always shows the real numbers + specific reasons, never blocks anything.
+function attritionRiskFor(employeeId) {
+  const month = new Date().toISOString().slice(0, 7);
+  const { attendancePct } = monthlyAttendanceSummary(employeeId, month);
+  const cases = db.prepare("SELECT status FROM disciplinary_cases WHERE employee_id = ?").all(employeeId);
+  const openCases = cases.filter((c) => c.status === 'Open').length;
+  const leaveDaysRecent = db.prepare(`
+    SELECT COALESCE(SUM(days), 0) AS total FROM leaves
+    WHERE employee_id = ? AND cancelled = 0 AND status IN ('Pending', 'Approved') AND from_date >= date('now', '-90 days')
+  `).get(employeeId).total;
+
+  let score = 0;
+  const reasons = [];
+  if (attendancePct < 70) { score += 35; reasons.push(`attendance is low this month (${attendancePct}%)`); }
+  else if (attendancePct < 85) { score += 15; reasons.push(`attendance has dipped this month (${attendancePct}%)`); }
+  if (openCases > 0) { score += 35; reasons.push(`${openCases} open disciplinary case${openCases === 1 ? '' : 's'}`); }
+  if (leaveDaysRecent > 15) { score += 30; reasons.push(`${leaveDaysRecent} leave days taken in the last 90 days`); }
+  else if (leaveDaysRecent > 8) { score += 15; reasons.push(`${leaveDaysRecent} leave days taken in the last 90 days — above typical pace`); }
+
+  score = Math.min(100, score);
+  const band = score >= 55 ? 'High' : score >= 25 ? 'Medium' : 'Low';
+  return { score, band, attendancePct, openCases, leaveDaysRecent, reasons };
+}
 // account_active mirrors the linked login's users.active flag (null if there's no login yet) so
 // the Employee list can show/toggle Pause-Reactivate without a separate trip to User Management.
 const EMP_WITH_TEAM = 'SELECT e.*, t.name AS team_name, u.active AS account_active FROM employees e LEFT JOIN teams t ON t.id = e.team_id LEFT JOIN users u ON u.id = e.user_id';
@@ -163,10 +210,16 @@ router.post('/verify-document', async (req, res) => {
   }
 });
 
+// Attaches attrition_risk to everyone still employed — including On Probation, where the same
+// signals (attendance, disciplinary record) matter just as much for a confirm/extend/let-go call
+// as they do for a confirmed employee's flight risk. Only Exited is excluded (nothing left to
+// predict). Never called on the self-view branch below, so an employee never sees their own flag.
+const withAttritionRisk = (rows) => rows.map((r) => (r.status !== 'Exited' ? { ...r, attrition_risk: attritionRiskFor(r.id) } : r));
+
 router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
-    return res.json({ employees: rows.map((r) => present(r, req.user)) });
+    return res.json({ employees: withAttritionRisk(rows).map((r) => present(r, req.user)) });
   }
   // A Senior Team Lead/Team Lead can browse (read-only) the employee records in their own
   // assigned departments/teams — same fetch-then-filter scoping as Attendance/Leave — without
@@ -174,7 +227,7 @@ router.get('/', (req, res) => {
   if (isScopedRole(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
     const scoped = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
-    return res.json({ employees: scoped.map((r) => present(r, req.user)) });
+    return res.json({ employees: withAttritionRisk(scoped).map((r) => present(r, req.user)) });
   }
   const rows = db.prepare(`${EMP_WITH_TEAM} WHERE e.user_id = ?`).all(req.user.sub);
   res.json({ employees: rows.map((r) => present(r, req.user)) });

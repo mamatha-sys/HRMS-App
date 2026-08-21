@@ -41,6 +41,7 @@ import timesheetRoutes from './routes/timesheet.routes.js';
 import disciplinaryRoutes from './routes/disciplinary.routes.js';
 import myAccessRoutes from './routes/myAccess.routes.js';
 import chatbotRoutes from './routes/chatbot.routes.js';
+import agentRoutes from './routes/agent.routes.js';
 import interviewRoutes from './routes/interview.routes.js';
 
 const app = express();
@@ -87,6 +88,7 @@ app.use('/api/timesheet', timesheetRoutes);
 app.use('/api/disciplinary', disciplinaryRoutes);
 app.use('/api/my-access', myAccessRoutes);
 app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/agent', agentRoutes);
 app.use('/api/interview', interviewRoutes);
 
 // Production: this same process also serves the built React app (client/dist) — one Node

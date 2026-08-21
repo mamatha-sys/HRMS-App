@@ -3,6 +3,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { getSettings } from '../utils/integrationSettings.js';
+import { explainPayrollComparison } from '../utils/aiAssist.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -309,6 +310,39 @@ function lopFor(employeeId, month, gross) {
   return { lopDays, deduction: lopDays * perDayRate };
 }
 
+function shiftDate(dateStr, days) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Sandwich Rule (company policy): a weekly-off weekend "bookended" by an unexplained Absent mark
+// on both sides — the working day right before it (Friday) AND the working day right after
+// (Monday) — has that Saturday/Sunday become unpaid too, on the theory that someone absent both
+// days either side almost certainly didn't work the weekend either. Approved Leave never
+// triggers this, only an explicit 'Absent' status on BOTH sides does — someone on legitimate
+// leave adjacent to a weekend still gets it paid. There's no "weekly off" concept anywhere else
+// in this app (see attendanceCore.js), so Saturday/Sunday are detected here purely by date
+// (day-of-week 6/0), not by any shift/roster configuration.
+function sandwichWeekendDays(employeeId, month) {
+  const weekendDates = db.prepare(`
+    WITH RECURSIVE dates(d) AS (
+      SELECT date(? || '-01')
+      UNION ALL
+      SELECT date(d, '+1 day') FROM dates WHERE d < date(? || '-01', '+1 month', '-1 day')
+    )
+    SELECT d AS date, CAST(strftime('%w', d) AS INTEGER) AS dow FROM dates WHERE strftime('%w', d) IN ('0', '6')
+  `).all(month, month);
+
+  const statusOn = (date) => db.prepare('SELECT status FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, date)?.status;
+
+  return weekendDates.reduce((count, row) => {
+    const friday = row.dow === 6 ? shiftDate(row.date, -1) : shiftDate(row.date, -2);
+    const monday = row.dow === 6 ? shiftDate(row.date, 2) : shiftDate(row.date, 1);
+    return statusOn(friday) === 'Absent' && statusOn(monday) === 'Absent' ? count + 1 : count;
+  }, 0);
+}
+
 // HR runs payroll for a calendar month → one payslip per active employee (idempotent per
 // period). Automatically deducts half a day's pay per late arrival beyond the free monthly
 // allowance (company rule), shown as its own line item on the payslip.
@@ -333,12 +367,14 @@ router.post('/run', (req, res) => {
       const allowances = b.earnings.filter((l) => l.key !== 'basic' && l.key !== 'hra').reduce((t, l) => t + l.amount, 0);
       const { deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
       const { lopDays, deduction: lopDeduction } = lopFor(e.id, month, b.gross);
-      const daysWorked = daysInMonthFor(month) - lopDays;
-      const net = b.net - lateDeduction - lopDeduction;
+      const sandwichDays = sandwichWeekendDays(e.id, month);
+      const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
+      const daysWorked = daysInMonthFor(month) - lopDays - sandwichDays;
+      const net = b.net - lateDeduction - lopDeduction - sandwichDeduction;
       db.prepare(`
-        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, lop_days, lop_deduction, days_worked, net, lines_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lopDays, lopDeduction, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
+        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, lop_days, lop_deduction, sandwich_lop_days, sandwich_lop_deduction, days_worked, net, lines_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lopDays, lopDeduction, sandwichDays, sandwichDeduction, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
       generated++;
     });
     db.prepare("INSERT INTO payroll_runs (period, status) VALUES (?, 'Completed')").run(period);
@@ -391,7 +427,7 @@ router.get('/payslips/:id', (req, res) => {
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const byPeriod = db.prepare(`
-    SELECT period, COUNT(*) AS employees, SUM(net) AS total_net, SUM(basic + hra + allowances) AS total_gross, SUM(deductions) AS total_deductions, SUM(late_deduction) AS total_late_deduction, SUM(lop_deduction) AS total_lop_deduction
+    SELECT period, COUNT(*) AS employees, SUM(net) AS total_net, SUM(basic + hra + allowances) AS total_gross, SUM(deductions) AS total_deductions, SUM(late_deduction) AS total_late_deduction, SUM(lop_deduction) AS total_lop_deduction, SUM(sandwich_lop_deduction) AS total_sandwich_lop_deduction
     FROM payslips GROUP BY period ORDER BY MAX(created_at) DESC
   `).all();
   const byDept = db.prepare(`
@@ -405,13 +441,68 @@ router.get('/reports', (req, res) => {
 router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const rows = db.prepare(`
-    SELECT p.period, e.employee_code, e.name, e.department, p.basic, p.hra, p.allowances, p.deductions, p.late_deduction, p.lop_days, p.lop_deduction, p.net
+    SELECT p.period, e.employee_code, e.name, e.department, p.basic, p.hra, p.allowances, p.deductions, p.late_deduction, p.lop_days, p.lop_deduction, p.sandwich_lop_days, p.sandwich_lop_deduction, p.net
     FROM payslips p JOIN employees e ON e.id = p.employee_id ORDER BY p.period, e.id
   `).all();
-  const csv = ['period,code,name,department,basic,hra,allowances,deductions,late_deduction,lop_days,lop_deduction,net', ...rows.map((r) => `${r.period},${r.employee_code},${r.name},${r.department},${r.basic},${r.hra},${r.allowances},${r.deductions},${r.late_deduction},${r.lop_days},${r.lop_deduction},${r.net}`)].join('\n');
+  const csv = ['period,code,name,department,basic,hra,allowances,deductions,late_deduction,lop_days,lop_deduction,sandwich_lop_days,sandwich_lop_deduction,net', ...rows.map((r) => `${r.period},${r.employee_code},${r.name},${r.department},${r.basic},${r.hra},${r.allowances},${r.deductions},${r.late_deduction},${r.lop_days},${r.lop_deduction},${r.sandwich_lop_days},${r.sandwich_lop_deduction},${r.net}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', 'attachment; filename="payroll-report.csv"');
   res.send(csv);
+});
+
+// --- AI-assisted month-over-month comparison ---
+function periodStatsFor(month) {
+  const totals = db.prepare(`
+    SELECT COUNT(*) AS headcount, COALESCE(SUM(net), 0) AS totalNet,
+           COALESCE(SUM(basic + hra + allowances), 0) AS totalGross,
+           COALESCE(SUM(deductions), 0) AS totalDeductions,
+           COALESCE(SUM(lop_deduction), 0) AS totalLop,
+           COALESCE(SUM(sandwich_lop_deduction), 0) AS totalSandwichLop,
+           COALESCE(SUM(late_deduction), 0) AS totalLate
+    FROM payslips WHERE month = ?
+  `).get(month);
+  return { month, ...totals };
+}
+
+router.get('/monthly-comparison', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+
+  const months = db.prepare('SELECT DISTINCT month FROM payslips WHERE month IS NOT NULL ORDER BY month DESC').all().map((r) => r.month);
+  if (months.length < 2) {
+    return res.json({ available: false, months, message: 'Need at least two months of payroll runs to compare.' });
+  }
+
+  const [currentMonth, previousMonth] = months;
+  const current = periodStatsFor(currentMonth);
+  const previous = periodStatsFor(previousMonth);
+
+  const currentEmployees = db.prepare('SELECT p.employee_id, e.name, p.net FROM payslips p JOIN employees e ON e.id = p.employee_id WHERE p.month = ?').all(currentMonth);
+  const previousEmployees = db.prepare('SELECT p.employee_id, e.name, p.net FROM payslips p JOIN employees e ON e.id = p.employee_id WHERE p.month = ?').all(previousMonth);
+
+  const currentIds = new Set(currentEmployees.map((e) => e.employee_id));
+  const previousIds = new Set(previousEmployees.map((e) => e.employee_id));
+  const newHires = currentEmployees.filter((e) => !previousIds.has(e.employee_id)).map((e) => e.name);
+  const exited = previousEmployees.filter((e) => !currentIds.has(e.employee_id)).map((e) => e.name);
+
+  const previousNetById = new Map(previousEmployees.map((e) => [e.employee_id, e.net]));
+  const biggestChanges = currentEmployees
+    .filter((e) => previousNetById.has(e.employee_id))
+    .map((e) => ({ name: e.name, delta: e.net - previousNetById.get(e.employee_id) }))
+    .filter((c) => c.delta !== 0)
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+    .slice(0, 5);
+
+  res.json({ available: true, months, current, previous, newHires, exited, biggestChanges });
+});
+
+router.post('/monthly-comparison/explain', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { current, previous, newHires, exited, biggestChanges } = req.body || {};
+  if (!current || !previous) return res.status(400).json({ error: 'current and previous period stats are required' });
+  const explanation = await explainPayrollComparison(current, previous, {
+    newHires: newHires || [], exited: exited || [], biggestChanges: biggestChanges || []
+  });
+  res.json({ explanation });
 });
 
 export default router;

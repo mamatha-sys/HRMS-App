@@ -668,6 +668,22 @@ function migrate() {
   // JSON array of leave_approval_reasons.id — only populated when a 4+ day request is approved
   // (see leaves.routes.js decide()); shorter requests never need one.
   if (!lv.includes('approval_reason_ids')) db.exec('ALTER TABLE leaves ADD COLUMN approval_reason_ids TEXT');
+  // Emergency Leave: bypasses the Concurrent Leave Cap at submission (a genuine emergency
+  // shouldn't be blocked by a department headcount rule), but still requires a reason and gets
+  // flagged for HR visibility if it pushes the department over the cap.
+  if (!lv.includes('is_emergency')) db.exec('ALTER TABLE leaves ADD COLUMN is_emergency INTEGER NOT NULL DEFAULT 0');
+  // Stale-pending-approval reminder cooldown — same lazy, no-scheduler idiom as Helpdesk's 24h
+  // auto-escalation and Performance's assessment reminders (see leaves.routes.js).
+  if (!lv.includes('last_reminded_at')) db.exec('ALTER TABLE leaves ADD COLUMN last_reminded_at TEXT');
+  // Work Handover: who covers the requester's work while they're out. Named by the requester
+  // themself at apply time (or added later while still Pending) — approval is blocked until
+  // someone is named, so no leave goes out with nobody covering the work.
+  if (!lv.includes('handover_to_employee_id')) db.exec('ALTER TABLE leaves ADD COLUMN handover_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL');
+  if (!lv.includes('handover_notes')) db.exec('ALTER TABLE leaves ADD COLUMN handover_notes TEXT');
+  // Handover document (e.g. a status/notes file for whoever's covering) — same base64 data-URL
+  // pattern as the leave's own supporting document above.
+  if (!lv.includes('handover_attachment_data_url')) db.exec('ALTER TABLE leaves ADD COLUMN handover_attachment_data_url TEXT');
+  if (!lv.includes('handover_attachment_name')) db.exec('ALTER TABLE leaves ADD COLUMN handover_attachment_name TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS leave_cancellations (
@@ -1228,6 +1244,10 @@ function migrate() {
   // from created_at (which stays fixed) and from manual escalation (which doesn't touch this).
   const ticketCols = db.prepare('PRAGMA table_info(tickets)').all().map((c) => c.name);
   if (!ticketCols.includes('last_escalated_at')) db.exec('ALTER TABLE tickets ADD COLUMN last_escalated_at TEXT');
+  // Cooldown for the SLA-breach reminder (see sendSlaBreachReminders in helpdesk.routes.js) —
+  // distinct from last_escalated_at's flat 24h ratchet, this tracks each ticket's own
+  // priority-specific SLA_HOURS deadline instead.
+  if (!ticketCols.includes('last_sla_reminded_at')) db.exec('ALTER TABLE tickets ADD COLUMN last_sla_reminded_at TEXT');
   // Proof/document attached at raise time (e.g. a screenshot or receipt) — distinct from
   // ticket_comments' own attachment columns, which are for files added later in the thread.
   if (!ticketCols.includes('attachment_data_url')) db.exec('ALTER TABLE tickets ADD COLUMN attachment_data_url TEXT');
@@ -1283,6 +1303,11 @@ function migrate() {
       reimbursed_at TEXT
     );
   `);
+  // Duplicate Receipt Detection: SHA-256 of the receipt's decoded bytes, so the exact same
+  // receipt image/PDF reused across two claims (same employee re-submitting, or two different
+  // employees) can be caught regardless of filename — see expenses.routes.js hashReceipt().
+  const expenseCols = db.prepare('PRAGMA table_info(expense_claims)').all().map((c) => c.name);
+  if (!expenseCols.includes('receipt_hash')) db.exec('ALTER TABLE expense_claims ADD COLUMN receipt_hash TEXT');
 
   // --- Employee Engagement Surveys: HR builds a rating-scale survey, employees respond once,
   // HR sees aggregated per-question averages. ---
@@ -1729,6 +1754,11 @@ function migrateTeamsAndScopes() {
   if (!payCols2.includes('lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN lop_days INTEGER NOT NULL DEFAULT 0');
   if (!payCols2.includes('lop_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN lop_deduction INTEGER NOT NULL DEFAULT 0');
   if (!payCols2.includes('lines_json')) db.exec('ALTER TABLE payslips ADD COLUMN lines_json TEXT');
+  // Sandwich Rule: kept as its own separate day-count/deduction from ordinary Absent-day LOP
+  // above (see sandwichWeekendDays in payroll.routes.js) so a payslip can show the employee
+  // exactly why a weekend got cut, distinct from their own actual absent days.
+  if (!payCols2.includes('sandwich_lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN sandwich_lop_days INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('sandwich_lop_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN sandwich_lop_deduction INTEGER NOT NULL DEFAULT 0');
 
   // Super Admin can give recognition without being linked to an employee record (a true
   // system-administrator login often isn't tied to one) — from_employee_id has to become
@@ -1758,6 +1788,24 @@ function migrateTeamsAndScopes() {
   const candCols = db.prepare('PRAGMA table_info(candidates)').all().map((c) => c.name);
   if (!candCols.includes('referred_by_employee_id')) db.exec('ALTER TABLE candidates ADD COLUMN referred_by_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL');
   if (!candCols.includes('source_id')) db.exec('ALTER TABLE candidates ADD COLUMN source_id INTEGER REFERENCES candidate_sources(id)');
+  // AI-drafted Offer Letter: offered_ctc/joining_date are the authoritative figures HR types in
+  // when moving a candidate into the Offer round — the AI draft is built ONLY from these two
+  // facts plus the position/candidate name, never left to invent a salary or date itself.
+  if (!candCols.includes('offered_ctc')) db.exec('ALTER TABLE candidates ADD COLUMN offered_ctc TEXT');
+  if (!candCols.includes('joining_date')) db.exec('ALTER TABLE candidates ADD COLUMN joining_date TEXT');
+  if (!candCols.includes('offer_letter_text')) db.exec('ALTER TABLE candidates ADD COLUMN offer_letter_text TEXT');
+  if (!candCols.includes('offer_letter_generated_at')) db.exec('ALTER TABLE candidates ADD COLUMN offer_letter_generated_at TEXT');
+  // Set only once HR explicitly clicks "Send to Candidate" — generating the letter never emails
+  // it on its own; a human always decides whether/when it actually goes out.
+  if (!candCols.includes('offer_letter_sent_at')) db.exec('ALTER TABLE candidates ADD COLUMN offer_letter_sent_at TEXT');
+  // When this candidate last moved to a different round — used by the Interview Score Accuracy
+  // report to tell "genuinely stalled at this stage" apart from "just moved here, too early to
+  // judge". Backfilled to created_at for existing rows (best available approximation), then kept
+  // current by /advance and /revert whenever round_id actually changes.
+  if (!candCols.includes('round_updated_at')) {
+    db.exec('ALTER TABLE candidates ADD COLUMN round_updated_at TEXT');
+    db.exec('UPDATE candidates SET round_updated_at = created_at WHERE round_updated_at IS NULL');
+  }
   const exitCols = db.prepare('PRAGMA table_info(exits)').all().map((c) => c.name);
   if (!exitCols.includes('reason')) db.exec('ALTER TABLE exits ADD COLUMN reason TEXT');
 

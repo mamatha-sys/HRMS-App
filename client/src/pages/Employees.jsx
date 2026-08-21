@@ -265,6 +265,18 @@ function statusClass(status) {
   if (status === 'On Probation') return 'pending';
   return 'absent';
 }
+function completionClass(pct) {
+  if (pct >= 80) return 'present';
+  if (pct >= 50) return 'pending';
+  return 'absent';
+}
+// Inverted from completionClass/Progress Score bands — here High is the bad outcome (flight risk),
+// so it maps to the red "absent" tag rather than green.
+function riskClass(band) {
+  if (band === 'High') return 'absent';
+  if (band === 'Medium') return 'pending';
+  return 'present';
+}
 
 // Where a custom field's input actually lands on the form — the same section headings the
 // built-in fields already use, so an added field sits next to the fields it's related to
@@ -675,6 +687,11 @@ export default function Employees() {
         <div className="kpi-card green"><div className="kpi-label">Active</div><div className="kpi-value">{employees.filter((e) => e.status === 'Active').length}</div></div>
         <div className="kpi-card gold"><div className="kpi-label">On Probation</div><div className="kpi-value">{employees.filter((e) => e.status === 'On Probation').length}</div></div>
         <div className="kpi-card red"><div className="kpi-label">Exited</div><div className="kpi-value">{employees.filter((e) => e.status === 'Exited').length}</div></div>
+        <div className="kpi-card blue">
+          <div className="kpi-label">Avg. Profile Completion</div>
+          <div className="kpi-value">{employees.length ? Math.round(employees.reduce((sum, e) => sum + (e.profile_completion || 0), 0) / employees.length) : 0}%</div>
+          <div className="feature-meta">{employees.filter((e) => (e.profile_completion || 0) >= 80).length} complete · {employees.filter((e) => (e.profile_completion || 0) < 50).length} incomplete</div>
+        </div>
       </div>
 
       <div className="filter-bar">
@@ -762,7 +779,7 @@ export default function Employees() {
           <table>
             <thead>
               <tr>
-                <th></th><th>Code</th><th>Name</th><th>Department</th><th>Team</th><th>Designation</th><th>Status</th><th>Stage</th><th>Actions</th>
+                <th></th><th>Code</th><th>Name</th><th>Department</th><th>Team</th><th>Designation</th><th>Status</th><th>Stage</th><th>Completion</th>{canHR && <th title="Advisory attrition-risk signal from attendance, disciplinary record, and recent leave frequency — never shown to the employee">Risk</th>}<th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -785,6 +802,14 @@ export default function Employees() {
                       {emp.edit_requested && <span className="status-tag pending" style={{ marginLeft: 4 }}>edit req</span>}
                       {emp.edit_request_count > 0 && <span className="feature-meta" style={{ marginLeft: 4 }}>({emp.edit_request_count} edit req{emp.edit_request_count === 1 ? '' : 's'} total)</span>}
                     </td>
+                    <td><span className={'status-tag ' + completionClass(emp.profile_completion || 0)}>{emp.profile_completion || 0}%</span></td>
+                    {canHR && (
+                      <td>
+                        {emp.attrition_risk
+                          ? <span className={'status-tag ' + riskClass(emp.attrition_risk.band)} title={emp.attrition_risk.reasons.join('; ') || 'No risk factors detected'}>{emp.attrition_risk.band}</span>
+                          : <span className="feature-meta">—</span>}
+                      </td>
+                    )}
                     <td style={{ whiteSpace: 'nowrap' }}>
                       {canEditEmployee && <button onClick={() => startEdit(emp)}>Edit</button>}
                       {canManageEmployees && emp.stage === 'submitted' && (
@@ -808,7 +833,7 @@ export default function Employees() {
                     </td>
                   </tr>
                   {transferFor === emp.id && (
-                    <tr><td colSpan={9} style={{ textAlign: 'left', background: '#F7F8FA' }}>
+                    <tr><td colSpan={canHR ? 11 : 10} style={{ textAlign: 'left', background: '#F7F8FA' }}>
                       <form onSubmit={(e) => submitTransfer(e, emp.id)} className="row" style={{ flexWrap: 'wrap', padding: '10px 6px' }}>
                         <div style={{ flex: '1 1 160px' }}>
                           <label className="field-label">New Department</label>
@@ -845,7 +870,7 @@ export default function Employees() {
                     </td></tr>
                   )}
                   {expandedId === emp.id && (
-                    <tr><td colSpan={9} style={{ textAlign: 'left', background: '#F7F8FA' }}>
+                    <tr><td colSpan={canHR ? 11 : 10} style={{ textAlign: 'left', background: '#F7F8FA' }}>
                       <EmployeeDetail emp={emp} />
                     </td></tr>
                   )}
@@ -1089,6 +1114,26 @@ function EmployeeDetail({ emp }) {
         {emp.employment_type === 'Experienced' && <div>Experience: <strong>{emp.experience || '—'}</strong></div>}
         <div>Skills: <strong>{emp.skills || '—'}</strong></div>
       </div>
+
+      {emp.attrition_risk && (
+        <>
+          <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Attrition Risk (advisory)</div>
+          <div className="row" style={{ alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span className={'status-tag ' + riskClass(emp.attrition_risk.band)}>{emp.attrition_risk.band}</span>
+            <span className="feature-meta">
+              Attendance this month {emp.attrition_risk.attendancePct}% · {emp.attrition_risk.openCases} open disciplinary case{emp.attrition_risk.openCases === 1 ? '' : 's'} · {emp.attrition_risk.leaveDaysRecent} leave days in the last 90 days
+            </span>
+          </div>
+          {emp.attrition_risk.reasons.length > 0 ? (
+            <ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>
+              {emp.attrition_risk.reasons.map((r, i) => <li key={i} className="feature-meta">{r}</li>)}
+            </ul>
+          ) : (
+            <div className="feature-meta">No risk factors detected — this is an advisory signal only, not a judgment of the employee.</div>
+          )}
+        </>
+      )}
+
       <div className="section-label" style={{ paddingLeft: 0, marginTop: 10 }}>Documents</div>
       {emp.documents && emp.documents.length > 0
         ? emp.documents.map((doc, i) => <a key={i} href={doc.dataUrl} download={doc.name} className="pill" style={{ display: 'inline-block', marginRight: 6 }}>📎 {doc.name}</a>)

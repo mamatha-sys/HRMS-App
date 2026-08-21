@@ -57,11 +57,12 @@ export default function Helpdesk() {
   return <MyHelpdesk />;
 }
 
-function TicketThread({ ticket, isHR, onChanged }) {
+function TicketThread({ ticket, isHR, isOwner, onChanged, awaitingAi, aiTimedOut }) {
   const [comment, setComment] = useState('');
   const [internal, setInternal] = useState(false);
   const [file, setFile] = useState(null);
   const [error, setError] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
 
   async function submit(e) {
     e.preventDefault();
@@ -74,20 +75,50 @@ function TicketThread({ ticket, isHR, onChanged }) {
     } catch (err) { setError(err.response?.data?.error || 'Could not add comment.'); }
   }
 
+  // Only the requester sees this, only while the AI's own answer is the most recent thing said —
+  // once they reply, resolve, or escalate, that's no longer true and the prompt naturally
+  // disappears (see backend: /ai-resolve and /ai-escalate both log a new comment as the last one).
+  const lastComment = ticket.comments[ticket.comments.length - 1];
+  const showAiPrompt = isOwner && ['Open', 'In Progress'].includes(ticket.status) && lastComment?.author_name === 'AI Assistant';
+
+  async function respondToAi(helped) {
+    setAiBusy(true); setError('');
+    try {
+      await api.post(`/helpdesk/${ticket.id}/${helped ? 'ai-resolve' : 'ai-escalate'}`);
+      onChanged();
+    } catch (err) { setError(err.response?.data?.error || 'Could not record your response.'); }
+    finally { setAiBusy(false); }
+  }
+
   return (
     <div style={{ marginTop: 8, paddingLeft: 8 }}>
       {error && <div className="banner error">{error}</div>}
-      {ticket.comments.length === 0 && <div className="feature-meta">No replies yet.</div>}
+      {ticket.comments.length === 0 && !awaitingAi && !aiTimedOut && <div className="feature-meta">No replies yet.</div>}
+      {ticket.comments.length === 0 && awaitingAi && (
+        <div className="feature-meta">🤖 AI is drafting a suggested answer — this updates automatically once it's ready (usually under 30 seconds).</div>
+      )}
+      {ticket.comments.length === 0 && aiTimedOut && (
+        <div className="feature-meta">⚠️ No AI suggestion arrived — local AI may be unavailable right now (check the AI status indicator at the top of the page). HR will still pick up your ticket.</div>
+      )}
       {ticket.comments.map((c) => (
         <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '6px 0' }}>
           <div className="row" style={{ justifyContent: 'space-between' }}>
-            <strong>{c.author_name}{!!c.internal && <span className="status-tag pending" style={{ marginLeft: 6 }}>Internal</span>}</strong>
+            <strong>{c.author_name === 'AI Assistant' ? '🤖 AI Assistant' : c.author_name}{!!c.internal && <span className="status-tag pending" style={{ marginLeft: 6 }}>Internal</span>}</strong>
             <span className="feature-meta">{c.created_at.slice(0, 10)}</span>
           </div>
           <div className="feature-meta">{c.comment}</div>
           {c.attachment_data_url && <a className="pill" href={c.attachment_data_url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 4 }}>📎 {c.attachment_name || 'Attachment'}</a>}
         </div>
       ))}
+      {showAiPrompt && (
+        <div className="banner info" style={{ marginTop: 6 }}>
+          <div style={{ marginBottom: 6 }}>Did the AI Assistant's answer above resolve your ticket?</div>
+          <div className="row">
+            <button type="button" className="primary" disabled={aiBusy} onClick={() => respondToAi(true)}>✅ Yes, this resolved it</button>
+            <button type="button" disabled={aiBusy} onClick={() => respondToAi(false)}>❌ No, please escalate</button>
+          </div>
+        </div>
+      )}
       <form onSubmit={submit} style={{ marginTop: 6 }}>
         <div className="row">
           <input placeholder="Reply…" value={comment} onChange={(e) => setComment(e.target.value)} style={{ flex: 1 }} />
@@ -114,17 +145,39 @@ function MyHelpdesk({ compact }) {
   const [form, setForm] = useState({ category: 'IT', priority: 'Medium', subject: '', description: '' });
   const [file, setFile] = useState(null);
   const [expanded, setExpanded] = useState(null);
+  const [pendingAiFor, setPendingAiFor] = useState(null);
+  const [aiTimedOutFor, setAiTimedOutFor] = useState(null);
 
   function load() { api.get('/helpdesk/my').then((r) => setTickets(r.data.tickets)).catch(() => {}); }
   useEffect(load, []);
+
+  // Ticket creation itself is instant now — the AI first-response drafts in the background on
+  // the server afterward, so poll a few times for it to land instead of making the requester
+  // wait on ticket creation. Auto-expands the new ticket's thread so they see it arrive. Giving
+  // up after ~30s used to just clear the placeholder with no explanation — now it says so, since
+  // "AI is down" and "AI hasn't replied yet" otherwise look identical to the requester.
+  function pollForAiAnswer(id, attempt = 0) {
+    if (attempt >= 10) { setPendingAiFor((v) => (v === id ? null : v)); setAiTimedOutFor(id); return; }
+    setTimeout(() => {
+      api.get('/helpdesk/my').then((r) => {
+        setTickets(r.data.tickets);
+        const t = r.data.tickets.find((x) => x.id === id);
+        if (t?.comments?.length > 0) setPendingAiFor((v) => (v === id ? null : v));
+        else pollForAiAnswer(id, attempt + 1);
+      }).catch(() => {});
+    }, 3000);
+  }
 
   async function submit(e) {
     e.preventDefault(); setError('');
     if (!form.subject.trim()) { setError('Subject is required.'); return; }
     try {
       const attachment_data_url = file ? await readFileAsDataUrl(file) : undefined;
-      await api.post('/helpdesk', { ...form, attachment_data_url, attachment_name: file?.name });
-      setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setFile(null); setShowForm(false); load();
+      const r = await api.post('/helpdesk', { ...form, attachment_data_url, attachment_name: file?.name });
+      setForm({ category: 'IT', priority: 'Medium', subject: '', description: '' }); setFile(null); setShowForm(false);
+      const newId = r.data.ticket?.id;
+      if (newId) { setExpanded(newId); setPendingAiFor(newId); setAiTimedOutFor((v) => (v === newId ? null : v)); pollForAiAnswer(newId); }
+      load();
     } catch (err) { setError(err.response?.data?.error || 'Could not raise ticket.'); }
   }
   async function confirm(id) {
@@ -210,7 +263,7 @@ function MyHelpdesk({ compact }) {
             <div style={{ marginTop: 4 }}>
               <button onClick={() => setExpanded(expanded === t.id ? null : t.id)}>{expanded === t.id ? 'Hide thread' : `Thread (${t.comments.length})`}</button>
             </div>
-            {expanded === t.id && <TicketThread ticket={t} isHR={false} onChanged={load} />}
+            {expanded === t.id && <TicketThread ticket={t} isHR={false} isOwner onChanged={load} awaitingAi={pendingAiFor === t.id} aiTimedOut={aiTimedOutFor === t.id} />}
           </div>
         ))}
       </div>

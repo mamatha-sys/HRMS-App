@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { createHash } from 'node:crypto';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
@@ -23,11 +24,34 @@ function withName(rows) {
   });
 }
 
+// Duplicate Receipt Detection: hashes the receipt's actual decoded bytes (not the filename or
+// any claim metadata), so the exact same receipt photo/PDF reused for a second claim is caught
+// even if the employee renamed the file, changed the description, or a different employee
+// entirely uploaded it. Returns null for claims with no receipt — nothing to hash.
+function hashReceipt(dataUrl) {
+  if (!dataUrl) return null;
+  const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl);
+  if (!match) return null;
+  return createHash('sha256').update(Buffer.from(match[2], 'base64')).digest('hex');
+}
+
+// Flags a claim as a possible duplicate whenever its receipt_hash matches ANY other claim's —
+// across every employee, every status (including already-Rejected/Reimbursed ones), since a
+// receipt reused after rejection or reused post-reimbursement is exactly the pattern worth
+// surfacing to HR, not something to quietly ignore once decided.
+function withDuplicateFlag(rows) {
+  return rows.map((r) => {
+    if (!r.receipt_hash) return { ...r, isDuplicateReceipt: false };
+    const match = db.prepare('SELECT COUNT(*) AS n FROM expense_claims WHERE receipt_hash = ? AND id != ?').get(r.receipt_hash, r.id);
+    return { ...r, isDuplicateReceipt: match.n > 0 };
+  });
+}
+
 // Employee self-service: my own claims.
 router.get('/my', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ claims: [], chainLabel: approvalChainLabel() });
-  const claims = withName(db.prepare('SELECT * FROM expense_claims WHERE employee_id = ? ORDER BY created_at DESC').all(me.id));
+  const claims = withDuplicateFlag(withName(db.prepare('SELECT * FROM expense_claims WHERE employee_id = ? ORDER BY created_at DESC').all(me.id)));
   res.json({ claims, chainLabel: approvalChainLabel() });
 });
 
@@ -38,16 +62,36 @@ router.post('/', (req, res) => {
   if (!['Travel', 'Food', 'Accommodation', 'Other'].includes(category)) return res.status(400).json({ error: 'A valid category is required' });
   const amt = Math.max(0, parseInt(amount, 10) || 0);
   if (amt <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
+
+  // Duplicate Receipt Detection: check BEFORE inserting so we can name the original claim in the
+  // alert. Never blocks submission — a genuine resubmission (e.g. after rejection for an unrelated
+  // reason) is legitimate — it just makes the reuse visible to HR/finance instead of silent.
+  const receiptHash = hashReceipt(receipt_data_url);
+  const priorMatch = receiptHash
+    ? withName([db.prepare('SELECT * FROM expense_claims WHERE receipt_hash = ? ORDER BY created_at LIMIT 1').get(receiptHash)].filter(Boolean))[0]
+    : null;
+
   const stage = bottomRole();
-  const info = db.prepare('INSERT INTO expense_claims (employee_id, category, amount, description, receipt_data_url, current_stage_role_id) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(me.id, category, amt, description || null, receipt_data_url || null, stage?.id || null);
-  res.status(201).json({ claim: withName([db.prepare('SELECT * FROM expense_claims WHERE id = ?').get(info.lastInsertRowid)])[0] });
+  const info = db.prepare('INSERT INTO expense_claims (employee_id, category, amount, description, receipt_data_url, receipt_hash, current_stage_role_id) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(me.id, category, amt, description || null, receipt_data_url || null, receiptHash, stage?.id || null);
+
+  let duplicateWarning = null;
+  if (priorMatch) {
+    duplicateWarning = `This receipt matches an existing claim — #${priorMatch.id}, ₹${priorMatch.amount} (${priorMatch.category}) submitted by ${priorMatch.employee_name} on ${priorMatch.created_at.slice(0, 10)}. HR has been notified.`;
+    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)').run(
+      'Possible Duplicate Receipt',
+      `${me.name}'s new ₹${amt} (${category}) claim uses the same receipt as claim #${priorMatch.id} (₹${priorMatch.amount}, ${priorMatch.category}) submitted by ${priorMatch.employee_name} on ${priorMatch.created_at.slice(0, 10)}.`,
+      'staff'
+    );
+  }
+
+  res.status(201).json({ claim: withDuplicateFlag(withName([db.prepare('SELECT * FROM expense_claims WHERE id = ?').get(info.lastInsertRowid)]))[0], duplicateWarning });
 });
 
 // HR/approvers: the pending (and recently decided) queue.
 router.get('/', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const claims = filterToScope(withName(db.prepare("SELECT * FROM expense_claims ORDER BY (status = 'Pending') DESC, created_at DESC").all()), req.user.role, myEmployee(req.user.sub)?.id);
+  const claims = filterToScope(withDuplicateFlag(withName(db.prepare("SELECT * FROM expense_claims ORDER BY (status = 'Pending') DESC, created_at DESC").all())), req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ claims, chainLabel: approvalChainLabel() });
 });
 

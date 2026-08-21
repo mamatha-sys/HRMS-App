@@ -5,10 +5,40 @@
 // if unavailable" shape as sendEmail/sendSms/sendWhatsapp in channels.js: never crashes at import
 // time, throws a catchable, specific message if Ollama isn't running.
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+// Tried llama3.1:8b as a quality upgrade — reverted. On this machine's CPU (no GPU, dual-core
+// i5-7300U) it took 90-100s per offer-letter-length generation (vs 3b's 10-30s) and, worse, it
+// reintroduced the exact bracketed-placeholder hallucination ([Company Address], [Date]) that was
+// already fixed for 3b — the bigger model did not actually raise quality on this hardware/prompt.
+// Revisit only with real GPU acceleration available.
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2:3b';
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+// Cheap health probe backing the global "AI status" indicator (Topbar + chat panel) — every AI
+// feature in this file otherwise fails silently from the end user's point of view (a background
+// job that never lands, a chat reply that just errors) with no way to tell "Ollama isn't running"
+// from "the model is just slow". Cached briefly since multiple open tabs/pages poll this.
+let statusCache = null;
+const STATUS_CACHE_MS = 15000;
+
+export async function checkAiStatus() {
+  if (statusCache && Date.now() - statusCache.checkedAt < STATUS_CACHE_MS) return statusCache;
+  let available = false;
+  let modelPulled = false;
+  try {
+    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: AbortSignal.timeout(3000) });
+    if (res.ok) {
+      available = true;
+      const data = await res.json();
+      modelPulled = Array.isArray(data.models) && data.models.some((m) => m.name === OLLAMA_MODEL || m.model === OLLAMA_MODEL);
+    }
+  } catch {
+    available = false;
+  }
+  statusCache = { available, modelPulled, model: OLLAMA_MODEL, checkedAt: Date.now() };
+  return statusCache;
 }
 
 function addMonthsIso(dateIso, months) {
@@ -115,6 +145,59 @@ export async function suggestAnnouncementBody(title, category) {
   return { body: text };
 }
 
+// Suggests a first-response answer for a newly raised helpdesk ticket. Grounded the same way as
+// the chat assistant: real company Knowledge Base articles (if any match the ticket's category)
+// are handed over as the ONLY source of specific company facts/policy — the model is explicitly
+// told not to invent a specific policy, number, or procedure that isn't in them, falling back to
+// generic troubleshooting guidance instead. This runs automatically right after a ticket is
+// created (never blocks it — caller wraps this in try/catch) so the requester sees a candidate
+// answer immediately, which they then accept (resolves the ticket) or reject (escalates it).
+export async function suggestTicketAnswer(category, subject, description, kbArticles) {
+  if (!subject?.trim()) throw new Error('A subject is required');
+
+  const kbBlock = kbArticles?.length
+    ? kbArticles.map((a) => `- "${a.title}": ${a.body}`).join('\n')
+    : '(no matching knowledge base articles on file)';
+
+  const prompt = `You are a helpdesk assistant for a company's internal HR system. An employee just raised this ${category} ticket:
+Subject: ${subject.trim()}
+Description: ${description?.trim() || '(no further description given)'}
+
+Relevant company Knowledge Base articles (the ONLY source you may treat as company-specific fact):
+${kbBlock}
+
+Write a short, helpful first-response answer (3-6 sentences, plain text, no markdown). If the Knowledge Base articles above answer this, use them directly and don't contradict them. If they don't cover it, give generic, safe troubleshooting/guidance for this kind of issue, but do NOT invent a specific company policy, number, deadline, or procedure that isn't in the articles above — say the employee may need HR/IT to follow up on those specifics instead. Respond with ONLY the answer text, nothing else.`;
+
+  const text = await askOllama(prompt, 350);
+  if (!text) throw new Error('AI Assist returned an empty response.');
+  return text;
+}
+
+// Drafts an offer letter once a candidate reaches the Offer stage. The candidate name, position,
+// department, offered CTC, and joining date are the ONLY facts the model may state as real —
+// they're HR-typed, authoritative figures (see recruitment.routes.js's /advance handler), never
+// guessed by the model itself. The model's job is purely to write the professional prose around
+// them — standard offer-letter boilerplate (subject to background verification, etc.) is fine as
+// generic language, but it must not invent a different number, date, or specific company policy
+// detail (probation length, notice period, benefits specifics) that wasn't given to it.
+export async function generateOfferLetter({ candidateName, positionTitle, department, offeredCtc, joiningDate, companyName }) {
+  if (!candidateName?.trim() || !positionTitle?.trim()) throw new Error('Candidate name and position are required');
+  if (!offeredCtc?.trim() || !joiningDate?.trim()) throw new Error('Offered CTC and joining date are required');
+
+  const prompt = `Write a formal, professional job offer letter with these exact facts — do not change or invent any of them:
+Candidate: ${candidateName.trim()}
+Position: ${positionTitle.trim()}${department?.trim() ? `\nDepartment: ${department.trim()}` : ''}
+Offered CTC: ${offeredCtc.trim()}
+Joining Date: ${joiningDate.trim()}
+Company: ${companyName?.trim() || 'the company'}
+
+Structure: a warm congratulatory opening, a short paragraph stating the role/department/CTC/joining date exactly as given above, brief standard generic offer-letter language (the offer is subject to standard background/document verification, and that further terms will be covered in the formal employment agreement — do NOT state a specific probation length, notice period, or benefit detail, since none was given to you), and a closing line asking them to confirm acceptance. Sign off as "${companyName?.trim() || 'the Company'} HR Team" — never a placeholder for an individual's name. Plain text only, no markdown, and no bracketed placeholders anywhere (no [Company Address], no [Your Name], no [Date]) — write it as a finished, ready-to-send letter, omitting any detail you don't actually have rather than leaving a placeholder for it. Respond with ONLY the letter text, nothing else.`;
+
+  const text = await askOllama(prompt, 600);
+  if (!text) throw new Error('AI Assist returned an empty response — please write the offer letter manually.');
+  return text;
+}
+
 // Generates the fixed question set for a candidate's AI video interview, from the position's
 // title (+ job description, if one was written). Generated once when the interview is created —
 // every candidate for that same interview record answers the same questions, so scores are
@@ -186,4 +269,61 @@ Respond with ONLY a single JSON object, no markdown, no explanation:
   } catch {
     return { score: null, communicationScore: null, eligible: null, summary: 'AI scoring did not return a usable result for this transcript — please review the answers manually.', strengths: '', concerns: '' };
   }
+}
+
+// The AI Agent's planning step — unlike chatWithAssistant (which only ever produces a reply the
+// user reads), this decides whether the user's message maps to one of a small fixed set of
+// ACTIONS the agent can execute on their behalf, and if so extracts its parameters. It never
+// executes anything itself — the route layer always shows the human the proposed action and
+// waits for an explicit confirm click before calling the real API. Returns a plain object, never
+// throws for a "no clear action" case (falls back to a clarify action) — only throws if Ollama
+// itself is unreachable, same as the other helpers here.
+export async function planAgentAction(system, history) {
+  if (!history?.length) throw new Error('No message to plan from');
+  const data = await callOllama('/api/chat', { messages: [{ role: 'system', content: system }, ...history], format: 'json' });
+  const text = data.message?.content?.trim() || '';
+  let parsed;
+  try {
+    parsed = parseJsonReply(text);
+  } catch {
+    return { action: 'clarify', params: {}, summary: "I couldn't work out a clear action from that — could you rephrase, e.g. \"apply for 2 days casual leave from Monday to Tuesday, reason: family function\"?" };
+  }
+  const ALLOWED = ['submit_leave', 'approve_request', 'reject_request', 'request_profile_edit', 'post_announcement', 'clarify'];
+  if (!ALLOWED.includes(parsed.action)) {
+    return { action: 'clarify', params: {}, summary: "I couldn't work out a clear action from that — could you rephrase?" };
+  }
+  return { action: parsed.action, params: parsed.params && typeof parsed.params === 'object' ? parsed.params : {}, summary: parsed.summary?.toString().trim() || 'Please confirm this action.' };
+}
+
+// Explains WHY payroll changed month-over-month — the actual totals/deltas are always computed
+// server-side from real payslip rows (never by the model), this only narrates the reasons behind
+// numbers it's handed: headcount changes, LOP/late deductions, and the biggest individual swings.
+// Falls back to a plain templated summary (still fact-based, no AI) rather than leaving the screen
+// blank if the model/JSON output misbehaves.
+export async function explainPayrollComparison(current, previous, details) {
+  const netDelta = current.totalNet - previous.totalNet;
+  const pctDelta = previous.totalNet ? Math.round((netDelta / previous.totalNet) * 1000) / 10 : null;
+
+  const prompt = `You are explaining a month-over-month payroll comparison to an HR admin. Here are the real, already-computed facts — do not invent any other numbers:
+
+${previous.month}: ${previous.headcount} employees paid, total net payout ₹${previous.totalNet.toLocaleString('en-IN')}, total deductions ₹${previous.totalDeductions.toLocaleString('en-IN')} (LOP ₹${previous.totalLop.toLocaleString('en-IN')}, late-arrival ₹${previous.totalLate.toLocaleString('en-IN')}).
+${current.month}: ${current.headcount} employees paid, total net payout ₹${current.totalNet.toLocaleString('en-IN')}, total deductions ₹${current.totalDeductions.toLocaleString('en-IN')} (LOP ₹${current.totalLop.toLocaleString('en-IN')}, late-arrival ₹${current.totalLate.toLocaleString('en-IN')}).
+Net payout change: ${netDelta >= 0 ? '+' : ''}₹${netDelta.toLocaleString('en-IN')}${pctDelta !== null ? ` (${pctDelta >= 0 ? '+' : ''}${pctDelta}%)` : ''}.
+New hires paid this month who weren't paid last month: ${details.newHires.length ? details.newHires.join(', ') : 'none'}.
+Employees paid last month but not this month (exited/inactive): ${details.exited.length ? details.exited.join(', ') : 'none'}.
+Biggest individual net-pay changes among employees paid both months: ${details.biggestChanges.length ? details.biggestChanges.map((c) => `${c.name} ${c.delta >= 0 ? '+' : ''}₹${c.delta.toLocaleString('en-IN')}`).join(', ') : 'none significant'}.
+
+Write a short 2-4 sentence explanation of WHY the total payroll moved the way it did, referencing only the facts above (headcount changes, deduction changes, individual swings). Do not restate every number — synthesize the likely reason. Respond with ONLY the explanation text, no markdown, no preamble.`;
+
+  try {
+    const text = await askOllama(prompt, 300);
+    if (text) return text;
+  } catch {
+    // fall through to the templated fallback below
+  }
+  const parts = [];
+  if (details.newHires.length) parts.push(`${details.newHires.length} new hire(s) added to payroll (${details.newHires.join(', ')})`);
+  if (details.exited.length) parts.push(`${details.exited.length} employee(s) no longer on payroll (${details.exited.join(', ')})`);
+  if (current.totalLop !== previous.totalLop) parts.push(`LOP deductions ${current.totalLop > previous.totalLop ? 'increased' : 'decreased'} to ₹${current.totalLop.toLocaleString('en-IN')}`);
+  return `Net payout ${netDelta >= 0 ? 'increased' : 'decreased'} by ₹${Math.abs(netDelta).toLocaleString('en-IN')}${pctDelta !== null ? ` (${Math.abs(pctDelta)}%)` : ''} from ${previous.month} to ${current.month}.${parts.length ? ' Likely driven by: ' + parts.join('; ') + '.' : ''}`;
 }

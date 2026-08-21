@@ -6,8 +6,9 @@ import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames }
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
 import { recomputeOffboardingClearance } from '../utils/offboarding.js';
 import { sendEmail, sendWhatsapp } from '../utils/channels.js';
-import { generateInterviewQuestions } from '../utils/aiAssist.js';
+import { generateInterviewQuestions, generateOfferLetter } from '../utils/aiAssist.js';
 import { extractResumeText, screenResume } from '../utils/resumeScreen.js';
+import { getSetting, getSettings } from '../utils/integrationSettings.js';
 import crypto from 'node:crypto';
 
 const router = Router();
@@ -364,6 +365,69 @@ router.get('/candidates/:id/interview', (req, res) => {
   });
 });
 
+// Interview Score Accuracy — the feedback loop the AI video interview never had: once scored, an
+// eligibility recommendation was generated once and nobody ever came back to check whether it
+// actually matched what happened to the candidate afterward. There's no explicit "Rejected" state
+// in this pipeline (a candidate just stops progressing), so "outcome" is approximated from what IS
+// tracked: reaching the final round (Hired), or sitting at the same non-final round for a long
+// time without moving (Stalled — a proxy for having quietly fallen out of contention). A candidate
+// still actively moving through rounds is "In Progress" — too early to judge, reported as pending,
+// not folded into the accuracy percentage either way.
+const STALL_DAYS = 30;
+
+function interviewScoreAccuracy() {
+  const interviews = db.prepare(`
+    SELECT candidate_id, score, communication_score, eligible, summary, completed_at
+    FROM candidate_interviews WHERE status = 'completed' AND score IS NOT NULL
+    ORDER BY completed_at DESC
+  `).all();
+
+  return interviews.map((iv) => {
+    const c = db.prepare('SELECT * FROM candidates WHERE id = ?').get(iv.candidate_id);
+    if (!c) return null;
+    const round = c.round_id ? db.prepare('SELECT name, is_final FROM interview_rounds WHERE id = ?').get(c.round_id) : null;
+    const position = c.position_id ? db.prepare('SELECT title FROM positions WHERE id = ?').get(c.position_id) : null;
+    const daysAtRound = Math.max(0, Math.floor((Date.now() - new Date(`${c.round_updated_at}Z`).getTime()) / 86400000));
+    const eligible = iv.eligible === null ? null : !!iv.eligible;
+
+    let outcome, verdict;
+    if (round?.is_final) {
+      outcome = 'Hired';
+      verdict = eligible === false ? 'mismatch' : 'match';
+    } else if (daysAtRound >= STALL_DAYS) {
+      outcome = `Stalled ${daysAtRound}d at ${round?.name || 'this stage'}`;
+      verdict = eligible === true ? 'mismatch' : 'match';
+    } else {
+      outcome = `In Progress — ${round?.name || 'stage unknown'}`;
+      verdict = 'pending';
+    }
+    if (eligible === null) verdict = 'pending'; // no usable AI recommendation to check in the first place
+
+    return {
+      candidateId: c.id, name: c.name, position: position?.title || null,
+      aiScore: iv.score, communicationScore: iv.communication_score, aiEligible: eligible, aiSummary: iv.summary,
+      currentRound: round?.name || null, daysAtRound, outcome, verdict
+    };
+  }).filter(Boolean);
+}
+
+router.get('/interview-score-accuracy', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidates = interviewScoreAccuracy();
+  const decided = candidates.filter((c) => c.verdict !== 'pending');
+  const matches = decided.filter((c) => c.verdict === 'match').length;
+  res.json({
+    candidates,
+    summary: {
+      total: candidates.length,
+      decided: decided.length,
+      matches,
+      mismatches: decided.length - matches,
+      accuracyPct: decided.length ? Math.round((matches / decided.length) * 100) : null
+    }
+  });
+});
+
 // Edit a candidate's own profile fields (contact/experience/compensation/resume/links) — kept
 // separate from advance/revert/feedback, which each have their own controlled-transition endpoint.
 router.put('/candidates/:id', (req, res) => {
@@ -407,7 +471,35 @@ router.post('/candidates/:id/message', async (req, res) => {
   }
 });
 
-// Advances a candidate to the next active round in the (dynamic, HR-configurable) pipeline.
+// Builds the AI offer letter from HR-authoritative facts only (offered_ctc/joining_date are
+// never guessed by the model — see generateOfferLetter's own doc comment) — shared by the
+// advance-into-Offer flow below and the manual regenerate endpoint further down.
+async function draftOfferLetter(candidateId, offeredCtc, joiningDate) {
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId);
+  const position = candidate.position_id ? db.prepare('SELECT title, department_id FROM positions WHERE id = ?').get(candidate.position_id) : null;
+  const department = position?.department_id ? db.prepare('SELECT name FROM departments WHERE id = ?').get(position.department_id)?.name : null;
+  const text = await generateOfferLetter({
+    candidateName: candidate.name,
+    positionTitle: position?.title || 'the position',
+    department,
+    offeredCtc,
+    joiningDate,
+    companyName: getSetting('company_name')
+  });
+  // Regenerating (or the initial draft) always invalidates any earlier "sent" mark — the letter
+  // on file just changed, so a stale sent-timestamp would wrongly tell HR the candidate already
+  // has this version.
+  db.prepare("UPDATE candidates SET offered_ctc = ?, joining_date = ?, offer_letter_text = ?, offer_letter_generated_at = datetime('now'), offer_letter_sent_at = NULL WHERE id = ?")
+    .run(offeredCtc, joiningDate, text, candidateId);
+  return text;
+}
+
+// Advances a candidate to the next active round in the (dynamic, HR-configurable) pipeline. If
+// the next round is literally named "Offer", HR must supply the real offered CTC and joining
+// date in the body — these save immediately and the stage moves right away; the AI offer letter
+// drafts in the background afterward (fire-and-forget) rather than making HR wait 10-30s for the
+// local model before the pipeline even updates. The client polls the candidate for
+// offer_letter_text to know when it's ready.
 router.put('/candidates/:id/advance', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
@@ -416,8 +508,93 @@ router.put('/candidates/:id/advance', (req, res) => {
   if (current?.is_final) return res.status(400).json({ error: 'Candidate has already reached the final round.' });
   const next = nextRound(current ? current.sort_order : -1);
   if (!next) return res.status(400).json({ error: 'No further round is configured.' });
-  db.prepare("UPDATE candidates SET round_id = ?, feedback_status = 'No feedback yet' WHERE id = ?").run(next.id, req.params.id);
-  res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id) });
+
+  let offerLetterPending = false;
+  if (next.name === 'Offer') {
+    const { offered_ctc, joining_date } = req.body || {};
+    if (!offered_ctc?.trim() || !joining_date?.trim()) {
+      return res.status(400).json({ error: 'Offered CTC and joining date are required to move a candidate to the Offer stage.' });
+    }
+    db.prepare('UPDATE candidates SET offered_ctc = ?, joining_date = ? WHERE id = ?').run(offered_ctc.trim(), joining_date.trim(), candidate.id);
+    offerLetterPending = true;
+  }
+
+  db.prepare("UPDATE candidates SET round_id = ?, feedback_status = 'No feedback yet', round_updated_at = datetime('now') WHERE id = ?").run(next.id, req.params.id);
+  res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id), offerLetterPending });
+
+  if (offerLetterPending) {
+    const { offered_ctc, joining_date } = req.body || {};
+    draftOfferLetter(candidate.id, offered_ctc.trim(), joining_date.trim()).catch(() => {
+      // Flaky/unavailable local model — HR can hand-write the letter or hit Regenerate later;
+      // the stage move itself has already gone through regardless.
+    });
+  }
+});
+
+// Everything a printable, letterheaded offer letter needs — candidate/position facts, the drafted
+// text, and company branding — mirrors Payroll's GET /payslips/:id (payslip+employee+company)
+// shape exactly, so the client can reuse the same letterhead HTML/CSS pattern.
+router.get('/candidates/:id/offer-letter', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  if (!candidate.offer_letter_text) return res.status(400).json({ error: 'No offer letter has been generated for this candidate yet.' });
+  const position = candidate.position_id ? db.prepare('SELECT title, department_id FROM positions WHERE id = ?').get(candidate.position_id) : null;
+  const department = position?.department_id ? db.prepare('SELECT name FROM departments WHERE id = ?').get(position.department_id)?.name : null;
+  res.json({
+    candidate: { name: candidate.name, position_title: position?.title, position_department: department, offered_ctc: candidate.offered_ctc, joining_date: candidate.joining_date, offer_letter_text: candidate.offer_letter_text },
+    company: getSettings(['company_name', 'company_logo', 'company_address'])
+  });
+});
+
+// HR hand-edits the AI draft before sending it.
+router.put('/candidates/:id/offer-letter', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  const text = req.body?.offer_letter_text;
+  if (!text?.trim()) return res.status(400).json({ error: 'Letter text is required.' });
+  // A hand-edit changes what was (or would be) sent, so an earlier "sent" mark no longer describes
+  // what's on file — clear it rather than let HR believe the candidate already has this version.
+  db.prepare('UPDATE candidates SET offer_letter_text = ?, offer_letter_sent_at = NULL WHERE id = ?').run(text.trim(), candidate.id);
+  res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidate.id) });
+});
+
+// Regenerates the draft — reuses the stored offered_ctc/joining_date unless HR supplies updated
+// ones in the body (e.g. the offer amount changed after a negotiation).
+router.post('/candidates/:id/offer-letter/regenerate', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  const offeredCtc = req.body?.offered_ctc?.trim() || candidate.offered_ctc;
+  const joiningDate = req.body?.joining_date?.trim() || candidate.joining_date;
+  if (!offeredCtc || !joiningDate) return res.status(400).json({ error: 'Offered CTC and joining date are required.' });
+  try {
+    await draftOfferLetter(candidate.id, offeredCtc, joiningDate);
+    res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidate.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// The one explicit "actually send it" step — generating (or regenerating) the letter never
+// emails it on its own; HR always clicks this deliberately, same "propose then human confirms"
+// shape as everywhere else AI touches something external-facing in this app.
+router.post('/candidates/:id/offer-letter/send', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id);
+  if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+  if (!candidate.offer_letter_text) return res.status(400).json({ error: 'No offer letter has been generated for this candidate yet.' });
+  if (!candidate.email) return res.status(400).json({ error: 'This candidate has no email on file.' });
+  try {
+    const companyName = getSetting('company_name') || 'the Company';
+    const position = candidate.position_id ? db.prepare('SELECT title FROM positions WHERE id = ?').get(candidate.position_id) : null;
+    await sendEmail(candidate.email, `Your Offer Letter — ${position?.title || 'Job Offer'} at ${companyName}`, candidate.offer_letter_text);
+    db.prepare("UPDATE candidates SET offer_letter_sent_at = datetime('now') WHERE id = ?").run(candidate.id);
+    res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidate.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Undoes a mistaken advance — moves the candidate back to the previous active round. Works even
@@ -431,7 +608,7 @@ router.put('/candidates/:id/revert', (req, res) => {
   if (!current) return res.status(400).json({ error: 'Candidate has no current stage to move back from.' });
   const prev = prevRound(current.sort_order);
   if (!prev) return res.status(400).json({ error: 'Already at the first round — nothing to move back to.' });
-  db.prepare("UPDATE candidates SET round_id = ?, feedback_status = 'No feedback yet' WHERE id = ?").run(prev.id, req.params.id);
+  db.prepare("UPDATE candidates SET round_id = ?, feedback_status = 'No feedback yet', round_updated_at = datetime('now') WHERE id = ?").run(prev.id, req.params.id);
   res.json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(req.params.id) });
 });
 

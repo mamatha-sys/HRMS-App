@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { notifyEmployee } from '../utils/notify.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
+import { suggestTicketAnswer } from '../utils/aiAssist.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -102,10 +103,35 @@ function runAutoEscalations() {
   }
 }
 
+// Ticket Escalation (SLA-breach reminder): distinct from the flat 24h auto-escalation ratchet
+// above — this fires the moment a ticket crosses its OWN priority-specific SLA_HOURS deadline
+// (Critical 1h, High 4h, Medium 24h, Low 72h), not a fixed 24h window regardless of priority. A
+// Critical ticket left untouched gets nudged after 1 hour, not 24. Repeats every
+// SLA_REMINDER_COOLDOWN_HOURS while still breached, via last_sla_reminded_at — same lazy,
+// no-background-scheduler idiom as everything else here.
+const SLA_REMINDER_COOLDOWN_HOURS = 2;
+function sendSlaBreachReminders() {
+  const candidates = db.prepare("SELECT * FROM tickets WHERE status NOT IN ('Resolved','Closed') AND sla_deadline IS NOT NULL").all();
+  const now = Date.now();
+  candidates.forEach((t) => {
+    if (!isBreached(t)) return;
+    const lastReminder = t.last_sla_reminded_at ? parseUtc(t.last_sla_reminded_at).getTime() : null;
+    if (lastReminder && (now - lastReminder) < SLA_REMINDER_COOLDOWN_HOURS * 3600000) return;
+    const overdueHours = Math.max(1, Math.round((now - parseUtc(t.sla_deadline).getTime()) / 3600000));
+    if (t.assigned_to_employee_id) {
+      notifyEmployee(t.assigned_to_employee_id, 'SLA deadline passed', `"${t.subject}" (${t.priority} priority) is ${overdueHours}h past its SLA deadline — please resolve or update it.`, { priority: t.priority, ticketId: t.id });
+    }
+    db.prepare('INSERT INTO notifications (title, message, target_role, priority, ticket_id) VALUES (?, ?, ?, ?, ?)')
+      .run('Helpdesk SLA Breached', `"${t.subject}" (${t.priority} priority) is ${overdueHours}h past its SLA deadline and still ${t.status}.`, 'staff', t.priority, t.id);
+    db.prepare("UPDATE tickets SET last_sla_reminded_at = datetime('now') WHERE id = ?").run(t.id);
+  });
+}
+
 // HR: dashboard of every ticket, with KPIs by status.
 router.get('/overview', (req, res) => {
   if (!canViewHelpdesk(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   runAutoEscalations();
+  sendSlaBreachReminders();
   const hr = isHR(req.user.role);
   const scoped = isScopedRole(req.user.role);
   const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
@@ -145,6 +171,7 @@ router.get('/my', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ tickets: [], categories: CATEGORIES, priorities: PRIORITIES });
   runAutoEscalations();
+  sendSlaBreachReminders();
   const tickets = db.prepare('SELECT * FROM tickets WHERE employee_id = ? ORDER BY created_at DESC').all(me.id).map((t) => withDetails(t));
   res.json({ tickets, categories: CATEGORIES, priorities: PRIORITIES });
 });
@@ -189,7 +216,21 @@ router.post('/', (req, res) => {
   db.prepare('INSERT INTO notifications (title, message, target_role, priority, ticket_id) VALUES (?, ?, ?, ?, ?)')
     .run('New Helpdesk Ticket', routedMsg, 'staff', prio, info.lastInsertRowid);
   notifyWebhooks('New Helpdesk Ticket', `${me.name} raised a ${prio} priority ${category} ticket: "${subject.trim()}"`).catch(() => {});
+
   res.status(201).json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(info.lastInsertRowid)) });
+
+  // AI first-response: fire-and-forget, grounded on this category's real KB articles (see
+  // suggestTicketAnswer). Runs AFTER the response is already sent — the requester gets their
+  // ticket back instantly instead of waiting 10-30s for the local model, and the AI comment
+  // simply appears in the thread a little later. Never touches the ticket creation itself; a
+  // slow/unavailable model just means no AI comment shows up, nothing else is affected.
+  (async () => {
+    try {
+      const kbArticles = db.prepare('SELECT title, body FROM kb_articles WHERE category = ? ORDER BY created_at DESC LIMIT 5').all(category);
+      const answer = await suggestTicketAnswer(category, subject.trim(), description, kbArticles);
+      logComment(info.lastInsertRowid, 'AI Assistant', answer);
+    } catch { /* Local AI unavailable or returned nothing — ticket still stands on its own, HR/assignee still has it. */ }
+  })();
 });
 
 // HR: update status and/or assign to a staff member (SLA Tracking & Status / Assignment).
@@ -222,6 +263,37 @@ router.post('/:id/confirm', (req, res) => {
   if (!isHR(req.user.role) && ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Insufficient permissions' });
   if (ticket.status !== 'Resolved') return res.status(400).json({ error: 'Only a Resolved ticket can be confirmed.' });
   db.prepare('UPDATE tickets SET requester_confirmed = 1 WHERE id = ?').run(ticket.id);
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id)) });
+});
+
+// The requester's response to the AI Assistant's first-response comment (see POST / above) — the
+// two outcomes the ticket's own raiser can pick, no HR involvement needed either way:
+//  - "Yes, that fixed it" resolves the ticket immediately, self-confirmed (same effect as a real
+//    HR resolution the requester then confirms via POST /:id/confirm, but in one step).
+//  - "No, still need help" escalates it via the exact same bump escalateTicket() uses for HR's
+//    manual escalation — gets it faster/more senior attention rather than sitting at its
+//    original priority waiting for the 24h auto-escalation ratchet to eventually catch it.
+router.post('/:id/ai-resolve', (req, res) => {
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const me = myEmployee(req.user.sub);
+  if (ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Only the requester can accept the AI suggestion.' });
+  if (!['Open', 'In Progress'].includes(ticket.status)) return res.status(400).json({ error: 'This ticket is no longer open.' });
+  const resolvedAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare("UPDATE tickets SET status = 'Resolved', resolved_at = ?, requester_confirmed = 1 WHERE id = ?").run(resolvedAt, ticket.id);
+  logComment(ticket.id, req.user.name || 'Anonymous', 'Marked resolved — the AI-suggested answer solved it.');
+  res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id)) });
+});
+
+router.post('/:id/ai-escalate', (req, res) => {
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+  if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
+  const me = myEmployee(req.user.sub);
+  if (ticket.employee_id !== me?.id) return res.status(403).json({ error: 'Only the requester can escalate their own ticket.' });
+  if (!['Open', 'In Progress'].includes(ticket.status)) return res.status(400).json({ error: 'This ticket is no longer open.' });
+  const nextPriority = escalateTicket(ticket, req.user.name || 'Anonymous', "Requester said the AI-suggested answer above didn't resolve it — escalated for a staff member to take over.", false);
+  db.prepare('INSERT INTO notifications (title, message, target_role, priority, ticket_id) VALUES (?, ?, ?, ?, ?)')
+    .run('Helpdesk Ticket Escalated', `${me.name} said the AI suggestion on "${ticket.subject}" didn't help — escalated to ${nextPriority} priority.`, 'staff', nextPriority, ticket.id);
   res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id)) });
 });
 
@@ -271,19 +343,28 @@ router.post('/:id/comments', (req, res) => {
 router.get('/escalations/list', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   runAutoEscalations();
+  sendSlaBreachReminders();
   const tickets = db.prepare("SELECT * FROM tickets WHERE status NOT IN ('Resolved','Closed')").all().map((t) => withDetails(t, { includeInternal: true })).filter((t) => t.slaBreached);
   res.json({ tickets });
 });
+
+// Shared bump — one level up PRIORITIES, recomputed SLA deadline, escalated=1 — used by both the
+// HR-manual escalate route below and the requester-triggered "AI suggestion didn't help" route,
+// so there's exactly one place that defines what "escalate" does to a ticket.
+function escalateTicket(ticket, actorName, note, internal = true) {
+  const nextPriority = PRIORITIES[Math.min(PRIORITIES.indexOf(ticket.priority) + 1, PRIORITIES.length - 1)];
+  const newDeadline = new Date(Date.now() + SLA_HOURS[nextPriority] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+  db.prepare('UPDATE tickets SET escalated = 1, priority = ?, sla_deadline = ? WHERE id = ?').run(nextPriority, newDeadline, ticket.id);
+  logComment(ticket.id, actorName, note || `Escalation approved — priority raised to ${nextPriority}.`, { internal });
+  return nextPriority;
+}
 
 router.post('/:id/escalate', (req, res) => {
   // Feature-level gate: escalating a ticket is the 'Ticket Escalation' feature specifically.
   if (!canFeatureAction(req.user.role, '13', 'Ticket Escalation', 'Manage')) return res.status(403).json({ error: 'Insufficient permissions' });
   const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
   if (!ticket) return res.status(404).json({ error: 'Ticket not found' });
-  const nextPriority = PRIORITIES[Math.min(PRIORITIES.indexOf(ticket.priority) + 1, PRIORITIES.length - 1)];
-  const newDeadline = new Date(Date.now() + SLA_HOURS[nextPriority] * 3600000).toISOString().slice(0, 19).replace('T', ' ');
-  db.prepare('UPDATE tickets SET escalated = 1, priority = ?, sla_deadline = ? WHERE id = ?').run(nextPriority, newDeadline, ticket.id);
-  logComment(ticket.id, req.user.name || 'Anonymous', `Escalation approved — priority raised to ${nextPriority}.`, { internal: true });
+  escalateTicket(ticket, req.user.name || 'Anonymous');
   res.json({ ticket: withDetails(db.prepare('SELECT * FROM tickets WHERE id = ?').get(ticket.id), { includeInternal: true }) });
 });
 

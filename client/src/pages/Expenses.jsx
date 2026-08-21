@@ -36,6 +36,7 @@ function MyExpenses({ compact }) {
   const [claims, setClaims] = useState([]);
   const [chainLabel, setChainLabel] = useState('');
   const [error, setError] = useState('');
+  const [warning, setWarning] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ category: 'Travel', amount: '', description: '' });
   const [receipt, setReceipt] = useState(null);
@@ -45,12 +46,13 @@ function MyExpenses({ compact }) {
   useEffect(load, []);
 
   async function submit(e) {
-    e.preventDefault(); setError('');
+    e.preventDefault(); setError(''); setWarning('');
     if (!form.amount || Number(form.amount) <= 0) { setError('A valid amount is required.'); return; }
     setSaving(true);
     try {
       const receipt_data_url = receipt ? await readFileAsDataUrl(receipt) : null;
-      await api.post('/expenses', { ...form, receipt_data_url });
+      const r = await api.post('/expenses', { ...form, receipt_data_url });
+      if (r.data.duplicateWarning) setWarning(r.data.duplicateWarning);
       setForm({ category: 'Travel', amount: '', description: '' }); setReceipt(null); setShowForm(false); load();
     } catch (err) { setError(err.response?.data?.error || 'Could not submit claim.'); }
     finally { setSaving(false); }
@@ -61,6 +63,7 @@ function MyExpenses({ compact }) {
       {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Expense Claims</div> : <h1>Expense &amp; Travel Claims</h1>}
       {!compact && <div className="subtitle">Submit a claim and track it through approval: {chainLabel}.</div>}
       {error && <div className="banner error">{error}</div>}
+      {warning && <div className="banner info">⚠️ {warning}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
         {showForm ? (
@@ -91,7 +94,10 @@ function MyExpenses({ compact }) {
         {claims.map((c) => (
           <div key={c.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0' }}>
             <div className="row" style={{ justifyContent: 'space-between' }}>
-              <span><strong>{c.category}</strong> — ₹{c.amount.toLocaleString('en-IN')}{c.description ? ` · ${c.description}` : ''}</span>
+              <span>
+                <strong>{c.category}</strong> — ₹{c.amount.toLocaleString('en-IN')}{c.description ? ` · ${c.description}` : ''}
+                {c.isDuplicateReceipt && <span className="status-tag absent" style={{ marginLeft: 6 }} title="This receipt matches another claim on file">⚠️ Duplicate receipt</span>}
+              </span>
               <span className={'status-tag ' + (STATUS_CLASS[c.status] || 'info')}>{c.status}</span>
             </div>
             {c.status === 'Pending' && <ChainStepper chainLabel={chainLabel} currentStageName={c.current_stage_name} status={c.status} />}
@@ -169,6 +175,11 @@ function HRExpenses({ compact, sectionLabel }) {
                 <span><strong>{c.employee_name}</strong> ({c.employee_code}) · {c.category} — ₹{c.amount.toLocaleString('en-IN')}{c.description ? ` · ${c.description}` : ''}</span>
                 <span className={'status-tag ' + (STATUS_CLASS[c.status] || 'info')}>{c.status}</span>
               </div>
+              {c.isDuplicateReceipt && (
+                <div className="banner error" style={{ margin: '4px 0', padding: '4px 10px', fontSize: 12 }}>
+                  ⚠️ Possible duplicate — this receipt matches another claim on file. Check before approving.
+                </div>
+              )}
               {c.receipt_data_url && <a className="pill" href={c.receipt_data_url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 4 }}>View Receipt</a>}
               {c.status === 'Pending' && (
                 <>

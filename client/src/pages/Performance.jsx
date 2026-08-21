@@ -25,6 +25,7 @@ function MyPerformance({ compact }) {
   const [reviews, setReviews] = useState([]);
   const [attendance, setAttendance] = useState(null);
   const [thisMonthTargets, setThisMonthTargets] = useState({ assigned: 0, completed: 0 });
+  const [progressScore, setProgressScore] = useState(null);
   const [error, setError] = useState('');
   const [noteFor, setNoteFor] = useState(null);
   const [note, setNote] = useState('');
@@ -34,6 +35,7 @@ function MyPerformance({ compact }) {
       setReviews(r.data.reviews);
       setAttendance(r.data.attendance);
       setThisMonthTargets(r.data.thisMonthTargets || { assigned: 0, completed: 0 });
+      setProgressScore(r.data.progressScore || null);
     }).catch(() => {});
   }
   useEffect(load, []);
@@ -61,6 +63,15 @@ function MyPerformance({ compact }) {
       {error && <div className="banner error">{error}</div>}
 
       <div className="kpi-row">
+        {progressScore && (
+          <div className={'kpi-card ' + (progressScore.band === 'High' ? 'green' : progressScore.band === 'Medium' ? 'gold' : 'red')}>
+            <div className="kpi-label">Overall Progress</div>
+            <div className="kpi-value">{progressScore.overall}% · {progressScore.band}</div>
+            <div className="feature-meta">
+              Goals {progressScore.goalsScore ?? '—'}{progressScore.goalsScore != null ? '%' : ' (none assigned)'} · Attendance {progressScore.attendanceScore}% · Conduct {progressScore.disciplinaryScore}%
+            </div>
+          </div>
+        )}
         <div className="kpi-card blue"><div className="kpi-label">This Month's Targets</div><div className="kpi-value">{thisMonthTargets.completed}/{thisMonthTargets.target || thisMonthTargets.assigned || 4}</div></div>
         <div className="kpi-card green"><div className="kpi-label">This Month's Attendance</div><div className="kpi-value">{attendance ? `${attendance.attendancePct}%` : '—'}</div></div>
         {attendance && <div className="kpi-card gold"><div className="kpi-label">Late Check-ins</div><div className="kpi-value">{attendance.late}</div></div>}
@@ -147,7 +158,7 @@ function HRPerformance({ compact, sectionLabel }) {
   const canManage = CAN_MANAGE_ROLES.includes(user?.role);
   const [screen, setScreen] = useState('dashboard');
   const [activeReviewId, setActiveReviewId] = useState(null);
-  const [tab, setTab] = useState('dashboard'); // dashboard | reports (kept separate from `screen`)
+  const [tab, setTab] = useState('overview'); // overview | progress | reviews | reports (kept separate from `screen`)
   const [ov, setOv] = useState(null);
   const [reports, setReports] = useState(null);
   const [employees, setEmployees] = useState([]);
@@ -155,6 +166,7 @@ function HRPerformance({ compact, sectionLabel }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '', month: new Date().toISOString().slice(0, 7), target_value: '', unit: '' });
   const [expandedDetails, setExpandedDetails] = useState(null);
+  const [showProgress, setShowProgress] = useState(false);
 
   // A plain-text summary of one review — everything the card shows plus the write-up fields that
   // only appear in "View Details" — downloaded client-side, same lightweight Blob-download
@@ -243,12 +255,14 @@ function HRPerformance({ compact, sectionLabel }) {
       {ov?.banner && <div className="banner info">{ov.banner}</div>}
       {error && <div className="banner error">{error}</div>}
 
-      <div className="row" style={{ marginBottom: 14 }}>
-        <button className={tab === 'dashboard' ? 'primary' : ''} onClick={() => setTab('dashboard')}>Dashboard</button>
+      <div className="row" style={{ marginBottom: 14, flexWrap: 'wrap' }}>
+        <button className={tab === 'overview' ? 'primary' : ''} onClick={() => setTab('overview')}>Overview</button>
+        <button className={tab === 'progress' ? 'primary' : ''} onClick={() => setTab('progress')}>Progress</button>
+        <button className={tab === 'reviews' ? 'primary' : ''} onClick={() => setTab('reviews')}>Reviews</button>
         <button className={tab === 'reports' ? 'primary' : ''} onClick={() => setTab('reports')}>Reports</button>
       </div>
 
-      {tab === 'reports' ? (
+      {tab === 'reports' && (
         <>
           <div className="card">
             <div className="feature-name" style={{ marginBottom: 8 }}>Ratings by Team</div>
@@ -283,7 +297,9 @@ function HRPerformance({ compact, sectionLabel }) {
             </div>
           )}
         </>
-      ) : (
+      )}
+
+      {tab === 'overview' && (
         <>
           {ov && (
             <div className="kpi-row">
@@ -303,6 +319,44 @@ function HRPerformance({ compact, sectionLabel }) {
             </div>
           )}
 
+          <div className="dashboard-grid">
+            <div className="card">
+              <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">1</span>Key Features</div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>Each feature opens its own screen.</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {ov?.keyFeatures.map((f) => (
+                  <button
+                    key={f.key}
+                    className="pill"
+                    onClick={() => {
+                      if (f.screen === 'reports') setTab('reports');
+                      else if (f.screen === 'dashboard') setTab('reviews');
+                      else setScreen(f.screen);
+                    }}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Field-Level Access</div>
+              {ov?.fieldAccess.map((f) => (
+                <div key={f.field} className="rec-row"><span>{f.field}</span><span className="status-tag present">{f.access}</span></div>
+              ))}
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">3</span>Quick Actions</div>
+            {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
+          </div>
+        </>
+      )}
+
+      {tab === 'progress' && (
+        <>
           {ov?.departmentProgress?.length > 0 && (
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="feature-name" style={{ marginBottom: 8 }}>Department-wise Progress &amp; Top Performers ({ov.month})</div>
@@ -327,6 +381,34 @@ function HRPerformance({ compact, sectionLabel }) {
             </div>
           )}
 
+          {ov?.employeeProgress?.length > 0 && (
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div className="feature-name">Employee Progress ({ov.month})</div>
+                <button onClick={() => setShowProgress((v) => !v)}>{showProgress ? 'Hide' : 'Show all'}</button>
+              </div>
+              <div className="feature-meta" style={{ marginBottom: 8 }}>
+                One score blending this month's goal completion (50%), attendance (30%), and disciplinary record (20%).
+              </div>
+              {showProgress && (
+                <table>
+                  <thead><tr><th>Employee</th><th>Department</th><th>Goals</th><th>Attendance</th><th>Conduct</th><th>Overall</th><th>Band</th></tr></thead>
+                  <tbody>{ov.employeeProgress.map((e) => (
+                    <tr key={e.employee_id}>
+                      <td>{e.name}</td>
+                      <td>{e.department}</td>
+                      <td>{e.goalsScore != null ? `${e.goalsScore}%` : '—'} <span className="feature-meta">({e.targetsCompleted}/{e.targetsAssigned})</span></td>
+                      <td>{e.attendanceScore}%</td>
+                      <td>{e.disciplinaryScore}% {e.openCases > 0 && <span className="status-tag absent" style={{ marginLeft: 4 }}>{e.openCases} open</span>}</td>
+                      <td style={{ fontWeight: 700 }}>{e.overall}%</td>
+                      <td><span className={'status-tag ' + (e.band === 'High' ? 'present' : e.band === 'Medium' ? 'pending' : 'absent')}>{e.band}</span></td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              )}
+            </div>
+          )}
+
           {user?.role === 'super_admin' && targetPolicy && (
             <div className="card" style={{ marginBottom: 14 }}>
               <div className="feature-name" style={{ marginBottom: 4 }}>Target Policy — Targets per Month by Department</div>
@@ -346,40 +428,43 @@ function HRPerformance({ compact, sectionLabel }) {
               ))}
             </div>
           )}
+        </>
+      )}
 
-          <div className="dashboard-grid">
-            <div className="card" id="section-reviews">
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div className="feature-name"><span className="widget-badge">1</span>Performance Reviews</div>
-                {canManage && <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add Review'}</button>}
-              </div>
-              {canManage && showForm && (
-                <form onSubmit={submitReview} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
-                  <select value={form.employee_id} onChange={(e) => {
-                    const emp = employees.find((x) => String(x.id) === e.target.value);
-                    setForm({ ...form, employee_id: e.target.value, employee_name: emp?.name || form.employee_name });
-                  }} style={{ flex: '1 1 160px' }}>
-                    <option value="">Select employee…</option>
-                    {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name} ({emp.employee_code})</option>)}
-                  </select>
-                  <input placeholder="Team (optional)" value={form.team} onChange={(e) => setForm({ ...form, team: e.target.value })} style={{ flex: '1 1 100px' }} />
-                  <input placeholder="Goal" value={form.goal_text} onChange={(e) => setForm({ ...form, goal_text: e.target.value })} required style={{ flex: '2 1 200px' }} />
-                  <input placeholder="KPI" value={form.kpi_text} onChange={(e) => setForm({ ...form, kpi_text: e.target.value })} style={{ flex: '1 1 160px' }} />
-                  <div style={{ flex: '0 1 130px' }}>
-                    <label className="field-label" style={{ fontSize: 11 }}>Target month</label>
-                    <input type="month" value={form.month} onChange={(e) => setForm({ ...form, month: e.target.value })} />
-                  </div>
-                  <input type="number" min="0" placeholder="Target value (optional)" value={form.target_value} onChange={(e) => setForm({ ...form, target_value: e.target.value })} style={{ flex: '1 1 140px' }} />
-                  <input placeholder="Unit (e.g. deals, tickets)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} style={{ flex: '1 1 140px' }} />
-                  <button className="primary" type="submit">Add</button>
-                </form>
-              )}
-              <div className="feature-meta" style={{ marginBottom: 8 }}>
-                {selectedEmpDept ? `Up to ${capForSelected} target(s) per month for ${selectedEmpDept}.` : 'Target count is set per department — see Target Policy below.'}
-                {' '}Leave target value blank for a qualitative goal — set it for a measurable one so progress is computed, not guessed.
-              </div>
-              {ov?.reviews.length === 0 && <div className="empty">No performance reviews yet.</div>}
-              {ov?.reviews.map((r) => {
+      {tab === 'reviews' && (
+        <>
+          <div className="card" id="section-reviews">
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div className="feature-name">Performance Reviews</div>
+              {canManage && <button onClick={() => setShowForm((v) => !v)}>{showForm ? 'Cancel' : '+ Add Review'}</button>}
+            </div>
+            {canManage && showForm && (
+              <form onSubmit={submitReview} className="row" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
+                <select value={form.employee_id} onChange={(e) => {
+                  const emp = employees.find((x) => String(x.id) === e.target.value);
+                  setForm({ ...form, employee_id: e.target.value, employee_name: emp?.name || form.employee_name });
+                }} style={{ flex: '1 1 160px' }}>
+                  <option value="">Select employee…</option>
+                  {employees.map((emp) => <option key={emp.id} value={emp.id}>{emp.name} ({emp.employee_code})</option>)}
+                </select>
+                <input placeholder="Team (optional)" value={form.team} onChange={(e) => setForm({ ...form, team: e.target.value })} style={{ flex: '1 1 100px' }} />
+                <input placeholder="Goal" value={form.goal_text} onChange={(e) => setForm({ ...form, goal_text: e.target.value })} required style={{ flex: '2 1 200px' }} />
+                <input placeholder="KPI" value={form.kpi_text} onChange={(e) => setForm({ ...form, kpi_text: e.target.value })} style={{ flex: '1 1 160px' }} />
+                <div style={{ flex: '0 1 130px' }}>
+                  <label className="field-label" style={{ fontSize: 11 }}>Target month</label>
+                  <input type="month" value={form.month} onChange={(e) => setForm({ ...form, month: e.target.value })} />
+                </div>
+                <input type="number" min="0" placeholder="Target value (optional)" value={form.target_value} onChange={(e) => setForm({ ...form, target_value: e.target.value })} style={{ flex: '1 1 140px' }} />
+                <input placeholder="Unit (e.g. deals, tickets)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} style={{ flex: '1 1 140px' }} />
+                <button className="primary" type="submit">Add</button>
+              </form>
+            )}
+            <div className="feature-meta" style={{ marginBottom: 8 }}>
+              {selectedEmpDept ? `Up to ${capForSelected} target(s) per month for ${selectedEmpDept}.` : 'Target count is set per department — see the Progress tab\'s Target Policy.'}
+              {' '}Leave target value blank for a qualitative goal — set it for a measurable one so progress is computed, not guessed.
+            </div>
+            {ov?.reviews.length === 0 && <div className="empty">No performance reviews yet.</div>}
+            {ov?.reviews.map((r) => {
                 const bothSubmitted = r.self_assessment_status === 'Submitted' && r.manager_assessment_status === 'Submitted';
                 const notStarted = r.self_assessment_status === 'Pending' && r.manager_assessment_status === 'Pending';
                 return (
@@ -463,27 +548,6 @@ function HRPerformance({ compact, sectionLabel }) {
                   </div>
                 );
               })}
-            </div>
-
-            <div className="card">
-              <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">2</span>Key Features</div>
-              <div className="feature-meta" style={{ marginBottom: 8 }}>Each feature opens its own screen.</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                {ov?.keyFeatures.map((f) => <button key={f.key} className="pill" onClick={() => f.screen === 'reports' ? setTab('reports') : setScreen(f.screen)}>{f.label}</button>)}
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">3</span>Field-Level Access</div>
-              {ov?.fieldAccess.map((f) => (
-                <div key={f.field} className="rec-row"><span>{f.field}</span><span className="status-tag present">{f.access}</span></div>
-              ))}
-            </div>
-          </div>
-
-          <div className="card">
-            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">4</span>Quick Actions</div>
-            {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
           </div>
         </>
       )}

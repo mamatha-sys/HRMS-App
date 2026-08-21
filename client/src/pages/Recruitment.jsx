@@ -14,6 +14,63 @@ function readFileAsDataUrl(file) {
   });
 }
 
+const esc = (v) => (v == null || v === '' ? '' : String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+
+// Open a blank tab FIRST (synchronously, inside the click handler) so the browser's popup blocker
+// still sees this as a direct user action — same pattern as Payroll's openPayslip.
+function openOfferLetterDoc(candidateId) {
+  const win = window.open('', '_blank');
+  if (win) { win.document.write('<p style="font-family: sans-serif; padding: 24px;">Loading offer letter…</p>'); win.document.close(); }
+  api.get(`/recruitment/candidates/${candidateId}/offer-letter`).then((r) => {
+    if (!win) return;
+    win.document.open();
+    win.document.write(offerLetterHtml(r.data));
+    win.document.close();
+  }).catch((err) => { if (win) win.document.body.innerHTML = `<p style="font-family: sans-serif; padding: 24px;">${esc(err.response?.data?.error || 'Could not load this offer letter.')}</p>`; });
+}
+
+// A printable, letterheaded offer letter — same company-header layout (logo + name + address) and
+// "Print / Save as PDF" toolbar convention as Payroll's payslip and Learning's certificate, so
+// every printable document in this app looks and behaves consistently. No PDF library involved —
+// relies on the browser's own print dialog.
+function offerLetterHtml({ candidate, company }) {
+  const todayStr = new Date().toLocaleDateString('en-IN', { year: 'numeric', month: 'long', day: 'numeric' });
+  const bodyHtml = esc(candidate.offer_letter_text).split(/\n\s*\n/).map((para) => `<p>${para.replace(/\n/g, '<br>')}</p>`).join('');
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>Offer Letter — ${esc(candidate.name)}</title>
+<style>
+  body { font-family: Georgia, 'Times New Roman', serif; color: #111; margin: 40px auto; max-width: 720px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+  td { padding: 0; vertical-align: top; }
+  .logo-cell { width: 220px; text-align: center; }
+  .logo-cell img { max-width: 200px; max-height: 90px; object-fit: contain; }
+  .company-cell { font-size: 13px; line-height: 1.5; text-align: right; }
+  .company-name { font-weight: 700; font-size: 17px; margin-bottom: 4px; }
+  .letter-title { text-align: center; font-weight: 700; font-size: 18px; letter-spacing: 1px; text-transform: uppercase; margin: 0 0 4px; border-bottom: 2px solid #333; padding-bottom: 14px; }
+  .date-line { text-align: right; font-size: 13px; color: #444; margin: 14px 0 20px; }
+  .letter-body p { font-size: 14px; line-height: 1.8; margin: 0 0 14px; text-align: justify; }
+  .toolbar { text-align: right; margin-bottom: 12px; }
+  .toolbar button { padding: 8px 16px; font-size: 13px; cursor: pointer; }
+  @media print { .toolbar { display: none; } body { margin: 0 auto; } }
+</style></head>
+<body>
+  <div class="toolbar"><button onclick="window.print()">Print / Save as PDF</button></div>
+  <table>
+    <tr>
+      <td class="logo-cell">${company?.company_logo ? `<img src="${company.company_logo}" alt="logo">` : ''}</td>
+      <td class="company-cell">
+        <div class="company-name">${esc(company?.company_name) || 'Company'}</div>
+        <div>${esc(company?.company_address).replace(/\n/g, '<br>')}</div>
+      </td>
+    </tr>
+  </table>
+  <div class="letter-title">Offer of Employment</div>
+  <div class="date-line">${todayStr}</div>
+  <div class="letter-body">${bodyHtml}</div>
+</body></html>`;
+}
+
 // Super Admin is a pure system-administrator account — admin overview only, no own vacancies view.
 const FULL_HR_ROLES = ['super_admin'];
 // Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own read-only
@@ -248,6 +305,7 @@ function HRRecruitment({ compact, sectionLabel }) {
   const [messageStatus, setMessageStatus] = useState('');
   const [interviewData, setInterviewData] = useState({}); // candidate id -> { interview } | { loading: true } | { error }
   const [selectedCandidateId, setSelectedCandidateId] = useState(null); // candidate id currently open in the detail view (list vs. detail split)
+  const [offerLetterTimedOutFor, setOfferLetterTimedOutFor] = useState(null); // candidate id whose background offer-letter draft never landed within the poll window
   const [inviteStatus, setInviteStatus] = useState('');
   const navigate = useNavigate();
   const [showHireForm, setShowHireForm] = useState(false);
@@ -277,15 +335,20 @@ function HRRecruitment({ compact, sectionLabel }) {
   const [pipelineSource, setPipelineSource] = useState('');
   const [showSourceForm, setShowSourceForm] = useState(false);
   const [newSourceLabel, setNewSourceLabel] = useState('');
+  const [interviewAccuracy, setInterviewAccuracy] = useState(null);
 
   function load() {
     api.get('/recruitment/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load recruitment overview.'));
+  }
+  function loadInterviewAccuracy() {
+    api.get('/recruitment/interview-score-accuracy').then((r) => setInterviewAccuracy(r.data)).catch(() => {});
   }
   function loadNoticeDays() {
     api.get('/recruitment/notice-period').then((r) => { setNoticeDays(r.data.days); setNoticeDaysDraft(r.data.days); }).catch(() => {});
   }
   useEffect(load, []);
   useEffect(loadNoticeDays, []);
+  useEffect(loadInterviewAccuracy, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
   useEffect(() => { api.get('/positions/my-departments').then((r) => setMyDepartments(r.data.departments)).catch(() => {}); }, []);
   useEffect(() => { api.get('/employees').then((r) => setActiveEmployees(r.data.employees.filter((e) => e.status === 'Active'))).catch(() => {}); }, []);
@@ -415,15 +478,54 @@ function HRRecruitment({ compact, sectionLabel }) {
       loadInterviewData(candidateId);
     } catch (err) { setError(err.response?.data?.error || 'Could not delete video.'); }
   }
-  async function advanceCandidate(id) {
+  async function advanceCandidate(id, body) {
     setError('');
-    try { await api.put(`/recruitment/candidates/${id}/advance`); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not advance candidate.'); }
+    try {
+      const r = await api.put(`/recruitment/candidates/${id}/advance`, body || {});
+      load();
+      // The stage move is already done by the time this responds — the AI letter drafts in the
+      // background on the server, so poll a few times (rather than making HR wait on the request
+      // itself) until it shows up, then stop.
+      if (r.data.offerLetterPending) { setOfferLetterTimedOutFor((v) => (v === id ? null : v)); pollForOfferLetter(id); }
+    } catch (err) { setError(err.response?.data?.error || 'Could not advance candidate.'); }
+  }
+  // Giving up after ~30s used to leave the "AI is drafting…" placeholder up forever with no
+  // explanation — indistinguishable from it still working. Now it says so explicitly and points
+  // at Regenerate, which still works as a manual retry.
+  function pollForOfferLetter(id, attempt = 0) {
+    if (attempt >= 10) { setOfferLetterTimedOutFor(id); return; }
+    setTimeout(() => {
+      api.get('/recruitment/overview').then((r) => {
+        setOv(r.data);
+        const c = r.data.candidates.find((x) => x.id === id);
+        if (!c?.offer_letter_text) pollForOfferLetter(id, attempt + 1);
+      }).catch(() => {});
+    }, 3000);
   }
   async function revertCandidate(id) {
     setError('');
     try { await api.put(`/recruitment/candidates/${id}/revert`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not move candidate back.'); }
+  }
+  async function saveOfferLetter(id, offer_letter_text) {
+    setError('');
+    try { await api.put(`/recruitment/candidates/${id}/offer-letter`, { offer_letter_text }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save the offer letter.'); }
+  }
+  async function regenerateOfferLetter(id, offered_ctc, joining_date) {
+    setError('');
+    try {
+      await api.post(`/recruitment/candidates/${id}/offer-letter/regenerate`, { offered_ctc, joining_date });
+      setOfferLetterTimedOutFor((v) => (v === id ? null : v));
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not regenerate the offer letter.'); }
+  }
+  // The letter is only ever generated/edited automatically — actually emailing it to the
+  // candidate is always this one explicit HR click, never automatic.
+  async function sendOfferLetter(id) {
+    setError('');
+    try { await api.post(`/recruitment/candidates/${id}/offer-letter/send`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not send the offer letter.'); }
   }
   async function submitHire(e) {
     e.preventDefault(); setError('');
@@ -783,8 +885,54 @@ function HRRecruitment({ compact, sectionLabel }) {
           )}
         </div>
 
+        {canManage && (
+          <div className="card" id="section-interview-accuracy">
+            <div className="feature-name" style={{ marginBottom: 4 }}>
+              <span className="widget-badge">6</span>Interview Score Accuracy
+            </div>
+            <div className="feature-meta" style={{ marginBottom: 8 }}>
+              Checks the AI video interview's eligibility call against what actually happened to the candidate afterward — a candidate reaching Hired, or stalling 30+ days at the same stage without moving. Still-in-progress candidates aren't judged yet.
+            </div>
+            {!interviewAccuracy && <div className="empty">Loading…</div>}
+            {interviewAccuracy && interviewAccuracy.candidates.length === 0 && (
+              <div className="empty">No completed AI video interviews yet.</div>
+            )}
+            {interviewAccuracy && interviewAccuracy.candidates.length > 0 && (
+              <>
+                <div className="row" style={{ gap: 16, marginBottom: 8, flexWrap: 'wrap' }}>
+                  <span className="feature-meta">
+                    <strong>{interviewAccuracy.summary.accuracyPct ?? '—'}{interviewAccuracy.summary.accuracyPct != null ? '%' : ''}</strong> agreement
+                    {interviewAccuracy.summary.decided > 0 && ` (${interviewAccuracy.summary.matches}/${interviewAccuracy.summary.decided} decided cases)`}
+                  </span>
+                  {interviewAccuracy.summary.total - interviewAccuracy.summary.decided > 0 && (
+                    <span className="feature-meta">{interviewAccuracy.summary.total - interviewAccuracy.summary.decided} still in progress — too early to judge</span>
+                  )}
+                </div>
+                <table>
+                  <thead><tr><th>Candidate</th><th>AI Score</th><th>AI Said</th><th>Actually Happened</th><th>Verdict</th></tr></thead>
+                  <tbody>
+                    {interviewAccuracy.candidates.map((c) => (
+                      <tr key={c.candidateId}>
+                        <td>{c.name}{c.position && <div className="feature-meta">{c.position}</div>}</td>
+                        <td>{c.aiScore ?? '—'}</td>
+                        <td>{c.aiEligible === null ? 'No usable score' : c.aiEligible ? 'Eligible' : 'Not eligible'}</td>
+                        <td>{c.outcome}</td>
+                        <td>
+                          <span className={'status-tag ' + (c.verdict === 'match' ? 'present' : c.verdict === 'mismatch' ? 'absent' : 'pending')}>
+                            {c.verdict === 'match' ? 'Matched' : c.verdict === 'mismatch' ? 'Mismatch' : 'Pending'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </div>
+        )}
+
         <div className="card">
-          <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">6</span>Key Features</div>
+          <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">7</span>Key Features</div>
           <div className="feature-meta" style={{ marginBottom: 8 }}>Click a feature to jump to it.</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
             <button className="pill" onClick={() => scrollToSection('section-requisitions')}>Job Requisition Management</button>
@@ -798,7 +946,7 @@ function HRRecruitment({ compact, sectionLabel }) {
 
         {canRequest && (
           <div className="card">
-            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">7</span>Quick Actions</div>
+            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">8</span>Quick Actions</div>
             <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => { setShowReqForm(true); scrollToSection('section-requisitions'); }}>+ Add Requisition</button>
             {canManage && <button style={{ width: '100%', marginBottom: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => { setShowRoundForm(true); scrollToSection('section-rounds'); }}>+ Interview Rounds</button>}
             {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
@@ -821,6 +969,10 @@ function HRRecruitment({ compact, sectionLabel }) {
           setShowCandForm={setShowCandForm}
           advanceCandidate={advanceCandidate}
           revertCandidate={revertCandidate}
+          saveOfferLetter={saveOfferLetter}
+          regenerateOfferLetter={regenerateOfferLetter}
+          sendOfferLetter={sendOfferLetter}
+          offerLetterTimedOut={offerLetterTimedOutFor === selectedCandidateId}
           filteredCandidates={filteredCandidates}
           pipelinePosition={pipelinePosition} setPipelinePosition={setPipelinePosition}
           pipelineDept={pipelineDept} setPipelineDept={setPipelineDept}
@@ -862,11 +1014,44 @@ function ResumeScreenBadge({ c }) {
 // inline-expanding list row) so a candidate with a completed interview (transcript + video per
 // question) has room to breathe instead of stretching the whole list.
 function CandidateDetail({
-  c, canManage, onBack, advanceCandidate, revertCandidate, convertToEmployee,
+  c, canManage, onBack, advanceCandidate, revertCandidate, saveOfferLetter, regenerateOfferLetter, sendOfferLetter, offerLetterTimedOut, convertToEmployee,
   messageDraft, setMessageDraft, messageStatus, messageOpen, openMessage, closeMessage, sendCandidateMessage,
   interviewInfo, sendInterviewInviteManually, inviteStatus, deleteAnswerVideo
 }) {
   const iv = interviewInfo?.interview;
+  const [showOfferForm, setShowOfferForm] = useState(false);
+  const [offerForm, setOfferForm] = useState({ offered_ctc: c.offered_ctc || '', joining_date: c.joining_date || '' });
+  const [offerBusy, setOfferBusy] = useState(false);
+  const [letterDraft, setLetterDraft] = useState(c.offer_letter_text || '');
+  const [editingLetter, setEditingLetter] = useState(false);
+  const [sendBusy, setSendBusy] = useState(false);
+
+  async function confirmMoveToOffer() {
+    if (!offerForm.offered_ctc.trim() || !offerForm.joining_date.trim()) return;
+    setOfferBusy(true);
+    // Advancing the stage itself is fast now — the AI letter drafts in the background after
+    // this returns (see advanceCandidate's polling), so the form doesn't need to stay open/
+    // disabled for the 10-30s the model actually takes.
+    try { await advanceCandidate(c.id, offerForm); setShowOfferForm(false); }
+    finally { setOfferBusy(false); }
+  }
+  async function handleRegenerate() {
+    setOfferBusy(true);
+    try { await regenerateOfferLetter(c.id, c.offered_ctc, c.joining_date); }
+    finally { setOfferBusy(false); }
+  }
+  async function handleSendOfferLetter() {
+    setSendBusy(true);
+    try { await sendOfferLetter(c.id); }
+    finally { setSendBusy(false); }
+  }
+  function downloadOfferLetter() {
+    const blob = new Blob([c.offer_letter_text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `offer-letter-${c.name.replace(/\s+/g, '-')}.txt`; a.click();
+    URL.revokeObjectURL(url);
+  }
   return (
     <div className="card">
       <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Candidate Pipeline</button>
@@ -897,10 +1082,90 @@ function CandidateDetail({
 
       {canManage && (
         <div className="row" style={{ gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-          {c.next_stage && <button onClick={() => advanceCandidate(c.id)}>Move to {c.next_stage}</button>}
+          {c.next_stage && (
+            <button onClick={() => (c.next_stage === 'Offer' ? setShowOfferForm((v) => !v) : advanceCandidate(c.id))}>
+              {c.next_stage === 'Offer' && showOfferForm ? 'Cancel' : `Move to ${c.next_stage}`}
+            </button>
+          )}
           {c.prev_stage && <button onClick={() => revertCandidate(c.id)}>← Move back to {c.prev_stage}</button>}
           {(c.email || c.phone) && <button onClick={() => (messageOpen ? closeMessage() : openMessage())}>{messageOpen ? 'Cancel message' : 'Send Update'}</button>}
           {!!c.is_final && <button className="primary" onClick={() => convertToEmployee(c)}>Convert to Employee →</button>}
+        </div>
+      )}
+
+      {showOfferForm && (
+        <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+          <div className="feature-name" style={{ marginBottom: 6 }}>Move to Offer</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>Enter the real offered CTC and joining date — the AI offer letter is drafted from exactly these figures, nothing guessed.</div>
+          <div className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+            <div style={{ flex: '1 1 160px' }}>
+              <label className="field-label">Offered CTC *</label>
+              <input placeholder="e.g. ₹12,00,000 per annum" value={offerForm.offered_ctc} onChange={(e) => setOfferForm({ ...offerForm, offered_ctc: e.target.value })} />
+            </div>
+            <div style={{ flex: '1 1 160px' }}>
+              <label className="field-label">Joining Date *</label>
+              <input type="date" value={offerForm.joining_date} onChange={(e) => setOfferForm({ ...offerForm, joining_date: e.target.value })} />
+            </div>
+          </div>
+          <button className="primary" onClick={confirmMoveToOffer} disabled={offerBusy || !offerForm.offered_ctc.trim() || !offerForm.joining_date.trim()}>
+            {offerBusy ? 'Moving…' : 'Confirm & Generate Offer Letter'}
+          </button>
+        </div>
+      )}
+
+      {c.stage === 'Offer' && !c.offer_letter_text && !offerLetterTimedOut && (
+        <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+          <div className="feature-name" style={{ marginBottom: 4 }}>Offer Letter</div>
+          <div className="feature-meta">🤖 AI is drafting the offer letter in the background — this page updates automatically once it's ready (usually under 30 seconds).</div>
+        </div>
+      )}
+
+      {c.stage === 'Offer' && !c.offer_letter_text && offerLetterTimedOut && (
+        <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+          <div className="feature-name" style={{ marginBottom: 4 }}>Offer Letter</div>
+          <div className="feature-meta">⚠️ The draft didn't arrive — local AI may be unavailable right now (check the AI status indicator at the top of the page).</div>
+          {canManage && <button style={{ marginTop: 6 }} onClick={handleRegenerate} disabled={offerBusy}>{offerBusy ? 'Regenerating…' : 'Try again'}</button>}
+        </div>
+      )}
+
+      {c.offer_letter_text && (
+        <div className="card" style={{ marginBottom: 12, background: '#F7F9FC' }}>
+          <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
+            <div className="feature-name">Offer Letter</div>
+            <span className="feature-meta">Offered {c.offered_ctc} · Joining {c.joining_date}</span>
+          </div>
+          {c.offer_letter_sent_at ? (
+            <div className="feature-meta" style={{ marginBottom: 6 }}>✅ Emailed to the candidate on {c.offer_letter_sent_at.slice(0, 10)}</div>
+          ) : (
+            <div className="feature-meta" style={{ marginBottom: 6 }}>Not sent yet — the candidate has not been emailed this offer letter.</div>
+          )}
+          {editingLetter ? (
+            <>
+              <textarea value={letterDraft} onChange={(e) => setLetterDraft(e.target.value)} rows={12} style={{ width: '100%', fontFamily: 'inherit' }} />
+              <div className="row" style={{ marginTop: 6, gap: 6 }}>
+                <button className="primary" onClick={async () => { await saveOfferLetter(c.id, letterDraft); setEditingLetter(false); }}>Save</button>
+                <button onClick={() => { setLetterDraft(c.offer_letter_text); setEditingLetter(false); }}>Cancel</button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={{ whiteSpace: 'pre-wrap', fontSize: 13, lineHeight: 1.5 }}>{c.offer_letter_text}</div>
+              {canManage && (
+                <>
+                  <div className="row" style={{ marginTop: 8, gap: 6, flexWrap: 'wrap' }}>
+                    <button className="primary" onClick={handleSendOfferLetter} disabled={sendBusy || !c.email}>
+                      {sendBusy ? 'Sending…' : c.offer_letter_sent_at ? '📧 Resend to Candidate' : '📧 Send to Candidate'}
+                    </button>
+                    <button onClick={() => openOfferLetterDoc(c.id)}>📄 View / Print Letter</button>
+                    <button onClick={() => { setLetterDraft(c.offer_letter_text); setEditingLetter(true); }}>Edit</button>
+                    <button onClick={handleRegenerate} disabled={offerBusy}>{offerBusy ? 'Regenerating…' : 'Regenerate'}</button>
+                    <button onClick={downloadOfferLetter}>Download (.txt)</button>
+                  </div>
+                  {!c.email && <div className="feature-meta" style={{ marginTop: 4 }}>⚠️ No email on file for this candidate — add one to send the offer letter.</div>}
+                </>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -990,6 +1255,7 @@ function CandidateDetail({
 // and "Candidate Sources" management, already its own card.
 function CandidatePipelineTab({
   ov, canManage, candForm, setCandForm, submitCandidate, showCandForm, setShowCandForm, advanceCandidate, revertCandidate,
+  saveOfferLetter, regenerateOfferLetter, sendOfferLetter, offerLetterTimedOut,
   filteredCandidates, pipelinePosition, setPipelinePosition, pipelineDept, setPipelineDept,
   pipelineStage, setPipelineStage, pipelineSource, setPipelineSource, pipelineDeptOptions, pipelineStageOptions,
   exportCandidatesCsv, showSourceForm, setShowSourceForm, newSourceLabel, setNewSourceLabel, addSource, toggleSource,
@@ -1007,6 +1273,10 @@ function CandidatePipelineTab({
         onBack={closeCandidateDetail}
         advanceCandidate={advanceCandidate}
         revertCandidate={revertCandidate}
+        saveOfferLetter={saveOfferLetter}
+        regenerateOfferLetter={regenerateOfferLetter}
+        sendOfferLetter={sendOfferLetter}
+        offerLetterTimedOut={offerLetterTimedOut}
         convertToEmployee={convertToEmployee}
         messageDraft={messageDraft} setMessageDraft={setMessageDraft} messageStatus={messageStatus}
         messageOpen={messageFor === selected.id} openMessage={() => openMessageFor(selected)} closeMessage={() => setMessageFor(null)}
