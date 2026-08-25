@@ -236,6 +236,15 @@ router.get('/', (req, res) => {
   if (STL_TL_ROLES.includes(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
     const scoped = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+    // Seeing your own record is self-service, intrinsic to every employee, and separate from
+    // the supervisor-scope grant that decides which OTHER employees you can see (rbac.js's own
+    // stated philosophy). A TL's own department/team isn't guaranteed to fall inside their own
+    // configured scope (e.g. no scope assigned yet, or they supervise a different team than the
+    // one they belong to) — without this, "My Profile" would wrongly report no linked record.
+    if (!scoped.some((r) => r.user_id === req.user.sub)) {
+      const own = rows.find((r) => r.user_id === req.user.sub);
+      if (own) scoped.push(own);
+    }
     return res.json({ employees: withAttritionRisk(scoped).map((r) => present(r, req.user)) });
   }
   if (isHR(req.user.role)) {
