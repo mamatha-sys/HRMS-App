@@ -14,6 +14,13 @@ const WRITE_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 // own "My Profile" card above the (company-wide, unscoped) employee list, rather than only the
 // admin table. Super Admin is a pure system-administrator account with no such expectation.
 const SELF_SERVICE_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Senior Team Lead/Team Lead get an extra "My Team" summary — a simpler, read-only view of just
+// their own assigned department/team's members (counts + a focused detail table), on top of the
+// full scoped directory below it. Not shown to Assistant Manager (company-wide, not a
+// team-supervisory role the way STL/TL are) or the full HR-tier roles (who already have the
+// richer directory as their primary view).
+const STL_TL_ROLES = ['stl', 'tl'];
+const TEAM_STATUS_CLASS = { Active: 'present', 'On Leave': 'pending', Absent: 'absent', Inactive: 'locked' };
 
 const STAGE_LABEL = { draft: 'Draft', assigned: 'Assigned', submitted: 'Submitted', locked: 'Locked' };
 const STAGE_CLASS = { draft: 'pending', assigned: 'info', submitted: 'present', locked: 'locked' };
@@ -463,6 +470,7 @@ export default function Employees() {
   const canHR = HR_ROLES.includes(user?.role);
   const canManageEmployees = WRITE_ROLES.includes(user?.role);
   const showMyProfile = SELF_SERVICE_ROLES.includes(user?.role);
+  const showMyTeam = STL_TL_ROLES.includes(user?.role);
   const canExport = user?.role === 'super_admin' || user?.role === 'manager';
   const canEditEmployee = user?.role === 'super_admin' || user?.role === 'hr_admin';
   // Senior Team Lead/Team Lead can also Transfer — scoped server-side to employees within their
@@ -488,6 +496,8 @@ export default function Employees() {
   const [filterId, setFilterId] = useState('');
   const [filterName, setFilterName] = useState('');
   const [filterDept, setFilterDept] = useState('');
+  const [teamSearchState, setTeamSearchState] = useState('');
+  const [teamStatusFilter, setTeamStatusFilter] = useState('');
   // Built from the employees actually visible to this user, not the org-wide department list —
   // Manager/HR Admin (company-wide) get every department here; a scoped Assistant Manager/STL/TL
   // only ever gets their own assigned department(s), since that's all the server sent them in the
@@ -700,6 +710,20 @@ export default function Employees() {
   // their assigned departments/teams for STL/TL, company-wide for the others, as already set up).
   const myRecord = showMyProfile ? employees.find((e) => e.user_id === user?.id) : null;
 
+  // My Team: the people this TL/STL supervises — everyone the (already department/team-scoped)
+  // employee list returned, minus their own record. `team_status`/`attendance_pct` come from the
+  // server (module '02' GET / for STL/TL only — see employees.routes.js's withTeamStatus).
+  // Status counts are computed from the FULL team (before the search/status filter narrows the
+  // table below), so the KPI row always reflects the whole team, not just what's currently shown.
+  const teamMembers = showMyTeam ? employees.filter((e) => e.user_id !== user?.id) : [];
+  const teamStatusCounts = { Active: 0, 'On Leave': 0, Absent: 0, Inactive: 0 };
+  teamMembers.forEach((e) => { if (teamStatusCounts[e.team_status] !== undefined) teamStatusCounts[e.team_status]++; });
+  const teamSearch = teamSearchState.trim().toLowerCase();
+  const filteredTeamMembers = teamMembers.filter((e) =>
+    (!teamSearch || e.name.toLowerCase().includes(teamSearch) || (e.employee_code || '').toLowerCase().includes(teamSearch)) &&
+    (!teamStatusFilter || e.team_status === teamStatusFilter)
+  );
+
   // ---------- HR view ----------
   const quickActions = [
     { to: '/bulk-import', label: 'Bulk Import' },
@@ -721,6 +745,60 @@ export default function Employees() {
           <div className="section-label" style={{ paddingLeft: 0 }}>My Profile</div>
           {!loading && !myRecord && <div className="empty">No employee record is linked to your account yet.</div>}
           {myRecord && <EmployeeSelfCard emp={myRecord} onSaved={load} setError={setError} setInfo={setInfo} customFields={customFields} fieldConfig={fieldConfig} />}
+        </div>
+      )}
+
+      {showMyTeam && (
+        <div style={{ marginBottom: 18 }}>
+          <div className="section-label" style={{ paddingLeft: 0 }}>My Team</div>
+          <div className="kpi-row" style={{ marginBottom: 12 }}>
+            <div className="kpi-card blue"><div className="kpi-label">Total Team Members</div><div className="kpi-value">{teamMembers.length}</div></div>
+            <div className="kpi-card green"><div className="kpi-label">Active</div><div className="kpi-value">{teamStatusCounts.Active}</div></div>
+            <div className="kpi-card gold"><div className="kpi-label">On Leave</div><div className="kpi-value">{teamStatusCounts['On Leave']}</div></div>
+            <div className="kpi-card red"><div className="kpi-label">Absent</div><div className="kpi-value">{teamStatusCounts.Absent}</div></div>
+            <div className="kpi-card"><div className="kpi-label">Inactive</div><div className="kpi-value">{teamStatusCounts.Inactive}</div></div>
+          </div>
+          {teamMembers.length > 0 && (
+            <div className="filter-bar" style={{ marginBottom: 10 }}>
+              <input placeholder="Search name or employee ID…" value={teamSearchState} onChange={(e) => setTeamSearchState(e.target.value)} style={{ width: 'auto' }} />
+              <select value={teamStatusFilter} onChange={(e) => setTeamStatusFilter(e.target.value)} style={{ width: 'auto' }}>
+                <option value="">All Statuses</option>
+                <option value="Active">Active</option>
+                <option value="On Leave">On Leave</option>
+                <option value="Absent">Absent</option>
+                <option value="Inactive">Inactive</option>
+              </select>
+              {(teamSearchState || teamStatusFilter) && <button onClick={() => { setTeamSearchState(''); setTeamStatusFilter(''); }}>Clear</button>}
+              <div className="spacer" />
+              <span className="feature-meta">{filteredTeamMembers.length} of {teamMembers.length}</span>
+            </div>
+          )}
+          <div className="card">
+            {teamMembers.length === 0 && <div className="empty">No team members assigned to you yet.</div>}
+            {teamMembers.length > 0 && filteredTeamMembers.length === 0 && <div className="empty">No team members match this filter.</div>}
+            {filteredTeamMembers.length > 0 && (
+              <div style={{ overflowX: 'auto' }}>
+                <table>
+                  <thead>
+                    <tr><th>Name</th><th>Employee ID</th><th>Designation</th><th>Email</th><th>Joining Date</th><th>Status</th><th>Attendance</th></tr>
+                  </thead>
+                  <tbody>
+                    {filteredTeamMembers.map((e) => (
+                      <tr key={e.id}>
+                        <td>{e.name}</td>
+                        <td>{e.employee_code}</td>
+                        <td>{e.designation}</td>
+                        <td>{e.email || '—'}</td>
+                        <td>{e.date_of_joining || '—'}</td>
+                        <td><span className={'status-tag ' + (TEAM_STATUS_CLASS[e.team_status] || 'info')}>{e.team_status}</span></td>
+                        <td>{e.attendance_pct != null ? `${e.attendance_pct}%` : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

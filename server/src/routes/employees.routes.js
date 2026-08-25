@@ -225,6 +225,40 @@ router.post('/verify-document', async (req, res) => {
 // predict). Never called on the self-view branch below, so an employee never sees their own flag.
 const withAttritionRisk = (rows) => rows.map((r) => (r.status !== 'Exited' ? { ...r, attrition_risk: attritionRiskFor(r.id) } : r));
 
+// Team status for a TL/STL's "My Team" summary: a single at-a-glance bucket per member, distinct
+// from the employment `status` column (Active/On Probation/Exited) — someone who's employment
+// -Active can still show as On Leave or Absent for today specifically. Anyone not employment
+// -Active is always "Inactive" regardless of today's attendance row, since there's nothing to
+// check them in/out of. `attendance_pct` is this month's attendance %, the same figure used for
+// Attrition Risk and Performance's Progress Score elsewhere in the app.
+function withTeamStatus(rows) {
+  const today = new Date().toISOString().slice(0, 10);
+  return rows.map((r) => {
+    if (r.status !== 'Active') return { ...r, team_status: 'Inactive', attendance_pct: null };
+    const todays = db.prepare('SELECT status FROM attendance WHERE employee_id = ? AND date = ?').get(r.id, today);
+    const team_status = todays?.status === 'Leave' ? 'On Leave' : todays?.status === 'Absent' ? 'Absent' : 'Active';
+    return { ...r, team_status, attendance_pct: monthlyAttendanceSummary(r.id).attendancePct };
+  });
+}
+
+// STL/TL visibility, department-based by default: if Super Admin has explicitly configured a
+// supervisor scope for this person (User Management → team or department grants — e.g. Sirisha
+// scoped to just Team-A, or an STL spanning multiple teams/departments), that explicit
+// configuration wins, exactly as before. Otherwise — no configuration at all, which is the normal
+// starting state for a newly-assigned TL in ANY department (Medical, Educational, Manufacturing,
+// BDE, R&D, HR, or one added after this code was written) — they automatically default to seeing
+// their own department, so a fresh TL is useful out of the box without Super Admin having to
+// configure User Management first. This is purely derived from the employee's own `department`
+// field, so it needs zero per-department setup and updates immediately if that field changes.
+function scopedTeamRows(req, allRows) {
+  const me = myEmployee(req.user.sub);
+  if (!me) return [];
+  const hasExplicitScope = !!db.prepare('SELECT 1 FROM supervisor_scopes WHERE employee_id = ?').get(me.id);
+  return hasExplicitScope
+    ? filterToScope(allRows, req.user.role, me.id)
+    : allRows.filter((r) => r.department === me.department);
+}
+
 router.get('/', (req, res) => {
   // Checked BEFORE isHR, deliberately: STL/TL are scoped-by-nature roles — they must never see
   // company-wide data, even if Super Admin grants one of them a write action on Employee
@@ -235,7 +269,7 @@ router.get('/', (req, res) => {
   // data via the isHR branch below, same tier as Manager/HR Admin.
   if (STL_TL_ROLES.includes(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
-    const scoped = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+    const scoped = scopedTeamRows(req, rows);
     // Seeing your own record is self-service, intrinsic to every employee, and separate from
     // the supervisor-scope grant that decides which OTHER employees you can see (rbac.js's own
     // stated philosophy). A TL's own department/team isn't guaranteed to fall inside their own
@@ -245,7 +279,7 @@ router.get('/', (req, res) => {
       const own = rows.find((r) => r.user_id === req.user.sub);
       if (own) scoped.push(own);
     }
-    return res.json({ employees: withAttritionRisk(scoped).map((r) => present(r, req.user)) });
+    return res.json({ employees: withTeamStatus(withAttritionRisk(scoped)).map((r) => present(r, req.user)) });
   }
   if (isHR(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
@@ -407,7 +441,7 @@ router.get('/:id', (req, res) => {
   // some write action on Employee Management elsewhere. Assistant Manager is excluded from
   // STL_TL_ROLES on purpose — they get company-wide access via isHR below once granted real access.
   if (STL_TL_ROLES.includes(req.user.role)) {
-    const inScope = emp.user_id === req.user.sub || filterToScope([emp], req.user.role, myEmployee(req.user.sub)?.id).length > 0;
+    const inScope = emp.user_id === req.user.sub || scopedTeamRows(req, [emp]).length > 0;
     if (!inScope) return res.status(403).json({ error: 'Insufficient permissions' });
   } else if (!isHR(req.user.role) && emp.user_id !== req.user.sub) {
     return res.status(403).json({ error: 'Insufficient permissions' });
