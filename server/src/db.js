@@ -409,7 +409,7 @@ function seed() {
     { key: 'super_admin', name: 'Super Admin', scope: 'Company-wide (all branches, all departments)', system: 1 },
     { key: 'hr_admin', name: 'HR Admin', scope: 'Company-wide (all branches, all departments)', system: 0 },
     { key: 'manager', name: 'Manager', scope: 'All departments, company-wide', system: 0 },
-    { key: 'assistant_manager', name: 'Assistant Manager', scope: 'All departments, company-wide (supporting role)', system: 0 },
+    { key: 'assistant_manager', name: 'Assistant Manager', scope: 'Own assigned department(s)/team(s) — supervisor scope set in User Management', system: 0 },
     { key: 'stl', name: 'Senior Team Lead (STL)', scope: 'Team-A & Team-B (Educational), plus Medical & Manufacturing', system: 0 },
     { key: 'tl', name: 'Team Lead (TL)', scope: 'Single team (direct reports only)', system: 0 },
     { key: 'employee', name: 'Employee (Self-Service)', scope: 'Own record only', system: 0 }
@@ -508,7 +508,8 @@ function seed() {
     ['quick_actions', 'Quick Actions'],
     ['vacancies', 'Department-wise Vacancies'],
     ['calendar', 'Calendar & Upcoming Events'],
-    ['role_user', 'Role & User Management summary']
+    ['role_user', 'Role & User Management summary'],
+    ['announcements', 'Announcements & Meeting Notices']
   ];
   widgets.forEach((w, i) => insertConfig.run(w[0], w[1], 1, i));
 
@@ -1098,6 +1099,55 @@ function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       decided_at TEXT
     );
+
+    -- Real video-watch tracking, driven by the <video> element's own timeupdate/ended events
+    -- (see ProtectedMaterial in Learning.jsx) — watched_seconds is the FURTHEST playback position
+    -- ever reached, not cumulative play time, so scrubbing back and rewatching a section doesn't
+    -- inflate it and it can never exceed duration_seconds. completed flips on once they've reached
+    -- ~90% of the video, mirroring how course completion elsewhere in this app is threshold-based
+    -- rather than requiring an exact 100%. Visible on the employee's own course detail view and,
+    -- aggregated per course, to HR/managers on the Manage Enrollments and global Enrollments rosters.
+    CREATE TABLE IF NOT EXISTS course_material_progress (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      material_id INTEGER NOT NULL REFERENCES course_materials(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      watched_seconds INTEGER NOT NULL DEFAULT 0,
+      duration_seconds INTEGER,
+      completed INTEGER NOT NULL DEFAULT 0,
+      last_watched_at TEXT,
+      UNIQUE(material_id, employee_id)
+    );
+  `);
+
+  // --- Knowledge Transfer: AI Weekly Employee Idea Contribution. Every employee is expected to
+  // submit at least one unique HRMS-improvement idea per week (week_start = that week's Monday,
+  // computed server-side at submit time — see server/src/routes/ideas.routes.js). A submission
+  // that AI judges a duplicate/near-duplicate of an existing Approved idea is stored as Rejected
+  // (with why + which idea it matched) rather than discarded, so there's a real history of
+  // rejected attempts, not just silence — the employee is expected to try a different idea. Only
+  // an Approved idea counts toward that week's requirement. Scores are 0-100 per dimension plus
+  // one overall figure, generated once at submission time by the AI (never edited by hand,
+  // mirroring interview scoring elsewhere in this app) — the leaderboard and weekly/monthly
+  // rollups are all derived from these stored numbers, not recomputed live.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS idea_contributions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      week_start TEXT NOT NULL,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),
+      reject_reason TEXT,
+      duplicate_of_id INTEGER REFERENCES idea_contributions(id) ON DELETE SET NULL,
+      originality_score INTEGER,
+      usefulness_score INTEGER,
+      impact_score INTEGER,
+      clarity_score INTEGER,
+      feasibility_score INTEGER,
+      overall_score INTEGER,
+      ai_feedback TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // --- Asset Management Key Features: pause/resume (retire without deleting), warranty,
@@ -1569,6 +1619,10 @@ function migrate() {
   // (never destructively dropped) but unused by the create-task form going forward.
   const projectTaskCols = db.prepare('PRAGMA table_info(project_tasks)').all().map((c) => c.name);
   if (!projectTaskCols.includes('department')) db.exec('ALTER TABLE project_tasks ADD COLUMN department TEXT');
+  // Tracks the last time an overdue-task reminder was sent for this task, so the lazy
+  // read-triggered reminder sweep (see timesheet.routes.js's sendOverdueTaskReminders) doesn't
+  // re-notify on every single page load — only once per cooldown window while still overdue.
+  if (!projectTaskCols.includes('last_reminded_at')) db.exec('ALTER TABLE project_tasks ADD COLUMN last_reminded_at TEXT');
 
   // --- Disciplinary Action Tracking: HR-only case log against an employee, with a timeline
   // of notes. An employee may see only their own cases (never another's), matching the
@@ -1809,6 +1863,21 @@ function migrateTeamsAndScopes() {
   const exitCols = db.prepare('PRAGMA table_info(exits)').all().map((c) => c.name);
   if (!exitCols.includes('reason')) db.exec('ALTER TABLE exits ADD COLUMN reason TEXT');
 
+  // Announcements widget on the Dashboard — added after the initial dashboard_config seed above,
+  // so an already-installed DB needs this added once rather than picking it up from seeding.
+  // Placed last (highest sort_order) so it doesn't reshuffle any widget a Super Admin already
+  // reordered via Configure Dashboard.
+  if (!db.prepare("SELECT 1 FROM dashboard_config WHERE widget_key = 'announcements'").get()) {
+    const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM dashboard_config').get().m;
+    db.prepare('INSERT INTO dashboard_config (widget_key, label, visible, sort_order) VALUES (?, ?, ?, ?)')
+      .run('announcements', 'Announcements & Meeting Notices', 1, maxSort + 1);
+  }
+  if (!db.prepare("SELECT 1 FROM dashboard_config WHERE widget_key = 'idea_leaderboard'").get()) {
+    const maxSort2 = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM dashboard_config').get().m;
+    db.prepare('INSERT INTO dashboard_config (widget_key, label, visible, sort_order) VALUES (?, ?, ?, ?)')
+      .run('idea_leaderboard', 'Weekly Idea Contribution Leaderboard', 1, maxSort2 + 1);
+  }
+
   // New Hires now link to a real employee record (nullable, for backward compat with any row
   // created before this migration) — required going forward so onboarding can be driven by real
   // cross-module signals (Documents/Employees/Assets — see server/src/utils/onboarding.js)
@@ -1862,10 +1931,10 @@ function migratePermissionCatalog() {
       'Recognition Feed & Leaderboard', 'Recognition Analytics'
     ]},
     { name: 'Project & Resource Management', items: [
-      'Project Catalog & Assignment', 'Resource Allocation Overview'
+      'Project Catalog & Assignment', 'Resource Allocation Overview', 'Timesheet Approval', 'Timesheet Reports'
     ]},
     { name: 'Timesheet', items: [
-      'Timesheet Approval', 'Timesheet Reports', 'Task Assignment (My Tasks)'
+      'Task Assignment (My Tasks)'
     ]},
     { name: 'Disciplinary Action Tracking', items: [
       'Case Log & Timeline', 'Case Resolution'
@@ -1898,6 +1967,67 @@ function migratePermissionCatalog() {
 
   migrateManagerFullAccess();
   migrateDocumentPublishFeature();
+  migrateKnowledgeTransferModule();
+  migrateFeaturesToModule(['Task Assignment (My Tasks)'], 'Timesheet');
+  migrateFeaturesToModule(['Timesheet Approval', 'Timesheet Reports'], 'Project & Resource Management');
+  migrateAssistantManagerScopeLabel();
+}
+
+// Assistant Manager's scope label was seeded as "All departments, company-wide" — misleading,
+// since employees.routes.js (and every other scoped module) treats Assistant Manager as a
+// department/team-scoped role, same as STL/TL. Corrects the label on an already-seeded live DB;
+// guarded on the old value so it's a no-op once fixed, and never overwrites a value Super Admin
+// has since edited by hand in Manage Roles.
+function migrateAssistantManagerScopeLabel() {
+  db.prepare("UPDATE roles SET scope_description = ? WHERE key = 'assistant_manager' AND scope_description = ?")
+    .run('Own assigned department(s)/team(s) — supervisor scope set in User Management', 'All departments, company-wide (supporting role)');
+}
+
+// Re-files an already-seeded feature row under a different module (keeping its
+// already-granted role_permissions intact, since feature_id doesn't change) instead of
+// re-seeding a duplicate — used when a feature's actual routes/UI move to a different module
+// than the one it was originally cataloged under.
+function migrateFeaturesToModule(featureNames, targetModuleName) {
+  const targetModule = db.prepare('SELECT id FROM perm_modules WHERE name = ?').get(targetModuleName);
+  if (!targetModule) return; // not seeded yet — the NEW_MODULES loop above will place it correctly
+  featureNames.forEach((name) => {
+    const feature = db.prepare('SELECT id, module_id FROM perm_features WHERE name = ?').get(name);
+    if (!feature || feature.module_id === targetModule.id) return; // not seeded yet, or already correct
+    const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM perm_features WHERE module_id = ?').get(targetModule.id).m;
+    db.prepare('UPDATE perm_features SET module_id = ?, sort_order = ? WHERE id = ?').run(targetModule.id, maxSort + 1, feature.id);
+  });
+}
+
+// Knowledge Transfer — added as its own dedicated migration (not folded into the NEW_MODULES loop
+// above, whose codes are positionally derived via `13+i` and would shift every module after it if
+// a new entry were inserted there) at the next free code after the highest in use (module '04' was
+// left unused in the original catalog and is deliberately not reused here). Submitting your own
+// idea is a self-service action every employee can do regardless of this grant (same as Leave/
+// Expense elsewhere in this app — see ideas.routes.js POST /) — these permissions only gate the
+// module's visibility in the sidebar and the HR-facing compliance/admin views.
+function migrateKnowledgeTransferModule() {
+  if (db.prepare("SELECT 1 FROM perm_modules WHERE name = 'Knowledge Transfer'").get()) return;
+  const roles = db.prepare('SELECT id, key FROM roles').all();
+  if (!roles.length) return;
+
+  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager'];
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+  const items = ['Submit Weekly Idea', 'AI Duplicate Detection & Scoring', 'Idea Leaderboard', 'Weekly Compliance Tracking'];
+
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM perm_modules').get().m;
+  const maxCode = db.prepare("SELECT MAX(CAST(code AS INTEGER)) AS m FROM perm_modules").get().m || 0;
+  const code = String(maxCode + 1).padStart(2, '0');
+  const moduleId = db.prepare('INSERT INTO perm_modules (code, name, sort_order) VALUES (?, ?, ?)').run(code, 'Knowledge Transfer', maxSort + 1).lastInsertRowid;
+
+  const insertFeature = db.prepare('INSERT INTO perm_features (module_id, category, name, sort_order) VALUES (?, ?, ?, ?)');
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+  items.forEach((item, fi) => {
+    const featureId = insertFeature.run(moduleId, 'Core Records & Day-to-Day Operations', item, fi).lastInsertRowid;
+    roles.forEach((r) => {
+      if (FULL_ACCESS_ROLES.includes(r.key)) ACTIONS.forEach((a) => insertGrant.run(r.id, featureId, a));
+      else insertGrant.run(r.id, featureId, 'View'); // everyone can still see the module + submit their own idea regardless (self-service, enforced in the route, not by this grant)
+    });
+  });
 }
 
 // Document Management gained a distinct "Publish / Hide from Employees" permission after go-live
@@ -2489,16 +2619,29 @@ function seedModuleData() {
     if (db.prepare('SELECT COUNT(*) c FROM offboarding_tasks WHERE exit_id = ?').get(x.id).c > 0) return;
     OFFBOARDING_TASK_DEFAULTS.forEach((t, i) => insOffTask.run(x.id, t, i));
   });
-  // Re-sync every EXISTING exit's checklist order whenever OFFBOARDING_TASK_DEFAULTS itself gets
-  // reordered — same fix as onboarding's sync above, just simpler since no task was renamed or
-  // added here, only reordered.
+  // Re-sync every EXISTING exit's checklist whenever OFFBOARDING_TASK_DEFAULTS itself gets a task
+  // added, removed, or reordered — same add-missing/remove-stale/resort fix as onboarding's sync
+  // above (this used to only reorder, which silently no-opped when 'Revoke system login access'
+  // was added — an UPDATE ... WHERE task_name = 'new name' matches zero rows on an exit that
+  // never had that row inserted).
+  const offboardingDefaultsSet = new Set(OFFBOARDING_TASK_DEFAULTS);
   const offboardingUpdSort = db.prepare('UPDATE offboarding_tasks SET sort_order = ? WHERE exit_id = ? AND task_name = ?');
   db.prepare('SELECT id FROM exits').all().forEach((x) => {
-    const existing = db.prepare('SELECT * FROM offboarding_tasks WHERE exit_id = ? ORDER BY sort_order').all(x.id);
-    const inSync = existing.length === OFFBOARDING_TASK_DEFAULTS.length
-      && OFFBOARDING_TASK_DEFAULTS.every((name, i) => existing[i]?.task_name === name);
-    if (inSync) return;
+    const haveNames = new Set(db.prepare('SELECT task_name FROM offboarding_tasks WHERE exit_id = ?').all(x.id).map((t) => t.task_name));
+    OFFBOARDING_TASK_DEFAULTS.forEach((name, i) => { if (!haveNames.has(name)) insOffTask.run(x.id, name, i); });
+    const stale = [...haveNames].filter((n) => !offboardingDefaultsSet.has(n));
+    if (stale.length) {
+      const placeholders = stale.map(() => '?').join(',');
+      db.prepare(`DELETE FROM offboarding_tasks WHERE exit_id = ? AND task_name IN (${placeholders})`).run(x.id, ...stale);
+    }
     OFFBOARDING_TASK_DEFAULTS.forEach((name, i) => offboardingUpdSort.run(i, x.id, name));
+    // Keep clearance_current/total/status honest after adding/removing a task — mirrors
+    // recomputeOffboardingClearance in utils/offboarding.js (duplicated inline rather than
+    // imported, since that module itself imports `db` from here).
+    const tasksNow = db.prepare('SELECT completed FROM offboarding_tasks WHERE exit_id = ?').all(x.id);
+    const completedNow = tasksNow.filter((t) => t.completed).length;
+    const statusNow = tasksNow.length > 0 && completedNow >= tasksNow.length ? 'Cleared' : 'Serving Notice';
+    db.prepare('UPDATE exits SET clearance_current = ?, clearance_total = ?, status = ? WHERE id = ?').run(completedNow, tasksNow.length, statusNow, x.id);
   });
 
   // --- Helpdesk / Grievance Ticketing demo data. ---
@@ -2646,7 +2789,8 @@ export const ONBOARDING_TASK_DEFAULTS = [
 // this app to hook into (no knowledge-transfer log, no finance-clearance tracker, no exit-
 // interview scheduler), so they stay manual checkboxes for now.
 export const OFFBOARDING_TASK_DEFAULTS = [
-  'Knowledge transfer completed', 'Finance clearance (dues/loans)', 'HR exit interview', 'Return IT assets'
+  'Knowledge transfer completed', 'Finance clearance (dues/loans)', 'HR exit interview', 'Return IT assets',
+  'Revoke system login access'
 ];
 
 migrate();

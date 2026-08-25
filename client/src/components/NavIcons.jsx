@@ -174,5 +174,11 @@ export const ICONS = {
       <path d="M6 7h12v4a6 6 0 01-12 0z" />
       <path d="M12 17v5" />
     </svg>
+  ),
+  knowledgeTransfer: (
+    <svg {...common}>
+      <path d="M12 3a6 6 0 00-3.5 10.9c.5.4.8 1 .8 1.6v.5h5.4v-.5c0-.6.3-1.2.8-1.6A6 6 0 0012 3z" />
+      <path d="M10 19h4M10.5 21.5h3" />
+    </svg>
   )
 };

@@ -1,23 +1,22 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
-import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
+import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { notifyEmployee } from '../utils/notify.js';
 import { sendEmail } from '../utils/channels.js';
+import { weekStartOf } from './ideas.routes.js';
 
 const router = Router();
 router.use(requireAuth);
 
-// Dynamic RBAC via Manage Roles — module '21' (Timesheet). A Senior Team Lead/Team Lead/
-// Assistant Manager also passes: the read routes below fetch-then-filter via filterToScope, so
-// admitting them here only ever narrows to their assigned departments/teams.
-// NOTE: canModuleAdmin alone isn't enough to gate the write branches below — granting these
-// scoped roles the specific 'Timesheet Approval' feature-action (so they can approve entries)
-// makes canModuleAdmin('<role>', '21') true too, since it only checks "any non-View action
-// anywhere in the module", not per-feature. The explicit `&& !isScopedRole` keeps unrestricted
-// (company-wide) task-assignment reserved for real HR-tier roles regardless of what else gets
-// granted on this module.
+// Dynamic RBAC via Manage Roles — module '21' (Timesheet), now scoped to task tracking only
+// (hour-logging + approval moved to Project & Resource Management, module '20' — see
+// projects.routes.js). A Senior Team Lead/Team Lead/Assistant Manager also passes: the read
+// routes below fetch-then-filter via scope, so admitting them here only ever narrows to their
+// assigned departments/teams.
 const isHR = (role) => canModuleAdmin(role, '21') || isScopedRole(role);
+// Unrestricted (company-wide) task-assignment stays reserved for real HR-tier roles.
 const canAssignOthersTasks = (role) => canModuleAdmin(role, '21') && !isScopedRole(role);
 // STL/TL specifically (not Assistant Manager) may also assign — and view — tasks for employees
 // within their own assigned department(s)/team(s): a Senior Team Lead's department-level scope
@@ -27,88 +26,6 @@ const STL_TL_ROLES = ['stl', 'tl'];
 const canAssignWithinScope = (role) => STL_TL_ROLES.includes(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 const employeeById = (id) => db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(id);
-
-function withDetails(rows) {
-  return rows.map((r) => {
-    const emp = db.prepare('SELECT name, department, team_id FROM employees WHERE id = ?').get(r.employee_id);
-    return {
-      ...r,
-      employee_name: emp?.name,
-      department: emp?.department,
-      team_id: emp?.team_id,
-      project_name: db.prepare('SELECT name FROM projects WHERE id = ?').get(r.project_id)?.name
-    };
-  });
-}
-
-// Employee: my own entries + the projects I'm assigned to (to populate the log-entry form).
-router.get('/', (req, res) => {
-  const me = myEmployee(req.user.sub);
-  if (!me) return res.json({ entries: [], myProjects: [] });
-  const entries = withDetails(db.prepare('SELECT * FROM timesheet_entries WHERE employee_id = ? ORDER BY date DESC').all(me.id));
-  const myProjects = db.prepare(`
-    SELECT p.id, p.name FROM project_assignments pa JOIN projects p ON p.id = pa.project_id WHERE pa.employee_id = ? AND p.status != 'Completed'
-  `).all(me.id);
-  res.json({ entries, myProjects });
-});
-
-router.post('/', (req, res) => {
-  const me = myEmployee(req.user.sub);
-  if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { project_id, date, task_description, hours } = req.body || {};
-  const h = parseFloat(hours);
-  if (!project_id || !date) return res.status(400).json({ error: 'Project and date are required' });
-  if (!Number.isFinite(h) || h <= 0 || h > 24) return res.status(400).json({ error: 'Hours must be between 0 and 24' });
-  const project = db.prepare('SELECT id FROM projects WHERE id = ?').get(project_id);
-  if (!project) return res.status(400).json({ error: 'Invalid project' });
-  const info = db.prepare('INSERT INTO timesheet_entries (employee_id, project_id, date, task_description, hours) VALUES (?, ?, ?, ?, ?)')
-    .run(me.id, project_id, date, task_description?.trim() || null, h);
-  res.status(201).json({ entry: withDetails([db.prepare('SELECT * FROM timesheet_entries WHERE id = ?').get(info.lastInsertRowid)])[0] });
-
-  // Notify the submitter's manager by email that a timesheet entry is waiting on them — best
-  // effort, after responding, never blocks/fails the submission itself. `reporting_manager` is a
-  // free-text name (not a real FK — see employees.routes.js), so this is a best-effort name match,
-  // not a guaranteed lookup; it silently does nothing if there's no match or no email on file.
-  if (me.reporting_manager?.trim()) {
-    const manager = db.prepare('SELECT email FROM employees WHERE name = ?').get(me.reporting_manager.trim());
-    if (manager?.email) {
-      const projectName = db.prepare('SELECT name FROM projects WHERE id = ?').get(project_id)?.name || 'a project';
-      sendEmail(
-        manager.email,
-        `Timesheet entry submitted — ${me.name}`,
-        `Hi,\n\n${me.name} logged ${h} hour(s) on ${date} for ${projectName}${task_description?.trim() ? `:\n"${task_description.trim()}"` : '.'}\n\nIt's awaiting your review in the Timesheet module.`
-      ).catch(() => {});
-    }
-  }
-});
-
-// HR: pending queue + everything, for approval.
-router.get('/overview', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const entries = filterToScope(withDetails(db.prepare("SELECT * FROM timesheet_entries ORDER BY (status='Pending') DESC, date DESC").all()), req.user.role, myEmployee(req.user.sub)?.id);
-  res.json({ entries });
-});
-
-function decide(finalStatus) {
-  return (req, res) => {
-    // Feature-level gate: this is exactly the 'Timesheet Approval' feature.
-    if (!canFeatureAction(req.user.role, '21', 'Timesheet Approval', 'Approve')) return res.status(403).json({ error: 'Insufficient permissions' });
-    const entry = db.prepare('SELECT * FROM timesheet_entries WHERE id = ?').get(req.params.id);
-    if (!entry) return res.status(404).json({ error: 'Entry not found' });
-    if (entry.status !== 'Pending') return res.status(400).json({ error: 'This entry has already been decided' });
-    // A Senior Team Lead/Team Lead/Assistant Manager may only decide entries from employees
-    // within their assigned departments/teams; every other HR-tier role stays company-wide.
-    if (isScopedRole(req.user.role)) {
-      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-      const owner = db.prepare('SELECT department, team_id FROM employees WHERE id = ?').get(entry.employee_id);
-      if (!isEmployeeInScope(scope, owner)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
-    }
-    db.prepare('UPDATE timesheet_entries SET status = ?, decided_by = ? WHERE id = ?').run(finalStatus, req.user.sub, entry.id);
-    res.json({ ok: true });
-  };
-}
-router.put('/:id/approve', decide('Approved'));
-router.put('/:id/reject', decide('Rejected'));
 
 // ---------- My Tasks (project task management) ----------
 const TASK_STATUSES = ['Not Started', 'In Progress', 'Completed', 'On Hold'];
@@ -126,6 +43,73 @@ function withTaskDetails(rows) {
       created_by_name: assignedByOther ? db.prepare('SELECT name FROM users WHERE id = ?').get(t.created_by)?.name : null,
       depends_on_name: t.depends_on_task_id ? db.prepare('SELECT task_name FROM project_tasks WHERE id = ?').get(t.depends_on_task_id)?.task_name : null
     };
+  });
+}
+
+// Daily/Weekly/Monthly view filter for My Tasks and Task Reports — bounds are inclusive
+// YYYY-MM-DD strings, compared directly against a task's start_date. 'weekly' reuses the exact
+// same Monday-of-week boundary Knowledge Transfer uses, so "this week" means the same thing in
+// both modules. Returns null for an unrecognized/absent range (no filtering — the "All" view).
+function rangeBounds(range) {
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  if (range === 'daily') return { start: today, end: today };
+  if (range === 'weekly') {
+    const start = weekStartOf();
+    const end = new Date(`${start}T00:00:00Z`);
+    end.setUTCDate(end.getUTCDate() + 6);
+    return { start, end: end.toISOString().slice(0, 10) };
+  }
+  if (range === 'monthly') {
+    const y = now.getUTCFullYear(), m = now.getUTCMonth();
+    return {
+      start: new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10),
+      end: new Date(Date.UTC(y, m + 1, 0)).toISOString().slice(0, 10)
+    };
+  }
+  return null;
+}
+
+// Overdue-task reminder sweep — lazy, no-background-scheduler idiom (same as Performance's
+// sendPendingAssessmentReminders): runs at the top of every My Tasks / Task Reports read, and
+// only actually notifies once per cooldown window per task (via last_reminded_at) so loading the
+// page repeatedly doesn't spam the same reminder. Notifies both the assignee (in-app + email) and
+// their manager (in-app + email, best-effort name match on reporting_manager — same pattern used
+// for the "timesheet entry submitted" manager notice in projects.routes.js).
+const OVERDUE_REMINDER_COOLDOWN_HOURS = 24;
+function sendOverdueTaskReminders() {
+  const overdue = db.prepare(`
+    SELECT * FROM project_tasks
+    WHERE end_date IS NOT NULL AND end_date < date('now') AND status != 'Completed'
+      AND (last_reminded_at IS NULL OR last_reminded_at <= datetime('now', ?))
+  `).all(`-${OVERDUE_REMINDER_COOLDOWN_HOURS} hours`);
+
+  overdue.forEach((t) => {
+    const assignee = t.assigned_to_employee_id ? db.prepare('SELECT * FROM employees WHERE id = ?').get(t.assigned_to_employee_id) : null;
+    if (assignee) {
+      notifyEmployee(assignee.id, 'Task overdue', `"${t.task_name}" was due ${t.end_date} and is still ${t.status} — please update its status.`);
+      if (assignee.email) {
+        sendEmail(
+          assignee.email,
+          `Overdue task: ${t.task_name}`,
+          `Hi ${assignee.name},\n\nYour task "${t.task_name}" was due on ${t.end_date} and is still marked "${t.status}".\n\nPlease update its status in the Timesheet module as soon as possible.`
+        ).catch(() => {});
+      }
+      if (assignee.reporting_manager?.trim()) {
+        const manager = db.prepare('SELECT * FROM employees WHERE name = ?').get(assignee.reporting_manager.trim());
+        if (manager) {
+          notifyEmployee(manager.id, 'Team task overdue', `${assignee.name}'s task "${t.task_name}" was due ${t.end_date} and is still ${t.status}.`);
+          if (manager.email) {
+            sendEmail(
+              manager.email,
+              `Overdue task for ${assignee.name}: ${t.task_name}`,
+              `Hi ${manager.name},\n\n${assignee.name}'s task "${t.task_name}" was due on ${t.end_date} and is still marked "${t.status}".\n\nYou may want to follow up.`
+            ).catch(() => {});
+          }
+        }
+      }
+    }
+    db.prepare("UPDATE project_tasks SET last_reminded_at = datetime('now') WHERE id = ?").run(t.id);
   });
 }
 
@@ -147,9 +131,15 @@ function canAccessTask(req, task) {
 }
 
 // Data the "+ New Task" form needs: the real Organization Structure department list (not just
-// whichever departments happen to have an active employee today), and (HR only) an employee picker.
+// whichever departments happen to have an active employee today), and (HR only) an employee
+// picker. Also doubles as the source for the Department/Team filter dropdowns on My Tasks and
+// Task Reports — `teams` (id + name + department) is only needed there, not by the New Task form.
 router.get('/tasks/options', (req, res) => {
   const departments = db.prepare("SELECT name FROM departments ORDER BY name").all().map((d) => d.name);
+  const teams = db.prepare(`
+    SELECT t.id, t.name, d.name AS department FROM teams t JOIN departments d ON d.id = t.department_id
+    WHERE t.status = 'Active' ORDER BY d.name, t.name
+  `).all();
   const canAssign = canAssignOthersTasks(req.user.role);
   const canAssignScoped = canAssignWithinScope(req.user.role);
   let employees = [];
@@ -160,7 +150,7 @@ router.get('/tasks/options', (req, res) => {
     employees = db.prepare("SELECT id, name, employee_code, department, team_id FROM employees WHERE status = 'Active' ORDER BY name")
       .all().filter((e) => isEmployeeInScope(scope, e));
   }
-  res.json({ departments, statuses: TASK_STATUSES, employees, isHR: canAssign || canAssignScoped });
+  res.json({ departments, teams, statuses: TASK_STATUSES, employees, isHR: canAssign || canAssignScoped });
 });
 
 // My Tasks: everything assigned to me, whoever created it (a self-made task or one a
@@ -172,6 +162,7 @@ router.get('/tasks/options', (req, res) => {
 // system-administrator account with none (myEmployee(sub) is null for it); gating on `me` first
 // was silently returning an empty list for Super Admin instead of the org-wide view.
 router.get('/tasks', (req, res) => {
+  sendOverdueTaskReminders();
   const me = myEmployee(req.user.sub);
   let rows;
   if (canAssignOthersTasks(req.user.role)) {
@@ -185,6 +176,18 @@ router.get('/tasks', (req, res) => {
   } else {
     rows = db.prepare('SELECT * FROM project_tasks WHERE assigned_to_employee_id = ? ORDER BY (status != \'Completed\') DESC, start_date DESC').all(me.id);
   }
+
+  // Department/Team/Range filters — Super Admin and every HR-tier/scoped role can slice My Tasks
+  // by department or team, and by Daily/Weekly/Monthly, on top of whatever scope already applies
+  // above. A plain employee's own list is small enough that these mostly just narrow it further.
+  if (req.query.department) rows = rows.filter((t) => t.department === req.query.department);
+  if (req.query.team_id) {
+    const teamId = Number(req.query.team_id);
+    rows = rows.filter((t) => employeeById(t.assigned_to_employee_id)?.team_id === teamId);
+  }
+  const range = rangeBounds(req.query.range);
+  if (range) rows = rows.filter((t) => t.start_date >= range.start && t.start_date <= range.end);
+
   res.json({ tasks: withTaskDetails(rows) });
 });
 
@@ -282,21 +285,42 @@ router.post('/tasks/:id/updates', (req, res) => {
   res.status(201).json({ updates: db.prepare('SELECT * FROM project_task_updates WHERE task_id = ? ORDER BY created_at').all(task.id) });
 });
 
-// Reports: total approved hours by project, and by employee.
-router.get('/reports', (req, res) => {
+// Task Status Report: every employee with at least one allocated task, broken down by how many
+// of their tasks are Completed / In Progress / Pending (Not Started) / On Hold — so HR/managers
+// can see at a glance who's completed their allocated work vs who's still got it pending or in
+// progress. Same audience and scoping as My Tasks itself (HR company-wide, STL/TL scoped).
+// Supports the same Department/Team/Range (Daily/Weekly/Monthly) filters as My Tasks, applied as
+// SQL WHERE clauses since this is a GROUP BY query rather than a flat row list.
+router.get('/reports/task-status', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const byProject = db.prepare(`
-    SELECT p.name AS project_name, SUM(t.hours) AS total_hours
-    FROM timesheet_entries t JOIN projects p ON p.id = t.project_id
-    WHERE t.status = 'Approved' GROUP BY p.id ORDER BY total_hours DESC
-  `).all();
-  const byEmployeeRaw = db.prepare(`
-    SELECT e.id AS employee_id, e.name AS employee_name, e.department, e.team_id, SUM(t.hours) AS total_hours
-    FROM timesheet_entries t JOIN employees e ON e.id = t.employee_id
-    WHERE t.status = 'Approved' GROUP BY e.id ORDER BY total_hours DESC
-  `).all();
-  const byEmployee = filterToScope(byEmployeeRaw, req.user.role, myEmployee(req.user.sub)?.id);
-  res.json({ byProject, byEmployee });
+  sendOverdueTaskReminders();
+
+  const conditions = [];
+  const params = [];
+  if (req.query.department) { conditions.push('t.department = ?'); params.push(req.query.department); }
+  if (req.query.team_id) { conditions.push('e.team_id = ?'); params.push(Number(req.query.team_id)); }
+  const range = rangeBounds(req.query.range);
+  if (range) { conditions.push('t.start_date >= ? AND t.start_date <= ?'); params.push(range.start, range.end); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const rows = db.prepare(`
+    SELECT e.id AS employee_id, e.name AS employee_name, e.employee_code, e.department, e.team_id,
+      COUNT(t.id) AS total,
+      SUM(CASE WHEN t.status = 'Completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN t.status = 'In Progress' THEN 1 ELSE 0 END) AS in_progress,
+      SUM(CASE WHEN t.status = 'Not Started' THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN t.status = 'On Hold' THEN 1 ELSE 0 END) AS on_hold
+    FROM project_tasks t JOIN employees e ON e.id = t.assigned_to_employee_id
+    ${where}
+    GROUP BY e.id
+    ORDER BY total DESC
+  `).all(...params);
+  const scoped = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+  const totals = scoped.reduce((acc, r) => ({
+    total: acc.total + r.total, completed: acc.completed + r.completed,
+    in_progress: acc.in_progress + r.in_progress, pending: acc.pending + r.pending, on_hold: acc.on_hold + r.on_hold
+  }), { total: 0, completed: 0, in_progress: 0, pending: 0, on_hold: 0 });
+  res.json({ rows: scoped, totals });
 });
 
 export default router;

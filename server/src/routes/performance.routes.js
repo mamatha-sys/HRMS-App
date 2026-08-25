@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { REQUIRED_IDEAS_PER_WEEK } from './ideas.routes.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -134,33 +135,96 @@ function disciplinaryScoreFor(employeeId) {
   return { score: Math.max(0, Math.round(100 - deduction)), openCases, resolvedCases: cases.length - openCases };
 }
 
-// The Employee Progress Score: one 0-100 number blending three independent signals — how much of
-// this month's assigned goals are done (50%), attendance reliability this month (30%), and
-// disciplinary record (20%). Goals matter most, but strong attendance/conduct can lift a score and
-// a poor one can drag it down, same reasoning a manager would weigh them by. If no targets are
-// assigned yet this month, goals is excluded entirely (not scored as 0%, since having nothing
-// assigned isn't the employee's fault) and the remaining two weights are renormalized so they
-// still sum to 100%.
-const PROGRESS_WEIGHTS = { goals: 0.5, attendance: 0.3, disciplinary: 0.2 };
-function progressScoreFor(employeeId, month) {
+// Every Monday (as 'YYYY-MM-DD') whose week falls inside `month` — capped at today if `month` is
+// the current month, since a week that hasn't happened yet can't be judged. Empty for a month
+// that hasn't started. Shared by knowledgeTransferScoreFor below and Knowledge Transfer's own
+// week-bucketing (ideas.routes.js's weekStartOf), so "which weeks count" agrees everywhere.
+function mondaysInMonth(month) {
+  const [y, m] = month.split('-').map(Number);
+  const today = new Date();
+  const isCurrentMonth = month === today.toISOString().slice(0, 7);
+  const end = isCurrentMonth ? today : new Date(Date.UTC(y, m, 0));
+  const mondays = [];
+  const d = new Date(Date.UTC(y, m - 1, 1));
+  while (d.getUTCMonth() === m - 1 && d <= end) {
+    if (d.getUTCDay() === 1) mondays.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return mondays;
+}
+
+// Knowledge Transfer component: 70% weekly-compliance rate (landed REQUIRED_IDEAS_PER_WEEK
+// unique/Approved ideas every week this month) + 30% average idea quality for ideas submitted
+// that month. Null (excluded, not scored 0) for a month with no weeks reached yet — same "don't
+// penalize for something not yet possible" reasoning as goals below.
+function knowledgeTransferScoreFor(employeeId, month) {
+  const weeks = mondaysInMonth(month);
+  if (!weeks.length) return null;
+  const ideas = db.prepare(`
+    SELECT week_start, overall_score FROM idea_contributions
+    WHERE employee_id = ? AND status = 'Approved' AND week_start >= ? AND week_start <= ?
+  `).all(employeeId, weeks[0], weeks[weeks.length - 1]);
+  const countsByWeek = {};
+  ideas.forEach((i) => { countsByWeek[i.week_start] = (countsByWeek[i.week_start] || 0) + 1; });
+  const compliedWeeks = Object.values(countsByWeek).filter((c) => c >= REQUIRED_IDEAS_PER_WEEK).length;
+  const complianceRate = Math.min(1, compliedWeeks / weeks.length);
+  const avgQuality = ideas.length ? ideas.reduce((s, i) => s + (i.overall_score || 0), 0) / ideas.length : 0;
+  const score = Math.round(complianceRate * 70 + (avgQuality / 100) * 30);
+  return { score, weeksExpected: weeks.length, weeksComplied: compliedWeeks, avgIdeaScore: ideas.length ? Math.round(avgQuality) : null };
+}
+
+// Learning component: % of enrolled courses actually completed. Null (excluded) if not enrolled
+// in anything — course enrollment isn't always self-initiated (HR can assign it), so someone with
+// zero enrollments hasn't failed at anything, there's just nothing to measure yet.
+function learningScoreFor(employeeId) {
+  const enrollments = db.prepare('SELECT completed FROM course_enrollments WHERE employee_id = ?').all(employeeId);
+  if (!enrollments.length) return null;
+  const completed = enrollments.filter((e) => e.completed).length;
+  return { score: Math.round((completed / enrollments.length) * 100), coursesEnrolled: enrollments.length, coursesCompleted: completed };
+}
+
+// The Employee Progress Score: one 0-100 number blending five independent signals — how much of
+// this month's assigned goals are done (40%), attendance reliability (20%), disciplinary record
+// (15%), Knowledge Transfer weekly idea contribution (15%), and Learning course completion (10%).
+// Goals still matter most, but the other four all pull real weight now — a strong all-round
+// contributor (shows up, stays out of trouble, contributes ideas every week, completes training)
+// can score well even with modest goal completion, and vice versa. Any component with nothing to
+// measure yet (no goals assigned, no course enrollments, month not yet started) is excluded
+// entirely rather than scored 0, and the remaining weights are renormalized so they still sum to
+// 100% — same reasoning already applied to goals before this expansion.
+const PROGRESS_WEIGHTS = { goals: 0.40, attendance: 0.20, disciplinary: 0.15, knowledgeTransfer: 0.15, learning: 0.10 };
+export function progressScoreFor(employeeId, month) {
   const targets = db.prepare('SELECT progress_pct FROM performance_reviews WHERE employee_id = ? AND month = ?').all(employeeId, month);
   const goalsScore = targets.length ? Math.round(targets.reduce((s, t) => s + t.progress_pct, 0) / targets.length) : null;
   const attendanceScore = monthlyAttendanceSummary(employeeId, month).attendancePct;
   const { score: disciplinaryScore, openCases, resolvedCases } = disciplinaryScoreFor(employeeId);
+  const kt = knowledgeTransferScoreFor(employeeId, month);
+  const learning = learningScoreFor(employeeId);
 
   const parts = [
     goalsScore != null ? { score: goalsScore, weight: PROGRESS_WEIGHTS.goals } : null,
     { score: attendanceScore, weight: PROGRESS_WEIGHTS.attendance },
-    { score: disciplinaryScore, weight: PROGRESS_WEIGHTS.disciplinary }
+    { score: disciplinaryScore, weight: PROGRESS_WEIGHTS.disciplinary },
+    kt ? { score: kt.score, weight: PROGRESS_WEIGHTS.knowledgeTransfer } : null,
+    learning ? { score: learning.score, weight: PROGRESS_WEIGHTS.learning } : null
   ].filter(Boolean);
   const totalWeight = parts.reduce((s, p) => s + p.weight, 0);
   const overall = Math.round(parts.reduce((s, p) => s + p.score * p.weight, 0) / totalWeight);
   const band = overall >= 75 ? 'High' : overall >= 50 ? 'Medium' : 'Low';
 
+  // Salary Increase Recommendation — purely advisory, exactly like Employees' Attrition Risk: a
+  // banded signal for HR to weigh, never an instruction and never wired into Payroll's actual
+  // pay computation anywhere. An open disciplinary case overrides straight to "Not Recommended"
+  // regardless of how high the overall score is — a live conduct issue shouldn't be outweighed by
+  // a good goals/attendance month.
+  const salaryRecommendation = openCases > 0 ? 'Not Recommended' : overall >= 80 ? 'Recommended' : overall >= 60 ? 'Review at Next Cycle' : 'Not Yet';
+
   return {
-    overall, band,
+    overall, band, salaryRecommendation,
     goalsScore, targetsAssigned: targets.length, targetsCompleted: targets.filter(isTargetComplete).length,
-    attendanceScore, disciplinaryScore, openCases, resolvedCases
+    attendanceScore, disciplinaryScore, openCases, resolvedCases,
+    knowledgeTransferScore: kt?.score ?? null, weeksComplied: kt?.weeksComplied ?? null, weeksExpected: kt?.weeksExpected ?? null,
+    learningScore: learning?.score ?? null, coursesCompleted: learning?.coursesCompleted ?? null, coursesEnrolled: learning?.coursesEnrolled ?? null
   };
 }
 

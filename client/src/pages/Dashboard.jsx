@@ -11,6 +11,8 @@ import QuickActionsWidget from '../components/QuickActionsWidget.jsx';
 import RoleUserSummaryWidget from '../components/RoleUserSummaryWidget.jsx';
 import ApprovalsWidget from '../components/ApprovalsWidget.jsx';
 import MyAttendanceLeaveWidget from '../components/MyAttendanceLeaveWidget.jsx';
+import AnnouncementsWidget from '../components/AnnouncementsWidget.jsx';
+import IdeaLeaderboardWidget from '../components/IdeaLeaderboardWidget.jsx';
 
 const BANNERS = {
   super_admin: 'Full, unrestricted access — every widget below, organization-wide, no scope restriction.',
@@ -131,13 +133,15 @@ export default function Dashboard() {
             <div>
               {show('notifications') && <NotificationsWidget key={'notifications' + refreshKey} badge={3} canCreate={canManage} />}
               {show('calendar') && <EventsWidget key={'calendar' + refreshKey} badge={4} canCreate={canManage} />}
+              {show('announcements') && <AnnouncementsWidget key={'announcements' + refreshKey} badge={5} />}
             </div>
           </div>
 
           <div className="dashboard-grid">
-            {show('quick_actions') && <QuickActionsWidget badge={5} role={user?.role} />}
-            {show('vacancies') && <VacanciesWidget key={'vacancies' + refreshKey} badge={6} />}
-            {show('role_user') && user?.role === 'super_admin' && <RoleUserSummaryWidget badge={7} usersCount={summary.usersCount} />}
+            {show('quick_actions') && <QuickActionsWidget badge={6} role={user?.role} />}
+            {show('vacancies') && <VacanciesWidget key={'vacancies' + refreshKey} badge={7} />}
+            {show('idea_leaderboard') && <IdeaLeaderboardWidget key={'idea_leaderboard' + refreshKey} badge={8} />}
+            {show('role_user') && user?.role === 'super_admin' && <RoleUserSummaryWidget badge={9} usersCount={summary.usersCount} />}
           </div>
         </>
       )}
@@ -166,6 +170,8 @@ export default function Dashboard() {
             <TasksWidget key={'tasks' + refreshKey} badge={1} canAssignOthers={false} />
             <NotificationsWidget key={'notifications' + refreshKey} badge={2} canCreate={false} />
             <EventsWidget key={'calendar' + refreshKey} badge={3} canCreate={false} />
+            <AnnouncementsWidget key={'announcements' + refreshKey} badge={4} />
+            <IdeaLeaderboardWidget key={'idea_leaderboard' + refreshKey} badge={5} />
           </div>
         </>
       )}

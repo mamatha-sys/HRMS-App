@@ -3,6 +3,7 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { chatWithAssistant } from '../utils/aiAssist.js';
 import { getSetting } from '../utils/integrationSettings.js';
+import { progressScoreFor } from './performance.routes.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -16,6 +17,38 @@ const MODULE_LIST = [
   'Expense & Travel Claims', 'Engagement Surveys', 'Document Management', 'Shift & Roster',
   'Rewards & Recognition', 'Project & Resource Management', 'Timesheet', 'Disciplinary Action Tracking'
 ];
+
+// Company-wide directory grounding, Super Admin only (see buildSystemPrompt below). Every number
+// here is computed the exact same way the real Employee Management/Performance/Learning screens
+// compute it (progressScoreFor is the actual shared function Performance's own UI uses — not a
+// re-derived approximation), so the Assistant never states a figure that would disagree with what
+// Super Admin would see by clicking into the module themselves. Excludes Exited employees — ask
+// about a current employee, not someone off-roll.
+function companyDirectoryFacts() {
+  const employees = db.prepare("SELECT * FROM employees WHERE status != 'Exited' ORDER BY department, name").all();
+  if (!employees.length) return '';
+  const month = new Date().toISOString().slice(0, 7);
+  const lines = employees.map((e) => {
+    // Only active leave types — employee_leave_balances can carry stale rows for a leave type
+    // that's since been deactivated (e.g. a leftover Maternity/Paternity balance), which would
+    // otherwise silently inflate the total into a meaningless number.
+    const balance = db.prepare(`
+      SELECT COALESCE(SUM(elb.balance), 0) AS total FROM employee_leave_balances elb
+      JOIN leave_types lt ON lt.id = elb.leave_type_id WHERE elb.employee_id = ? AND lt.active = 1
+    `).get(e.id).total;
+    const pendingLeaves = db.prepare("SELECT COUNT(*) AS n FROM leaves WHERE employee_id = ? AND status = 'Pending'").get(e.id).n;
+    const score = progressScoreFor(e.id, month);
+    const scoreText = `${score.overall} (${score.band})${score.targetsAssigned === 0 ? ' — no goals assigned this month, based on attendance/conduct only' : ''}`;
+    const enrollments = db.prepare(`
+      SELECT c.title, ce.completed FROM course_enrollments ce JOIN courses c ON c.id = ce.course_id WHERE ce.employee_id = ?
+    `).all(e.id);
+    const coursesText = enrollments.length
+      ? enrollments.map((c) => `"${c.title}" (${c.completed ? 'Completed' : 'In Progress'})`).join(', ')
+      : 'not enrolled in any course';
+    return `- ${e.name} (${e.employee_code || 'no code'}, ${e.department || 'unassigned'}, ${e.designation || 'unassigned'}, ${e.status}): leave balance ${balance} days total, ${pendingLeaves} pending leave request(s); Progress Score this month: ${scoreText}; Courses: ${coursesText}`;
+  });
+  return `\n\nCompany-wide employee directory (Super Admin visibility only — every current employee's real leave balance, this month's Progress Score, and course enrollment status):\n${lines.join('\n')}`;
+}
 
 // Read-only grounding facts about the requesting user — deliberately server-derived from req.user
 // only (never trusts anything the client sends about "who I am"), so the assistant can answer
@@ -60,6 +93,14 @@ function buildSystemPrompt(req) {
   const policyAnnouncements = db.prepare("SELECT title, body FROM announcements WHERE category = 'Policy' ORDER BY pinned DESC, created_at DESC LIMIT 15").all();
   if (policyAnnouncements.length) {
     facts += `\n\nPosted policy announcements:\n${policyAnnouncements.map((a) => `- "${a.title}": ${a.body}`).join('\n')}`;
+  }
+
+  // Super Admin gets full company-wide visibility here — any employee's real leave balance,
+  // Progress Score, and course enrollments — mirroring the same unrestricted, org-wide access
+  // Super Admin already has in Employee Management/Performance/Learning; every other role only
+  // ever gets the "self" facts above, same as before.
+  if (req.user.role === 'super_admin') {
+    facts += companyDirectoryFacts();
   }
 
   return `You are the AI Assistant embedded in ${companyName}'s internal HRMS. You are talking directly with the user described below — answer them personally using the facts given, don't ask them to re-identify themselves.

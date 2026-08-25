@@ -291,6 +291,9 @@ function HRRecruitment({ compact, sectionLabel }) {
     job_description: '', jd_date: ''
   });
   const [jdAiLoading, setJdAiLoading] = useState(false);
+  const [jdPendingFor, setJdPendingFor] = useState(null); // requisition id whose JD is drafting in the background
+  const [jdTimedOutFor, setJdTimedOutFor] = useState(null);
+  const [jdRegeneratingFor, setJdRegeneratingFor] = useState(null);
   const [showCandForm, setShowCandForm] = useState(false);
   const [interviewMode, setInterviewMode] = useState('ai'); // 'ai' = AI generates the questions | 'custom' = HR supplies their own
   const [customQuestionsText, setCustomQuestionsText] = useState('');
@@ -394,10 +397,38 @@ function HRRecruitment({ compact, sectionLabel }) {
   async function submitRequisition(e) {
     e.preventDefault(); setError('');
     try {
-      await api.post('/positions', reqForm);
+      const r = await api.post('/positions', reqForm);
       setReqForm({ department_id: '', title: '', target_headcount: 1, is_replacement: false, replacement_for: '', replacement_target_date: '', job_description: '', jd_date: '' });
       setShowReqForm(false); load();
+      // HR left the JD blank — it's drafting in the background (see positions.routes.js POST /),
+      // same non-blocking pattern as the Offer Letter: requisition creation itself was instant,
+      // poll a few times for the draft to land rather than making HR wait on it.
+      if (r.data.jdPending) {
+        const newId = r.data.position?.id;
+        if (newId) { setJdTimedOutFor((v) => (v === newId ? null : v)); pollForJobDescription(newId); }
+      }
     } catch (err) { setError(err.response?.data?.error || 'Could not create requisition.'); }
+  }
+  function pollForJobDescription(id, attempt = 0) {
+    if (attempt >= 10) { setJdPendingFor((v) => (v === id ? null : v)); setJdTimedOutFor(id); return; }
+    setJdPendingFor(id);
+    setTimeout(() => {
+      api.get('/recruitment/overview').then((r) => {
+        setOv(r.data);
+        const p = r.data.requisitions.find((x) => x.id === id);
+        if (p?.job_description) setJdPendingFor((v) => (v === id ? null : v));
+        else pollForJobDescription(id, attempt + 1);
+      }).catch(() => {});
+    }, 3000);
+  }
+  async function regenerateJobDescription(id) {
+    setError(''); setJdRegeneratingFor(id);
+    try {
+      await api.post(`/positions/${id}/job-description/regenerate`);
+      setJdTimedOutFor((v) => (v === id ? null : v));
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not regenerate the job description.'); }
+    finally { setJdRegeneratingFor(null); }
   }
   async function decide(id, decision) {
     setError('');
@@ -667,7 +698,7 @@ function HRRecruitment({ compact, sectionLabel }) {
                 )}
               </div>
               <div className="row" style={{ flexWrap: 'wrap', marginTop: 8, alignItems: 'flex-start' }}>
-                <textarea placeholder="Job description (optional)" value={reqForm.job_description} onChange={(e) => setReqForm({ ...reqForm, job_description: e.target.value })} rows={3} style={{ flex: '1 1 260px' }} />
+                <textarea placeholder="Job description (optional — leave blank and AI will draft one automatically after you create this requisition)" value={reqForm.job_description} onChange={(e) => setReqForm({ ...reqForm, job_description: e.target.value })} rows={3} style={{ flex: '1 1 260px' }} />
                 <div style={{ flex: '0 1 170px' }}>
                   <label className="field-label" style={{ fontSize: 11 }}>JD date</label>
                   <input type="date" value={reqForm.jd_date} onChange={(e) => setReqForm({ ...reqForm, jd_date: e.target.value })} />
@@ -697,7 +728,25 @@ function HRRecruitment({ compact, sectionLabel }) {
               {!!r.is_replacement && (
                 <div className="feature-meta">Replacing: {r.replacement_for}{r.replacement_target_date ? ` · target completion ${r.replacement_target_date}` : ''}</div>
               )}
-              {r.job_description && <div className="feature-meta">JD{r.jd_date ? ` (${r.jd_date})` : ''}: {r.job_description}</div>}
+              {!r.job_description && jdPendingFor === r.id && (
+                <div className="feature-meta">🤖 AI is drafting the job description in the background — this updates automatically once it's ready (usually under 30 seconds).</div>
+              )}
+              {!r.job_description && jdTimedOutFor === r.id && (
+                <div className="feature-meta">
+                  ⚠️ The draft didn't arrive — local AI may be unavailable right now (check the AI status indicator at the top of the page).
+                  {canManage && <button style={{ marginLeft: 6 }} onClick={() => regenerateJobDescription(r.id)} disabled={jdRegeneratingFor === r.id}>{jdRegeneratingFor === r.id ? 'Trying…' : 'Try again'}</button>}
+                </div>
+              )}
+              {r.job_description && (
+                <div className="feature-meta">
+                  JD{r.jd_date ? ` (${r.jd_date})` : ''}: {r.job_description}
+                  {canManage && (
+                    <button style={{ marginLeft: 6 }} onClick={() => regenerateJobDescription(r.id)} disabled={jdRegeneratingFor === r.id}>
+                      {jdRegeneratingFor === r.id ? 'Regenerating…' : 'Regenerate'}
+                    </button>
+                  )}
+                </div>
+              )}
               {r.approval_status === 'Approved' && r.posted_boards && <div className="feature-meta">Live on: {boardLabels(r.posted_boards)}</div>}
               {canManage && (
                 <div style={{ marginTop: 6 }}>

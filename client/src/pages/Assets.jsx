@@ -296,6 +296,7 @@ function HRAssets({ compact, sectionLabel }) {
 
       <div className="row" style={{ marginBottom: 14 }}>
         <button className={screen === 'dashboard' ? 'primary' : ''} onClick={() => goto('dashboard')}>Dashboard</button>
+        <button className={screen === 'inventory' ? 'primary' : ''} onClick={() => goto('inventory')}>Asset Inventory</button>
         {canManage && <button className={screen === 'requests' ? 'primary' : ''} onClick={() => goto('requests')}>Asset Requests</button>}
         {canManage && <button className={screen === 'reports' ? 'primary' : ''} onClick={() => goto('reports')}>Reports</button>}
       </div>
@@ -352,7 +353,7 @@ function HRAssets({ compact, sectionLabel }) {
             </div>
           </div>
         </>
-      ) : (
+      ) : screen === 'inventory' ? (
         <>
           <div className="filter-bar">
             <input placeholder="Search name, tag, serial…" value={search} onChange={(e) => setSearch(e.target.value)} style={{ flex: '1 1 180px' }} />
@@ -385,101 +386,117 @@ function HRAssets({ compact, sectionLabel }) {
             </div>
           )}
 
+          <div className="card" id="section-inventory">
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+              <div className="feature-name">Asset Inventory &amp; Allocation</div>
+              {canManage && <button className="primary" onClick={() => goto('newAsset')}>+ Add Asset</button>}
+            </div>
+            {canManage && !APPROVAL_AUTHORITY.includes(user?.role) && <div className="feature-meta" style={{ marginBottom: 8 }}>Assets you add require Super Admin/HR Admin approval before they can be assigned.</div>}
+            {filteredAssets.length > 0 && (
+              <div className="feature-meta" style={{ marginBottom: 6 }}>
+                Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredAssets.length)} of {filteredAssets.length}
+              </div>
+            )}
+            {filteredAssets.length === 0 && <div className="empty">No assets{ov?.assets.length ? ' match this filter.' : ' yet.'}</div>}
+            {pageAssets.map((a) => (
+              <div key={a.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0', opacity: a.active ? 1 : 0.55 }}>
+                {editing === a.id ? (
+                  <form onSubmit={(e) => { e.preventDefault(); saveEdit(a.id); }} className="row" style={{ flexWrap: 'wrap' }}>
+                    <input value={editDraft.name} onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })} style={{ flex: '2 1 160px' }} />
+                    <input value={editDraft.category} onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })} placeholder="Category" style={{ flex: '1 1 100px' }} />
+                    <input value={editDraft.serial_number} onChange={(e) => setEditDraft({ ...editDraft, serial_number: e.target.value })} placeholder="Serial Number" style={{ flex: '1 1 120px' }} />
+                    <input type="number" value={editDraft.cost} onChange={(e) => setEditDraft({ ...editDraft, cost: e.target.value })} placeholder="Cost" style={{ flex: '1 1 90px' }} />
+                    <input type="date" value={editDraft.warranty_expiry} onChange={(e) => setEditDraft({ ...editDraft, warranty_expiry: e.target.value })} style={{ flex: '1 1 140px' }} />
+                    <button className="primary" type="submit">Save</button>
+                    <button type="button" onClick={() => setEditing(null)}>Cancel</button>
+                  </form>
+                ) : (
+                  <>
+                    <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
+                      <strong>{a.name}{a.category ? ` (${a.category})` : ''} <span className="feature-meta">{a.asset_tag}{a.serial_number ? ` · S/N: ${a.serial_number}` : ''}</span></strong>
+                      <span style={{ display: 'flex', gap: 6 }}>
+                        {a.approval_status === 'Pending Approval' && <span className="status-tag pending">Pending Approval</span>}
+                        {!a.active && <span className="status-tag absent">Paused</span>}
+                        <span className={'status-tag ' + (STATUS_CLASS[a.status] || 'info')}>{a.status}</span>
+                      </span>
+                    </div>
+                    <div className="feature-meta">
+                      Assigned to: {a.assigned_employee_name ? `${a.assigned_employee_name} (${a.assigned_employee_code})` : '—'}
+                      {a.cost != null ? ` · Cost: ₹${Number(a.cost).toLocaleString('en-IN')}` : ''}
+                      {a.warranty_expiry ? ` · Warranty until ${a.warranty_expiry}` : ''}
+                    </div>
+
+                    {a.approval_status === 'Pending Approval' && canManage && APPROVAL_AUTHORITY.includes(user?.role) && (
+                      <div style={{ marginTop: 6 }}>
+                        <button className="btn-approve" onClick={() => decide(a.id, 'approve')}>Approve</button>
+                        <button className="btn-reject" style={{ marginLeft: 6 }} onClick={() => decide(a.id, 'reject')}>Reject</button>
+                      </div>
+                    )}
+
+                    {a.approval_status !== 'Pending Approval' && a.status !== 'Disposed' && (
+                      <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {canManage && (
+                          <>
+                            <button onClick={() => { setEditing(a.id); setEditDraft({ name: a.name, category: a.category || '', cost: a.cost ?? '', warranty_expiry: a.warranty_expiry || '', serial_number: a.serial_number || '' }); }}>Edit</button>
+                            <button onClick={() => pauseAsset(a)}>{a.active ? 'Pause' : 'Resume'}</button>
+                            {a.status === 'Assigned' && <button onClick={() => returnAsset(a.id)}>Return</button>}
+                            {a.status === 'Assigned' && (
+                              transferring === a.id ? (
+                                <span className="row" style={{ display: 'inline-flex' }}>
+                                  <select value={transferTo} onChange={(e) => setTransferTo(e.target.value)} style={{ width: 'auto' }}>
+                                    <option value="">Transfer to…</option>
+                                    {employees.filter((e) => e.id !== a.assigned_employee_id).map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
+                                  </select>
+                                  <button className="primary" onClick={() => transfer(a.id)}>Transfer</button>
+                                  <button onClick={() => setTransferring(null)}>Cancel</button>
+                                </span>
+                              ) : <button onClick={() => setTransferring(a.id)}>Transfer</button>
+                            )}
+                            {a.status === 'In Store' && a.active && <button onClick={() => { setActiveAsset(a); goto('assign'); }}>Assign</button>}
+                            {a.status !== 'Under Repair' && <button onClick={() => toggleRepair(a.id, true)}>Send for Repair</button>}
+                            {a.status === 'Under Repair' && <button onClick={() => toggleRepair(a.id, false)}>Back In Store</button>}
+                            {a.status !== 'Assigned' && <button onClick={() => dispose(a.id)}>Dispose</button>}
+                            <button onClick={() => audit(a.id)}>Log Audit</button>
+                          </>
+                        )}
+                        <button onClick={() => setExpanded(expanded === a.id ? null : a.id)}>{expanded === a.id ? 'Hide history' : 'History'}</button>
+                      </div>
+                    )}
+
+                    {expanded === a.id && (
+                      <div style={{ marginTop: 8, paddingLeft: 8 }}>
+                        {a.history.length === 0 && <div className="feature-meta">No history yet.</div>}
+                        {a.history.map((h) => <div key={h.id} className="feature-meta">— <strong>{h.action}</strong>{h.detail ? `: ${h.detail}` : ''} ({h.created_at})</div>)}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            ))}
+            {totalPages > 1 && (
+              <div className="row" style={{ justifyContent: 'center', gap: 10, marginTop: 10 }}>
+                <button disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>← Prev</button>
+                <span className="feature-meta">Page {currentPage} of {totalPages}</span>
+                <button disabled={currentPage >= totalPages} onClick={() => setPage(currentPage + 1)}>Next →</button>
+              </div>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          {ov && (
+            <div className="kpi-row">
+              {ov.kpis.map((k) => <div key={k.label} className={'kpi-card ' + k.color}><div className="kpi-label">{k.label}</div><div className="kpi-value">{k.value}</div></div>)}
+            </div>
+          )}
+
           <div className="dashboard-grid">
-            <div className="card" id="section-inventory">
+            <div className="card">
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                 <div className="feature-name"><span className="widget-badge">1</span>Asset Inventory</div>
-                {canManage && <button className="primary" onClick={() => goto('newAsset')}>+ Add Asset</button>}
+                <button className="primary" onClick={() => goto('inventory')}>View Inventory →</button>
               </div>
-              {canManage && !APPROVAL_AUTHORITY.includes(user?.role) && <div className="feature-meta" style={{ marginBottom: 8 }}>Assets you add require Super Admin/HR Admin approval before they can be assigned.</div>}
-              {filteredAssets.length > 0 && (
-                <div className="feature-meta" style={{ marginBottom: 6 }}>
-                  Showing {(currentPage - 1) * PAGE_SIZE + 1}–{Math.min(currentPage * PAGE_SIZE, filteredAssets.length)} of {filteredAssets.length}
-                </div>
-              )}
-              {filteredAssets.length === 0 && <div className="empty">No assets{ov?.assets.length ? ' match this filter.' : ' yet.'}</div>}
-              {pageAssets.map((a) => (
-                <div key={a.id} style={{ borderTop: '1px solid #EEF0F3', padding: '10px 0', opacity: a.active ? 1 : 0.55 }}>
-                  {editing === a.id ? (
-                    <form onSubmit={(e) => { e.preventDefault(); saveEdit(a.id); }} className="row" style={{ flexWrap: 'wrap' }}>
-                      <input value={editDraft.name} onChange={(e) => setEditDraft({ ...editDraft, name: e.target.value })} style={{ flex: '2 1 160px' }} />
-                      <input value={editDraft.category} onChange={(e) => setEditDraft({ ...editDraft, category: e.target.value })} placeholder="Category" style={{ flex: '1 1 100px' }} />
-                      <input value={editDraft.serial_number} onChange={(e) => setEditDraft({ ...editDraft, serial_number: e.target.value })} placeholder="Serial Number" style={{ flex: '1 1 120px' }} />
-                      <input type="number" value={editDraft.cost} onChange={(e) => setEditDraft({ ...editDraft, cost: e.target.value })} placeholder="Cost" style={{ flex: '1 1 90px' }} />
-                      <input type="date" value={editDraft.warranty_expiry} onChange={(e) => setEditDraft({ ...editDraft, warranty_expiry: e.target.value })} style={{ flex: '1 1 140px' }} />
-                      <button className="primary" type="submit">Save</button>
-                      <button type="button" onClick={() => setEditing(null)}>Cancel</button>
-                    </form>
-                  ) : (
-                    <>
-                      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
-                        <strong>{a.name}{a.category ? ` (${a.category})` : ''} <span className="feature-meta">{a.asset_tag}{a.serial_number ? ` · S/N: ${a.serial_number}` : ''}</span></strong>
-                        <span style={{ display: 'flex', gap: 6 }}>
-                          {a.approval_status === 'Pending Approval' && <span className="status-tag pending">Pending Approval</span>}
-                          {!a.active && <span className="status-tag absent">Paused</span>}
-                          <span className={'status-tag ' + (STATUS_CLASS[a.status] || 'info')}>{a.status}</span>
-                        </span>
-                      </div>
-                      <div className="feature-meta">
-                        Assigned to: {a.assigned_employee_name ? `${a.assigned_employee_name} (${a.assigned_employee_code})` : '—'}
-                        {a.cost != null ? ` · Cost: ₹${Number(a.cost).toLocaleString('en-IN')}` : ''}
-                        {a.warranty_expiry ? ` · Warranty until ${a.warranty_expiry}` : ''}
-                      </div>
-
-                      {a.approval_status === 'Pending Approval' && canManage && APPROVAL_AUTHORITY.includes(user?.role) && (
-                        <div style={{ marginTop: 6 }}>
-                          <button className="btn-approve" onClick={() => decide(a.id, 'approve')}>Approve</button>
-                          <button className="btn-reject" style={{ marginLeft: 6 }} onClick={() => decide(a.id, 'reject')}>Reject</button>
-                        </div>
-                      )}
-
-                      {a.approval_status !== 'Pending Approval' && a.status !== 'Disposed' && (
-                        <div style={{ marginTop: 6, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {canManage && (
-                            <>
-                              <button onClick={() => { setEditing(a.id); setEditDraft({ name: a.name, category: a.category || '', cost: a.cost ?? '', warranty_expiry: a.warranty_expiry || '', serial_number: a.serial_number || '' }); }}>Edit</button>
-                              <button onClick={() => pauseAsset(a)}>{a.active ? 'Pause' : 'Resume'}</button>
-                              {a.status === 'Assigned' && <button onClick={() => returnAsset(a.id)}>Return</button>}
-                              {a.status === 'Assigned' && (
-                                transferring === a.id ? (
-                                  <span className="row" style={{ display: 'inline-flex' }}>
-                                    <select value={transferTo} onChange={(e) => setTransferTo(e.target.value)} style={{ width: 'auto' }}>
-                                      <option value="">Transfer to…</option>
-                                      {employees.filter((e) => e.id !== a.assigned_employee_id).map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
-                                    </select>
-                                    <button className="primary" onClick={() => transfer(a.id)}>Transfer</button>
-                                    <button onClick={() => setTransferring(null)}>Cancel</button>
-                                  </span>
-                                ) : <button onClick={() => setTransferring(a.id)}>Transfer</button>
-                              )}
-                              {a.status === 'In Store' && a.active && <button onClick={() => { setActiveAsset(a); goto('assign'); }}>Assign</button>}
-                              {a.status !== 'Under Repair' && <button onClick={() => toggleRepair(a.id, true)}>Send for Repair</button>}
-                              {a.status === 'Under Repair' && <button onClick={() => toggleRepair(a.id, false)}>Back In Store</button>}
-                              {a.status !== 'Assigned' && <button onClick={() => dispose(a.id)}>Dispose</button>}
-                              <button onClick={() => audit(a.id)}>Log Audit</button>
-                            </>
-                          )}
-                          <button onClick={() => setExpanded(expanded === a.id ? null : a.id)}>{expanded === a.id ? 'Hide history' : 'History'}</button>
-                        </div>
-                      )}
-
-                      {expanded === a.id && (
-                        <div style={{ marginTop: 8, paddingLeft: 8 }}>
-                          {a.history.length === 0 && <div className="feature-meta">No history yet.</div>}
-                          {a.history.map((h) => <div key={h.id} className="feature-meta">— <strong>{h.action}</strong>{h.detail ? `: ${h.detail}` : ''} ({h.created_at})</div>)}
-                        </div>
-                      )}
-                    </>
-                  )}
-                </div>
-              ))}
-              {totalPages > 1 && (
-                <div className="row" style={{ justifyContent: 'center', gap: 10, marginTop: 10 }}>
-                  <button disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>← Prev</button>
-                  <span className="feature-meta">Page {currentPage} of {totalPages}</span>
-                  <button disabled={currentPage >= totalPages} onClick={() => setPage(currentPage + 1)}>Next →</button>
-                </div>
-              )}
+              <div className="feature-meta">Search, filter, and manage the full asset list — allocation, transfer, repair, disposal and more — on its own page.</div>
             </div>
 
             <div className="card">
@@ -489,7 +506,7 @@ function HRAssets({ compact, sectionLabel }) {
                 {/* Non-canManage (Assistant Manager/STL/TL) only get view-safe screens — every
                     other screen here drives a write endpoint (add/transfer/maintain/dispose/
                     approve/report) that's now blocked server-side for them. */}
-                {ov?.keyFeatures.filter((f) => canManage || ['dashboard', 'tracking'].includes(f.screen)).map((f) => <button key={f.key} className="pill" onClick={() => goto(f.screen)}>{f.label}</button>)}
+                {ov?.keyFeatures.filter((f) => canManage || ['dashboard', 'inventory', 'tracking'].includes(f.screen)).map((f) => <button key={f.key} className="pill" onClick={() => goto(f.screen)}>{f.label}</button>)}
               </div>
             </div>
 

@@ -69,6 +69,11 @@ function MyPerformance({ compact }) {
             <div className="kpi-value">{progressScore.overall}% · {progressScore.band}</div>
             <div className="feature-meta">
               Goals {progressScore.goalsScore ?? '—'}{progressScore.goalsScore != null ? '%' : ' (none assigned)'} · Attendance {progressScore.attendanceScore}% · Conduct {progressScore.disciplinaryScore}%
+              {progressScore.knowledgeTransferScore != null && ` · Knowledge Transfer ${progressScore.knowledgeTransferScore}% (${progressScore.weeksComplied}/${progressScore.weeksExpected} wks)`}
+              {progressScore.learningScore != null && ` · Learning ${progressScore.learningScore}% (${progressScore.coursesCompleted}/${progressScore.coursesEnrolled})`}
+            </div>
+            <div className="feature-meta" style={{ marginTop: 4 }}>
+              Salary Increase Recommendation (advisory — HR decides): <strong>{progressScore.salaryRecommendation}</strong>
             </div>
           </div>
         )}
@@ -388,11 +393,11 @@ function HRPerformance({ compact, sectionLabel }) {
                 <button onClick={() => setShowProgress((v) => !v)}>{showProgress ? 'Hide' : 'Show all'}</button>
               </div>
               <div className="feature-meta" style={{ marginBottom: 8 }}>
-                One score blending this month's goal completion (50%), attendance (30%), and disciplinary record (20%).
+                One score blending this month's goal completion (40%), attendance (20%), disciplinary record (15%), Knowledge Transfer weekly idea contribution (15%), and Learning course completion (10%). Salary Increase Recommendation is advisory only — HR always makes the actual compensation decision; this is never wired into Payroll automatically.
               </div>
               {showProgress && (
                 <table>
-                  <thead><tr><th>Employee</th><th>Department</th><th>Goals</th><th>Attendance</th><th>Conduct</th><th>Overall</th><th>Band</th></tr></thead>
+                  <thead><tr><th>Employee</th><th>Department</th><th>Goals</th><th>Attendance</th><th>Conduct</th><th>Knowledge Transfer</th><th>Learning</th><th>Overall</th><th>Band</th><th>Salary Increase</th></tr></thead>
                   <tbody>{ov.employeeProgress.map((e) => (
                     <tr key={e.employee_id}>
                       <td>{e.name}</td>
@@ -400,8 +405,11 @@ function HRPerformance({ compact, sectionLabel }) {
                       <td>{e.goalsScore != null ? `${e.goalsScore}%` : '—'} <span className="feature-meta">({e.targetsCompleted}/{e.targetsAssigned})</span></td>
                       <td>{e.attendanceScore}%</td>
                       <td>{e.disciplinaryScore}% {e.openCases > 0 && <span className="status-tag absent" style={{ marginLeft: 4 }}>{e.openCases} open</span>}</td>
+                      <td>{e.knowledgeTransferScore != null ? `${e.knowledgeTransferScore}%` : '—'} {e.weeksExpected != null && <span className="feature-meta">({e.weeksComplied}/{e.weeksExpected} wks)</span>}</td>
+                      <td>{e.learningScore != null ? `${e.learningScore}%` : '—'} {e.coursesEnrolled != null && <span className="feature-meta">({e.coursesCompleted}/{e.coursesEnrolled})</span>}</td>
                       <td style={{ fontWeight: 700 }}>{e.overall}%</td>
                       <td><span className={'status-tag ' + (e.band === 'High' ? 'present' : e.band === 'Medium' ? 'pending' : 'absent')}>{e.band}</span></td>
+                      <td><span className={'status-tag ' + (e.salaryRecommendation === 'Recommended' ? 'present' : e.salaryRecommendation === 'Review at Next Cycle' ? 'pending' : 'absent')}>{e.salaryRecommendation}</span></td>
                     </tr>
                   ))}</tbody>
                 </table>

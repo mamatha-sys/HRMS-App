@@ -1,0 +1,374 @@
+[
+  {
+    "name": "announcement_recipients",
+    "sql": "CREATE TABLE announcement_recipients (\n      announcement_id INTEGER NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      PRIMARY KEY (announcement_id, employee_id)\n    )"
+  },
+  {
+    "name": "announcements",
+    "sql": "CREATE TABLE announcements (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      title TEXT NOT NULL,\n      body TEXT NOT NULL,\n      category TEXT NOT NULL DEFAULT 'General' CHECK (category IN ('General','Policy','Event','Holiday')),\n      posted_by TEXT NOT NULL,\n      pinned INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , target_department TEXT, channels TEXT NOT NULL DEFAULT 'in_app')"
+  },
+  {
+    "name": "approvals",
+    "sql": "CREATE TABLE approvals (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    type TEXT NOT NULL,\n    requester TEXT NOT NULL,\n    detail TEXT,\n    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n    decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  , current_stage_role_id INTEGER REFERENCES roles(id))"
+  },
+  {
+    "name": "asset_audits",
+    "sql": "CREATE TABLE asset_audits (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      total INTEGER NOT NULL,\n      accounted_for INTEGER NOT NULL,\n      discrepancies INTEGER NOT NULL DEFAULT 0,\n      note TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "asset_history",
+    "sql": "CREATE TABLE asset_history (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,\n      action TEXT NOT NULL,\n      detail TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "asset_requests",
+    "sql": "CREATE TABLE \"asset_requests\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE,\n        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n        type TEXT NOT NULL CHECK (type IN ('Return','Damage','Regularization','New Asset')),\n        category TEXT,\n        urgency TEXT NOT NULL DEFAULT 'Medium' CHECK (urgency IN ('Low','Medium','High')),\n        detail TEXT,\n        status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        decided_at TEXT\n      )"
+  },
+  {
+    "name": "assets",
+    "sql": "CREATE TABLE \"assets\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        name TEXT NOT NULL,\n        category TEXT,\n        assigned_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,\n        status TEXT NOT NULL DEFAULT 'In Store' CHECK (status IN ('Assigned','In Store','Under Repair','Disposed')),\n        cost INTEGER,\n        active INTEGER NOT NULL DEFAULT 1,\n        warranty_expiry TEXT,\n        asset_tag TEXT,\n        approval_status TEXT NOT NULL DEFAULT 'Approved' CHECK (approval_status IN ('Pending Approval','Approved','Rejected')),\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n      , serial_number TEXT)"
+  },
+  {
+    "name": "attendance",
+    "sql": "CREATE TABLE attendance (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n    date TEXT NOT NULL,\n    status TEXT NOT NULL CHECK (status IN ('Present','Absent','Leave')), check_in_time TEXT, check_out_time TEXT, method TEXT NOT NULL DEFAULT 'Web Check-in', latitude REAL, longitude REAL, half_day_flag INTEGER NOT NULL DEFAULT 0, alert_sent INTEGER NOT NULL DEFAULT 0,\n    UNIQUE(employee_id, date)\n  )"
+  },
+  {
+    "name": "biometric_devices",
+    "sql": "CREATE TABLE biometric_devices (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL,\n      vendor TEXT NOT NULL DEFAULT 'eSSL',\n      serial_number TEXT NOT NULL UNIQUE,\n      location TEXT,\n      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n      last_seen_at TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "biometric_punches",
+    "sql": "CREATE TABLE biometric_punches (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      device_serial TEXT NOT NULL,\n      device_user_id TEXT NOT NULL,\n      employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,\n      punch_time TEXT NOT NULL,\n      punch_type TEXT NOT NULL DEFAULT 'unknown' CHECK (punch_type IN ('check-in','check-out','unknown')),\n      processed INTEGER NOT NULL DEFAULT 0,\n      raw_line TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "branches",
+    "sql": "CREATE TABLE branches (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL UNIQUE,\n    location TEXT,\n    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "candidate_sources",
+    "sql": "CREATE TABLE candidate_sources (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      label TEXT NOT NULL UNIQUE,\n      sort_order INTEGER NOT NULL DEFAULT 0,\n      paused INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "candidates",
+    "sql": "CREATE TABLE \"candidates\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        name TEXT NOT NULL,\n        position_id INTEGER REFERENCES positions(id) ON DELETE SET NULL,\n        panel TEXT,\n        feedback_status TEXT NOT NULL DEFAULT 'No feedback yet' CHECK (feedback_status IN ('No feedback yet','Feedback submitted')),\n        round_id INTEGER REFERENCES interview_rounds(id),\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n      , email TEXT, phone TEXT, experience_years TEXT, current_ctc TEXT, expected_ctc TEXT, notice_period TEXT, resume_data_url TEXT, resume_name TEXT, linkedin_url TEXT, location TEXT, referred_by_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL, source_id INTEGER REFERENCES candidate_sources(id))"
+  },
+  {
+    "name": "channel_deliveries",
+    "sql": "CREATE TABLE channel_deliveries (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      source TEXT NOT NULL CHECK (source IN ('notification','announcement')),\n      source_id INTEGER NOT NULL,\n      employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,\n      channel TEXT NOT NULL CHECK (channel IN ('email','sms','whatsapp')),\n      target TEXT,\n      title TEXT NOT NULL,\n      status TEXT NOT NULL CHECK (status IN ('Sent','Failed')),\n      error TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "company_documents",
+    "sql": "CREATE TABLE company_documents (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      title TEXT NOT NULL,\n      category TEXT NOT NULL DEFAULT 'Policy' CHECK (category IN ('Policy','Handbook','Form','Other')),\n      file_data_url TEXT NOT NULL,\n      mandatory INTEGER NOT NULL DEFAULT 0,\n      published INTEGER NOT NULL DEFAULT 1,\n      uploaded_by TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "course_access_requests",
+    "sql": "CREATE TABLE course_access_requests (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      decided_at TEXT\n    )"
+  },
+  {
+    "name": "course_enrollments",
+    "sql": "CREATE TABLE course_enrollments (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      completed INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')), score INTEGER, certificate_issued INTEGER NOT NULL DEFAULT 0, certified_at TEXT,\n      UNIQUE(course_id, employee_id)\n    )"
+  },
+  {
+    "name": "course_materials",
+    "sql": "CREATE TABLE course_materials (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,\n      title TEXT NOT NULL,\n      file_type TEXT NOT NULL CHECK (file_type IN ('pdf','video','other')),\n      data_url TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "course_questions",
+    "sql": "CREATE TABLE course_questions (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,\n      question_text TEXT NOT NULL,\n      option_a TEXT NOT NULL,\n      option_b TEXT NOT NULL,\n      option_c TEXT NOT NULL,\n      option_d TEXT NOT NULL,\n      correct_option TEXT NOT NULL CHECK (correct_option IN ('A','B','C','D')),\n      sort_order INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "courses",
+    "sql": "CREATE TABLE courses (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      title TEXT NOT NULL,\n      mandatory INTEGER NOT NULL DEFAULT 0,\n      pass_mark INTEGER,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , allow_download INTEGER NOT NULL DEFAULT 0)"
+  },
+  {
+    "name": "custom_features",
+    "sql": "CREATE TABLE custom_features (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    module_id INTEGER NOT NULL REFERENCES custom_modules(id) ON DELETE CASCADE,\n    name TEXT NOT NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "custom_integrations",
+    "sql": "CREATE TABLE custom_integrations (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL UNIQUE,\n      description TEXT,\n      logo TEXT,\n      url TEXT,\n      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "custom_modules",
+    "sql": "CREATE TABLE custom_modules (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL UNIQUE,\n    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "custom_records",
+    "sql": "CREATE TABLE custom_records (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    feature_id INTEGER NOT NULL REFERENCES custom_features(id) ON DELETE CASCADE,\n    title TEXT NOT NULL,\n    status TEXT NOT NULL DEFAULT 'Open',\n    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "dashboard_config",
+    "sql": "CREATE TABLE dashboard_config (\n    widget_key TEXT PRIMARY KEY,\n    label TEXT NOT NULL,\n    visible INTEGER NOT NULL DEFAULT 1,\n    sort_order INTEGER NOT NULL DEFAULT 0\n  )"
+  },
+  {
+    "name": "department_target_policies",
+    "sql": "CREATE TABLE department_target_policies (\n      department_id INTEGER PRIMARY KEY REFERENCES departments(id) ON DELETE CASCADE,\n      targets_per_month INTEGER NOT NULL DEFAULT 4,\n      updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "departments",
+    "sql": "CREATE TABLE departments (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL UNIQUE,\n    parent_department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,\n    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "disciplinary_case_notes",
+    "sql": "CREATE TABLE disciplinary_case_notes (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      case_id INTEGER NOT NULL REFERENCES disciplinary_cases(id) ON DELETE CASCADE,\n      author_name TEXT NOT NULL,\n      note TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "disciplinary_cases",
+    "sql": "CREATE TABLE disciplinary_cases (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      category TEXT NOT NULL CHECK (category IN ('Warning','Suspension','Termination','Other')),\n      description TEXT NOT NULL,\n      status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','Resolved')),\n      raised_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      resolution_notes TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      resolved_at TEXT\n    )"
+  },
+  {
+    "name": "document_acknowledgments",
+    "sql": "CREATE TABLE document_acknowledgments (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      document_id INTEGER NOT NULL REFERENCES company_documents(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      acknowledged_at TEXT NOT NULL DEFAULT (datetime('now')),\n      UNIQUE(document_id, employee_id)\n    )"
+  },
+  {
+    "name": "employee_biometric_ids",
+    "sql": "CREATE TABLE employee_biometric_ids (\n      employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,\n      device_user_id TEXT NOT NULL UNIQUE,\n      mapped_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "employee_custom_field_values",
+    "sql": "CREATE TABLE employee_custom_field_values (\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      field_id INTEGER NOT NULL REFERENCES employee_custom_fields(id) ON DELETE CASCADE,\n      value TEXT,\n      PRIMARY KEY (employee_id, field_id)\n    )"
+  },
+  {
+    "name": "employee_custom_fields",
+    "sql": "CREATE TABLE employee_custom_fields (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      key TEXT NOT NULL UNIQUE,\n      label TEXT NOT NULL,\n      field_type TEXT NOT NULL DEFAULT 'text' CHECK (field_type IN ('text','number','date')),\n      section TEXT NOT NULL DEFAULT 'personal' CHECK (section IN ('personal','address','emergency','employment','bank','education')),\n      active INTEGER NOT NULL DEFAULT 1,\n      sort_order INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "employee_field_config",
+    "sql": "CREATE TABLE employee_field_config (\n      field_key TEXT PRIMARY KEY,\n      label TEXT,\n      hidden INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "employee_leave_balances",
+    "sql": "CREATE TABLE employee_leave_balances (\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      leave_type_id INTEGER NOT NULL REFERENCES leave_types(id) ON DELETE CASCADE,\n      balance INTEGER NOT NULL DEFAULT 0, last_accrued_at TEXT,\n      PRIMARY KEY (employee_id, leave_type_id)\n    )"
+  },
+  {
+    "name": "employee_salary_lines",
+    "sql": "CREATE TABLE employee_salary_lines (\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      component_id INTEGER NOT NULL REFERENCES salary_components(id) ON DELETE CASCADE,\n      amount INTEGER NOT NULL DEFAULT 0,\n      PRIMARY KEY (employee_id, component_id)\n    )"
+  },
+  {
+    "name": "employee_skills",
+    "sql": "CREATE TABLE employee_skills (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      skill_name TEXT NOT NULL,\n      current_level INTEGER NOT NULL,\n      required_level INTEGER NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "employee_transfers",
+    "sql": "CREATE TABLE employee_transfers (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      from_department TEXT, to_department TEXT,\n      from_designation TEXT, to_designation TEXT,\n      from_team_id INTEGER, to_team_id INTEGER,\n      transfer_date TEXT NOT NULL,\n      reason TEXT,\n      created_by TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "employees",
+    "sql": "CREATE TABLE employees (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    employee_code TEXT NOT NULL UNIQUE,\n    name TEXT NOT NULL,\n    email TEXT UNIQUE,\n    phone TEXT,\n    photo TEXT,\n    date_of_birth TEXT,\n    emergency_contact_name TEXT,\n    emergency_contact_relation TEXT,\n    emergency_contact_number TEXT,\n    address_street TEXT,\n    address_city TEXT,\n    address_state TEXT,\n    address_country TEXT,\n    address_pincode TEXT,\n    department TEXT NOT NULL,\n    branch TEXT,\n    designation TEXT NOT NULL,\n    date_of_joining TEXT,\n    reporting_manager TEXT,\n    status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','On Probation','Exited')),\n    bank_name TEXT,\n    bank_account_number TEXT,\n    ifsc_code TEXT,\n    aadhaar_number TEXT,\n    pan_number TEXT,\n    education TEXT,\n    experience TEXT,\n    skills TEXT,\n    documents TEXT,\n    stage TEXT NOT NULL DEFAULT 'locked' CHECK (stage IN ('draft','assigned','submitted','locked')),\n    edit_requested INTEGER NOT NULL DEFAULT 0,\n    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  , shift TEXT NOT NULL DEFAULT 'General (9:00 AM – 6:00 PM)', team_id INTEGER REFERENCES teams(id) ON DELETE SET NULL, employment_type TEXT, pay_type TEXT NOT NULL DEFAULT 'Package' CHECK (pay_type IN ('Package','Stipend')), ctc INTEGER, address_building_no TEXT, address_door_no TEXT, address_floor_no TEXT, address_landmark TEXT, phone_verified INTEGER NOT NULL DEFAULT 0, phone_otp_code TEXT, phone_otp_expires TEXT, uan_number TEXT, pf_number TEXT, esi_number TEXT, address_type TEXT, address_line1 TEXT, address_line2 TEXT, address_district TEXT)"
+  },
+  {
+    "name": "events",
+    "sql": "CREATE TABLE events (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    title TEXT NOT NULL,\n    description TEXT,\n    event_date TEXT NOT NULL,\n    target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','super_admin','manager','employee')),\n    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "exits",
+    "sql": "CREATE TABLE exits (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,\n      name TEXT NOT NULL,\n      department TEXT,\n      last_working_day TEXT,\n      clearance_current INTEGER NOT NULL DEFAULT 0,\n      clearance_total INTEGER NOT NULL DEFAULT 4,\n      status TEXT NOT NULL DEFAULT 'Serving Notice' CHECK (status IN ('Serving Notice','Cleared')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , reason TEXT)"
+  },
+  {
+    "name": "expense_claims",
+    "sql": "CREATE TABLE expense_claims (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      category TEXT NOT NULL CHECK (category IN ('Travel','Food','Accommodation','Other')),\n      amount INTEGER NOT NULL,\n      description TEXT,\n      receipt_data_url TEXT,\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected','Reimbursed')),\n      current_stage_role_id INTEGER REFERENCES roles(id),\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      decided_at TEXT,\n      reimbursed_at TEXT\n    )"
+  },
+  {
+    "name": "field_permissions",
+    "sql": "CREATE TABLE field_permissions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    role TEXT NOT NULL CHECK (role IN ('manager','employee')),\n    field_name TEXT NOT NULL,\n    access TEXT NOT NULL CHECK (access IN ('view','edit','hidden')),\n    UNIQUE(role, field_name)\n  )"
+  },
+  {
+    "name": "integration_settings",
+    "sql": "CREATE TABLE integration_settings (\n      key TEXT PRIMARY KEY,\n      value TEXT,\n      updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "interview_rounds",
+    "sql": "CREATE TABLE interview_rounds (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL UNIQUE,\n      sort_order INTEGER NOT NULL DEFAULT 0,\n      paused INTEGER NOT NULL DEFAULT 0,\n      is_final INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "kb_articles",
+    "sql": "CREATE TABLE kb_articles (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      title TEXT NOT NULL,\n      body TEXT NOT NULL,\n      category TEXT NOT NULL DEFAULT 'General',\n      created_by TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "learning_feedback",
+    "sql": "CREATE TABLE learning_feedback (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      author_name TEXT NOT NULL,\n      author_type TEXT NOT NULL DEFAULT 'Other' CHECK (author_type IN ('Manager','Peer','Self','Other')),\n      note TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "leave_approval_reasons",
+    "sql": "CREATE TABLE leave_approval_reasons (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      label TEXT NOT NULL UNIQUE,\n      active INTEGER NOT NULL DEFAULT 1,\n      sort_order INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "leave_balance_history",
+    "sql": "CREATE TABLE leave_balance_history (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      leave_type TEXT NOT NULL,\n      change INTEGER NOT NULL,\n      balance_after INTEGER NOT NULL,\n      reason TEXT NOT NULL,\n      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , period_month TEXT)"
+  },
+  {
+    "name": "leave_balances",
+    "sql": "CREATE TABLE leave_balances (\n    employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,\n    casual INTEGER NOT NULL DEFAULT 12,\n    sick INTEGER NOT NULL DEFAULT 8,\n    earned INTEGER NOT NULL DEFAULT 15\n  )"
+  },
+  {
+    "name": "leave_cancellations",
+    "sql": "CREATE TABLE leave_cancellations (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      leave_id INTEGER NOT NULL REFERENCES leaves(id) ON DELETE CASCADE,\n      reason TEXT,\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "leave_types",
+    "sql": "CREATE TABLE leave_types (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL,\n      code TEXT NOT NULL UNIQUE,\n      annual_quota INTEGER NOT NULL DEFAULT 0,\n      unpaid INTEGER NOT NULL DEFAULT 0\n    , active INTEGER NOT NULL DEFAULT 1, carry_forward INTEGER NOT NULL DEFAULT 0, monthly_accrual INTEGER)"
+  },
+  {
+    "name": "leaves",
+    "sql": "CREATE TABLE \"leaves\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n        leave_type_id INTEGER REFERENCES leave_types(id),\n        type TEXT NOT NULL,\n        from_date TEXT NOT NULL,\n        to_date TEXT NOT NULL,\n        days INTEGER NOT NULL,\n        reason TEXT,\n        status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n        decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        current_stage_role_id INTEGER REFERENCES roles(id),\n        cancel_requested INTEGER NOT NULL DEFAULT 0,\n        cancelled INTEGER NOT NULL DEFAULT 0\n      , document_data_url TEXT, document_name TEXT, approval_reason_ids TEXT)"
+  },
+  {
+    "name": "material_download_requests",
+    "sql": "CREATE TABLE material_download_requests (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      material_id INTEGER NOT NULL REFERENCES course_materials(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      reason TEXT,\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n      decided_by TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      decided_at TEXT\n    )"
+  },
+  {
+    "name": "new_hires",
+    "sql": "CREATE TABLE new_hires (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL,\n      designation TEXT,\n      department TEXT,\n      start_date TEXT,\n      onboarding_pct INTEGER NOT NULL DEFAULT 0,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL, completed_at TEXT)"
+  },
+  {
+    "name": "notification_reads",
+    "sql": "CREATE TABLE notification_reads (\n    notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,\n    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n    read_at TEXT NOT NULL DEFAULT (datetime('now')),\n    PRIMARY KEY (notification_id, user_id)\n  )"
+  },
+  {
+    "name": "notifications",
+    "sql": "CREATE TABLE \"notifications\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        title TEXT NOT NULL,\n        message TEXT NOT NULL,\n        target_role TEXT NOT NULL DEFAULT 'all' CHECK (target_role IN ('all','staff','super_admin','manager','hr_admin','assistant_manager','stl','tl','employee')),\n        created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,\n        target_department TEXT,\n        channels TEXT NOT NULL DEFAULT 'in_app',\n        priority TEXT,\n        ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL\n      )"
+  },
+  {
+    "name": "offboarding_tasks",
+    "sql": "CREATE TABLE offboarding_tasks (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      exit_id INTEGER NOT NULL REFERENCES exits(id) ON DELETE CASCADE,\n      task_name TEXT NOT NULL,\n      completed INTEGER NOT NULL DEFAULT 0,\n      sort_order INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "onboarding_tasks",
+    "sql": "CREATE TABLE onboarding_tasks (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      new_hire_id INTEGER NOT NULL REFERENCES new_hires(id) ON DELETE CASCADE,\n      task_name TEXT NOT NULL,\n      completed INTEGER NOT NULL DEFAULT 0,\n      sort_order INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "payroll_runs",
+    "sql": "CREATE TABLE payroll_runs (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    period TEXT NOT NULL,\n    status TEXT NOT NULL DEFAULT 'Processing' CHECK (status IN ('Processing','Completed','Pending')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "payslips",
+    "sql": "CREATE TABLE payslips (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n    period TEXT NOT NULL,\n    basic INTEGER NOT NULL,\n    hra INTEGER NOT NULL,\n    allowances INTEGER NOT NULL,\n    deductions INTEGER NOT NULL,\n    net INTEGER NOT NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now')), late_deduction INTEGER NOT NULL DEFAULT 0, month TEXT, days_worked INTEGER, lop_days INTEGER NOT NULL DEFAULT 0, lop_deduction INTEGER NOT NULL DEFAULT 0, lines_json TEXT,\n    UNIQUE(employee_id, period)\n  )"
+  },
+  {
+    "name": "performance_feedback",
+    "sql": "CREATE TABLE performance_feedback (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      review_id INTEGER NOT NULL REFERENCES performance_reviews(id) ON DELETE CASCADE,\n      author_name TEXT NOT NULL,\n      note TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , author_type TEXT NOT NULL DEFAULT 'Other' CHECK (author_type IN ('Manager','Peer','Self','Other')))"
+  },
+  {
+    "name": "performance_reviews",
+    "sql": "CREATE TABLE performance_reviews (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_name TEXT NOT NULL,\n      team TEXT,\n      goal_text TEXT NOT NULL,\n      kpi_text TEXT,\n      self_assessment_status TEXT NOT NULL DEFAULT 'Pending' CHECK (self_assessment_status IN ('Pending','Submitted')),\n      manager_assessment_status TEXT NOT NULL DEFAULT 'Pending' CHECK (manager_assessment_status IN ('Pending','Submitted')),\n      rating INTEGER,\n      status TEXT NOT NULL DEFAULT 'In Progress' CHECK (status IN ('In Progress','Completed')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , employee_id INTEGER REFERENCES employees(id), competency_notes TEXT, plan_type TEXT NOT NULL DEFAULT 'None' CHECK (plan_type IN ('None','Promotion','PIP')), due_date TEXT, progress_pct INTEGER NOT NULL DEFAULT 0, achievements_text TEXT, development_areas TEXT, month TEXT, target_value REAL, achieved_value REAL, unit TEXT, last_reminded_at TEXT)"
+  },
+  {
+    "name": "perm_features",
+    "sql": "CREATE TABLE perm_features (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    module_id INTEGER NOT NULL REFERENCES perm_modules(id) ON DELETE CASCADE,\n    category TEXT,\n    name TEXT NOT NULL,\n    sort_order INTEGER NOT NULL DEFAULT 0\n  )"
+  },
+  {
+    "name": "perm_modules",
+    "sql": "CREATE TABLE perm_modules (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    code TEXT NOT NULL,\n    name TEXT NOT NULL,\n    sort_order INTEGER NOT NULL DEFAULT 0\n  )"
+  },
+  {
+    "name": "policies",
+    "sql": "CREATE TABLE policies (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    category TEXT NOT NULL CHECK (category IN ('business','rule','setting')),\n    name TEXT NOT NULL,\n    value TEXT,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "positions",
+    "sql": "CREATE TABLE positions (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,\n    title TEXT NOT NULL,\n    target_headcount INTEGER NOT NULL DEFAULT 1,\n    status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','Closed')),\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  , requested_by TEXT, approval_status TEXT NOT NULL DEFAULT 'Approved' CHECK (approval_status IN ('Pending Approval','Approved','Rejected')), posted_boards TEXT, is_replacement INTEGER NOT NULL DEFAULT 0, replacement_for TEXT, replacement_target_date TEXT, job_description TEXT, jd_date TEXT)"
+  },
+  {
+    "name": "project_assignments",
+    "sql": "CREATE TABLE project_assignments (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      allocation_pct INTEGER NOT NULL DEFAULT 100 CHECK (allocation_pct > 0 AND allocation_pct <= 100),\n      role_on_project TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      UNIQUE(project_id, employee_id)\n    )"
+  },
+  {
+    "name": "project_task_updates",
+    "sql": "CREATE TABLE project_task_updates (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      task_id INTEGER NOT NULL REFERENCES project_tasks(id) ON DELETE CASCADE,\n      author_name TEXT NOT NULL,\n      comment TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "project_tasks",
+    "sql": "CREATE TABLE project_tasks (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,\n      assigned_to_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,\n      created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      task_name TEXT NOT NULL,\n      description TEXT,\n      sub_task_name TEXT,\n      status TEXT NOT NULL DEFAULT 'Not Started' CHECK (status IN ('Not Started','In Progress','Completed','On Hold')),\n      start_date TEXT NOT NULL,\n      end_date TEXT,\n      is_dependent INTEGER NOT NULL DEFAULT 0,\n      depends_on_task_id INTEGER REFERENCES project_tasks(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , department TEXT)"
+  },
+  {
+    "name": "projects",
+    "sql": "CREATE TABLE projects (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL UNIQUE,\n      description TEXT,\n      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','On Hold','Completed')),\n      start_date TEXT,\n      end_date TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "recognitions",
+    "sql": "CREATE TABLE \"recognitions\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        from_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,\n        to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n        award_type TEXT NOT NULL CHECK (award_type IN ('Employee of the Month','Spot Award','Team Player','Innovation Award','Above & Beyond')),\n        message TEXT NOT NULL,\n        points INTEGER NOT NULL DEFAULT 10,\n        created_at TEXT NOT NULL DEFAULT (datetime('now'))\n      )"
+  },
+  {
+    "name": "role_permissions",
+    "sql": "CREATE TABLE role_permissions (\n    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,\n    feature_id INTEGER NOT NULL REFERENCES perm_features(id) ON DELETE CASCADE,\n    action TEXT NOT NULL,\n    PRIMARY KEY (role_id, feature_id, action)\n  )"
+  },
+  {
+    "name": "roles",
+    "sql": "CREATE TABLE roles (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    key TEXT NOT NULL UNIQUE,\n    name TEXT NOT NULL,\n    scope_description TEXT,\n    is_system INTEGER NOT NULL DEFAULT 0,\n    paused INTEGER NOT NULL DEFAULT 0,\n    sort_order INTEGER NOT NULL DEFAULT 0\n  , max_leave_approval_days INTEGER)"
+  },
+  {
+    "name": "roster_assignments",
+    "sql": "CREATE TABLE roster_assignments (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      shift_id INTEGER NOT NULL REFERENCES shifts(id) ON DELETE CASCADE,\n      date TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      UNIQUE(employee_id, date)\n    )"
+  },
+  {
+    "name": "salary_components",
+    "sql": "CREATE TABLE salary_components (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      key TEXT NOT NULL UNIQUE,\n      label TEXT NOT NULL,\n      type TEXT NOT NULL CHECK (type IN ('earning','deduction','employer_cost')),\n      active INTEGER NOT NULL DEFAULT 1,\n      sort_order INTEGER NOT NULL DEFAULT 0\n    , withheld INTEGER NOT NULL DEFAULT 0)"
+  },
+  {
+    "name": "salary_structures",
+    "sql": "CREATE TABLE salary_structures (\n    employee_id INTEGER PRIMARY KEY REFERENCES employees(id) ON DELETE CASCADE,\n    basic INTEGER NOT NULL DEFAULT 0,\n    hra INTEGER NOT NULL DEFAULT 0,\n    allowances INTEGER NOT NULL DEFAULT 0,\n    deductions INTEGER NOT NULL DEFAULT 0\n  , conveyance INTEGER NOT NULL DEFAULT 1600, special_allowance INTEGER NOT NULL DEFAULT 8000, pf INTEGER NOT NULL DEFAULT 4080, pt INTEGER NOT NULL DEFAULT 200, tds INTEGER NOT NULL DEFAULT 850)"
+  },
+  {
+    "name": "shift_swap_requests",
+    "sql": "CREATE TABLE shift_swap_requests (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      requester_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      date TEXT NOT NULL,\n      target_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,\n      reason TEXT,\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "shifts",
+    "sql": "CREATE TABLE shifts (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL UNIQUE,\n      start_time TEXT NOT NULL,\n      end_time TEXT NOT NULL,\n      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "supervisor_scopes",
+    "sql": "CREATE TABLE supervisor_scopes (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,\n      team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      CHECK ((department_id IS NOT NULL) != (team_id IS NOT NULL))\n    )"
+  },
+  {
+    "name": "survey_answers",
+    "sql": "CREATE TABLE survey_answers (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      response_id INTEGER NOT NULL REFERENCES survey_responses(id) ON DELETE CASCADE,\n      question_id INTEGER NOT NULL REFERENCES survey_questions(id) ON DELETE CASCADE,\n      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5)\n    )"
+  },
+  {
+    "name": "survey_questions",
+    "sql": "CREATE TABLE survey_questions (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,\n      question_text TEXT NOT NULL,\n      sort_order INTEGER NOT NULL DEFAULT 0\n    )"
+  },
+  {
+    "name": "survey_responses",
+    "sql": "CREATE TABLE survey_responses (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      survey_id INTEGER NOT NULL REFERENCES surveys(id) ON DELETE CASCADE,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      comment TEXT,\n      submitted_at TEXT NOT NULL DEFAULT (datetime('now')),\n      UNIQUE(survey_id, employee_id)\n    )"
+  },
+  {
+    "name": "surveys",
+    "sql": "CREATE TABLE surveys (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      title TEXT NOT NULL,\n      description TEXT,\n      status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft','Active','Closed')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "tasks",
+    "sql": "CREATE TABLE tasks (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    title TEXT NOT NULL,\n    description TEXT,\n    due_date TEXT,\n    assigned_to INTEGER REFERENCES users(id) ON DELETE CASCADE,\n    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Done')),\n    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  )"
+  },
+  {
+    "name": "teams",
+    "sql": "CREATE TABLE teams (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      name TEXT NOT NULL,\n      department_id INTEGER NOT NULL REFERENCES departments(id) ON DELETE CASCADE,\n      status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active','Paused')),\n      created_at TEXT NOT NULL DEFAULT (datetime('now')),\n      UNIQUE(department_id, name)\n    )"
+  },
+  {
+    "name": "ticket_comments",
+    "sql": "CREATE TABLE ticket_comments (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      ticket_id INTEGER NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,\n      author_name TEXT NOT NULL,\n      comment TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , internal INTEGER NOT NULL DEFAULT 0, attachment_data_url TEXT, attachment_name TEXT)"
+  },
+  {
+    "name": "ticket_routing",
+    "sql": "CREATE TABLE ticket_routing (\n      category TEXT PRIMARY KEY,\n      assigned_to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE\n    )"
+  },
+  {
+    "name": "tickets",
+    "sql": "CREATE TABLE \"tickets\" (\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n        category TEXT NOT NULL CHECK (category IN ('IT','HR','Admin','Grievance','Facilities','Payroll','Other')),\n        priority TEXT NOT NULL DEFAULT 'Medium' CHECK (priority IN ('Low','Medium','High','Critical')),\n        subject TEXT NOT NULL,\n        description TEXT,\n        status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','In Progress','Resolved','Closed')),\n        assigned_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,\n        sla_deadline TEXT,\n        requester_confirmed INTEGER NOT NULL DEFAULT 0,\n        escalated INTEGER NOT NULL DEFAULT 0,\n        csat_rating INTEGER CHECK (csat_rating IS NULL OR csat_rating BETWEEN 1 AND 5),\n        created_at TEXT NOT NULL DEFAULT (datetime('now')),\n        resolved_at TEXT\n      , last_escalated_at TEXT, attachment_data_url TEXT, attachment_name TEXT)"
+  },
+  {
+    "name": "timesheet_entries",
+    "sql": "CREATE TABLE timesheet_entries (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,\n      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,\n      date TEXT NOT NULL,\n      task_description TEXT,\n      hours REAL NOT NULL CHECK (hours > 0 AND hours <= 24),\n      status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Approved','Rejected')),\n      decided_by INTEGER REFERENCES users(id) ON DELETE SET NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  },
+  {
+    "name": "training_sessions",
+    "sql": "CREATE TABLE training_sessions (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      course_id INTEGER NOT NULL REFERENCES courses(id) ON DELETE CASCADE,\n      mode TEXT NOT NULL,\n      scheduled_at TEXT NOT NULL,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    , calendar_event_id TEXT)"
+  },
+  {
+    "name": "users",
+    "sql": "CREATE TABLE users (\n    id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL,\n    email TEXT NOT NULL UNIQUE,\n    password_hash TEXT NOT NULL,\n    role TEXT NOT NULL,\n    face_descriptor TEXT,\n    active INTEGER NOT NULL DEFAULT 1,\n    created_at TEXT NOT NULL DEFAULT (datetime('now'))\n  , reset_token TEXT, reset_token_expires TEXT)"
+  },
+  {
+    "name": "webhook_deliveries",
+    "sql": "CREATE TABLE webhook_deliveries (\n      id INTEGER PRIMARY KEY AUTOINCREMENT,\n      target TEXT NOT NULL CHECK (target IN ('slack','teams')),\n      event TEXT NOT NULL,\n      message TEXT NOT NULL,\n      status TEXT NOT NULL CHECK (status IN ('Sent','Failed')),\n      error TEXT,\n      created_at TEXT NOT NULL DEFAULT (datetime('now'))\n    )"
+  }
+]

@@ -25,7 +25,8 @@ const MODULES = [
   { path: '/recognition', label: 'Rewards & Recognition', code: '19', icon: 'recognition' },
   { path: '/projects', label: 'Project & Resource Management', code: '20', icon: 'projects' },
   { path: '/timesheet', label: 'Timesheet', code: '21', icon: 'timesheet' },
-  { path: '/disciplinary', label: 'Disciplinary Action Tracking', code: '22', icon: 'disciplinary' }
+  { path: '/disciplinary', label: 'Disciplinary Action Tracking', code: '22', icon: 'disciplinary' },
+  { path: '/knowledge-transfer', label: 'Knowledge Transfer', code: '23', icon: 'knowledgeTransfer' }
 ];
 const DASHBOARD_CODE = '01';
 

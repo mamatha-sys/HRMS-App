@@ -6,7 +6,8 @@ import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils
 import { notifyAll, employeesForTarget } from '../utils/notify.js';
 import { dispatchChannels, recentDeliveries } from '../utils/channels.js';
 import { notifyWebhooks } from '../utils/webhooks.js';
-import { suggestAnnouncementBody } from '../utils/aiAssist.js';
+import { suggestAnnouncementBody, generateFestivalGreeting } from '../utils/aiAssist.js';
+import { getSetting } from '../utils/integrationSettings.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -76,6 +77,21 @@ router.post('/ai-assist', async (req, res) => {
   try {
     const suggestion = await suggestAnnouncementBody(req.body?.title, req.body?.category);
     res.json(suggestion);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Drafts a festival/occasion greeting — a distinct, warmer AI helper from /ai-assist above,
+// purpose-built for the "send a greeting to everyone" flow (see AnnouncementsWidget/Announcements
+// compose form: this only drafts text, HR still reviews/edits before POST / actually sends it and
+// emails everyone — same human-confirms-before-it-goes-out shape as everything else here).
+router.post('/festival-greeting', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  try {
+    const companyName = getSetting('company_name');
+    const draft = await generateFestivalGreeting({ occasionName: req.body?.occasion, companyName });
+    res.json(draft);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

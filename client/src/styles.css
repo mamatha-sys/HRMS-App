@@ -6,10 +6,10 @@ body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-se
 .topbar { background: #EAF6FC; color: #16243F; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #CFEAF6; flex-shrink: 0; }
 .topbar .brand { font-weight: 700; font-size: 22px; display: flex; align-items: center; gap: 8px; }
 .topbar .brand span { color: #4A7A99; font-weight: 400; font-size: 12px; margin-left: 8px; }
-.brand-logo { height: 40px; width: auto; object-fit: contain; mix-blend-mode: multiply; }
-.topbar .brand-logo { height: 90px; width: auto; image-rendering: -webkit-optimize-contrast; }
+.brand-logo { height: 40px; width: auto; object-fit: contain; }
+.topbar .brand-logo { height: 130px; width: auto; image-rendering: -webkit-optimize-contrast; }
 .login-brand { display: flex; align-items: center; justify-content: center; gap: 10px; }
-.login-brand .brand-logo { height: 72px; width: auto; }
+.login-brand .brand-logo { height: 110px; width: auto; }
 .role-switch { display: flex; align-items: center; gap: 10px; font-size: 13px; }
 .role-switch button { background: #232D4B; color: #fff; border: 1px solid #334060; }
 .role-switch button:hover { background: #2C3760; }

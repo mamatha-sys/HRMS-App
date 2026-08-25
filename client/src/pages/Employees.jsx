@@ -84,15 +84,36 @@ function docNameOptionsFor(employmentType) {
   return [...COMMON_DOC_NAMES, ...FRESHER_ONLY_DOC_NAMES, ...EXPERIENCED_ONLY_DOC_NAMES];
 }
 
+// Which typed form fields are worth cross-checking against a given document's own OCR'd text —
+// name alone for anything generic (resume, certificates, offer/experience letters, since those
+// don't reliably carry a fixed ID number to check), but the specific ID number (+ DOB for Aadhaar,
+// since that's printed on it too) for the three document types that actually carry one. Address
+// Proof checks the address itself, not just name, since that's the whole point of that document.
+function relevantFieldsFor(docName, form) {
+  const name = form.name;
+  if (docName === 'Aadhaar Card') {
+    return { Name: name, 'Aadhaar Number': form.aadhaar_number, 'Date of Birth': form.date_of_birth };
+  }
+  if (docName === 'PAN Card') {
+    return { Name: name, 'PAN Number': form.pan_number };
+  }
+  if (docName === 'Address Proof') {
+    const address = [form.address_city, form.address_district, form.address_state, form.address_pincode].filter(Boolean).join(', ');
+    return { Name: name, Address: address };
+  }
+  return { Name: name };
+}
+
 // Shared by the HR edit form and the employee's own self-service form: pick what a document IS
-// before attaching it, rather than defaulting its label to the raw filename. `employeeName` is
-// the currently-typed name on the form (not necessarily saved yet) — used for the AI "Verify
-// name" check, which cross-reads the document's own text via OCR rather than trusting the label.
-function DocumentsEditor({ documents, employmentType, editable, employeeName, onAdd, onRename, onRemove }) {
+// before attaching it, rather than defaulting its label to the raw filename. `form` is the whole
+// employee form currently being edited (not necessarily saved yet) — relevantFieldsFor above picks
+// out just the fields worth checking against THIS document's own type, then the AI cross-reads the
+// document's own text via OCR rather than trusting any of them at face value.
+function DocumentsEditor({ documents, employmentType, editable, form, onAdd, onRename, onRemove }) {
   const [pickName, setPickName] = useState('');
   const [customName, setCustomName] = useState('');
   const [verifying, setVerifying] = useState(null); // index currently being checked
-  const [results, setResults] = useState({}); // index -> { match, note, extractedText } | { error }
+  const [results, setResults] = useState({}); // index -> { results: [{label,match,note}], overallNote } | { error }
   const options = docNameOptionsFor(employmentType);
   const resolvedName = (pickName === '__other__' ? customName : pickName).trim();
 
@@ -104,11 +125,12 @@ function DocumentsEditor({ documents, employmentType, editable, employeeName, on
   }
 
   async function verifyDoc(idx) {
-    if (!employeeName?.trim()) { setResults((r) => ({ ...r, [idx]: { error: 'Enter the employee name first.' } })); return; }
+    if (!form.name?.trim()) { setResults((r) => ({ ...r, [idx]: { error: 'Enter the employee name first.' } })); return; }
+    const fields = relevantFieldsFor(documents[idx].name, form);
     setVerifying(idx);
     setResults((r) => ({ ...r, [idx]: null }));
     try {
-      const res = await api.post('/employees/verify-document', { name: employeeName, dataUrl: documents[idx].dataUrl });
+      const res = await api.post('/employees/verify-document', { documentLabel: documents[idx].name, fields, dataUrl: documents[idx].dataUrl });
       setResults((r) => ({ ...r, [idx]: res.data }));
     } catch (err) {
       setResults((r) => ({ ...r, [idx]: { error: err.response?.data?.error || 'Could not verify this document.' } }));
@@ -127,15 +149,22 @@ function DocumentsEditor({ documents, employmentType, editable, employeeName, on
             <div className="row">
               <input value={doc.name} disabled={!editable} onChange={(e) => onRename(idx, e.target.value)} placeholder="Document label" style={{ flex: '2 1 200px' }} />
               <a href={doc.dataUrl} download={doc.name} className="crumb" style={{ flexShrink: 0 }}>view</a>
-              <button type="button" onClick={() => verifyDoc(idx)} disabled={verifying === idx} style={{ flexShrink: 0 }} title="AI-check whether this document's text matches the typed name">
-                {verifying === idx ? 'Checking…' : '🔍 Verify name'}
+              <button type="button" onClick={() => verifyDoc(idx)} disabled={verifying === idx} style={{ flexShrink: 0 }} title="AI-check the relevant typed details (name, and ID number/DOB/address if this document type carries one) against this document's own text">
+                {verifying === idx ? 'Checking…' : '🔍 Verify details'}
               </button>
               {editable && <button type="button" onClick={() => onRemove(idx)} style={{ flexShrink: 0 }}>Remove</button>}
             </div>
             {result?.error && <div className="note" style={{ color: '#B3401E', marginTop: 2 }}>⚠ {result.error}</div>}
-            {result && !result.error && result.match === true && <div className="note" style={{ color: '#1E8E5A', marginTop: 2 }}>✓ Name matches this document{result.note ? ` — ${result.note}` : ''}</div>}
-            {result && !result.error && result.match === false && <div className="note" style={{ color: '#B3401E', marginTop: 2 }}>⚠ Possible name mismatch{result.note ? ` — ${result.note}` : ''}</div>}
-            {result && !result.error && result.match === null && <div className="note" style={{ color: '#8A5A0A', marginTop: 2 }}>? {result.note}</div>}
+            {result && !result.error && (
+              <div style={{ marginTop: 2 }}>
+                {result.results.map((r) => (
+                  <div key={r.label} className="note" style={{ color: r.match === true ? '#1E8E5A' : r.match === false ? '#B3401E' : '#8A5A0A' }}>
+                    {r.match === true ? '✓' : r.match === false ? '⚠' : '?'} {r.label}{r.match === true ? ' matches' : r.match === false ? ' does not match' : ' — unable to check'}{r.note ? ` — ${r.note}` : ''}
+                  </div>
+                ))}
+                {result.overallNote && <div className="note" style={{ color: '#5B6472' }}>{result.overallNote}</div>}
+              </div>
+            )}
           </div>
         );
       })}
@@ -436,6 +465,11 @@ export default function Employees() {
   const showMyProfile = SELF_SERVICE_ROLES.includes(user?.role);
   const canExport = user?.role === 'super_admin' || user?.role === 'manager';
   const canEditEmployee = user?.role === 'super_admin' || user?.role === 'hr_admin';
+  // Senior Team Lead/Team Lead can also Transfer — scoped server-side to employees within their
+  // own assigned department(s)/team(s) (everyone the scoped employee list already shows them is
+  // already within that scope, so no extra client-side check is needed here). Not full Edit —
+  // that stays Super Admin/HR Admin only.
+  const canTransferEmployee = canEditEmployee || user?.role === 'stl' || user?.role === 'tl';
 
   const [employees, setEmployees] = useState([]);
   const [departments, setDepartments] = useState([]);
@@ -453,9 +487,17 @@ export default function Employees() {
   const isSuperAdmin = user?.role === 'super_admin';
   const [filterId, setFilterId] = useState('');
   const [filterName, setFilterName] = useState('');
+  const [filterDept, setFilterDept] = useState('');
+  // Built from the employees actually visible to this user, not the org-wide department list —
+  // Manager/HR Admin (company-wide) get every department here; a scoped Assistant Manager/STL/TL
+  // only ever gets their own assigned department(s), since that's all the server sent them in the
+  // first place. "All Departments" (empty value) just clears this filter, revealing everything
+  // this role can already see — never more than that.
+  const employeeDepartments = [...new Set(employees.map((e) => e.department).filter(Boolean))].sort();
   const filteredEmployees = employees.filter((e) =>
     (!filterId || (e.employee_code || '').toLowerCase().includes(filterId.trim().toLowerCase())) &&
-    (!filterName || (e.name || '').toLowerCase().includes(filterName.trim().toLowerCase()))
+    (!filterName || (e.name || '').toLowerCase().includes(filterName.trim().toLowerCase())) &&
+    (!filterDept || e.department === filterDept)
   );
   const [transferFor, setTransferFor] = useState(null); // employee id currently showing the transfer form
   const [transferForm, setTransferForm] = useState({ department: '', designation: '', team_id: '', transfer_date: new Date().toISOString().slice(0, 10), reason: '' });
@@ -697,7 +739,11 @@ export default function Employees() {
       <div className="filter-bar">
         <input placeholder="Filter by Employee ID…" value={filterId} onChange={(e) => setFilterId(e.target.value)} style={{ width: 'auto' }} />
         <input placeholder="Filter by Name…" value={filterName} onChange={(e) => setFilterName(e.target.value)} style={{ width: 'auto' }} />
-        {(filterId || filterName) && <button onClick={() => { setFilterId(''); setFilterName(''); }}>Clear</button>}
+        <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)} style={{ width: 'auto' }}>
+          <option value="">All Departments</option>
+          {employeeDepartments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        {(filterId || filterName || filterDept) && <button onClick={() => { setFilterId(''); setFilterName(''); setFilterDept(''); }}>Clear</button>}
         <div className="spacer" />
         <span className="feature-meta">{filteredEmployees.length} of {employees.length}</span>
       </div>
@@ -735,6 +781,7 @@ export default function Employees() {
                     <label className="field-label">{labelFor('department', 'Department')}</label>
                     <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value })} required>
                       <option value="">Select department</option>
+                      <option value="All Departments">All Departments (not yet assigned to one)</option>
                       {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
                     </select>
                   </div>
@@ -828,7 +875,7 @@ export default function Employees() {
                           {emp.account_active === 0 ? 'Reactivate' : 'Pause'}
                         </button>
                       )}
-                      {canEditEmployee && <button style={{ marginLeft: 6 }} onClick={() => (transferFor === emp.id ? setTransferFor(null) : startTransfer(emp))}>{transferFor === emp.id ? 'Cancel' : 'Transfer'}</button>}
+                      {canTransferEmployee && <button style={{ marginLeft: 6 }} onClick={() => (transferFor === emp.id ? setTransferFor(null) : startTransfer(emp))}>{transferFor === emp.id ? 'Cancel' : 'Transfer'}</button>}
                       {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneCsv(emp)}>Export</button>}
                     </td>
                   </tr>
@@ -990,6 +1037,7 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, teams
               <label className="field-label">{label('department', 'Department')}</label>
               <select value={form.department} onChange={(e) => setForm({ ...form, department: e.target.value, team_id: '' })} required>
                 <option value="">Select department</option>
+                <option value="All Departments">All Departments (not yet assigned to one)</option>
                 {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
               </select>
             </div>
@@ -1079,7 +1127,7 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, teams
       {!hidden('documents') && (
         <>
           <div className="section-label" style={{ paddingLeft: 0 }}>{label('documents', 'Documents')} <span className="note">(choose what each document is before attaching it)</span></div>
-          <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable employeeName={form.name}
+          <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable form={form}
             onAdd={handleAddDocuments} onRename={renameDocument} onRemove={removeDocument} />
         </>
       )}
@@ -1376,7 +1424,7 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
         {!hidden('documents') && (
           <>
             <div className="section-label" style={{ paddingLeft: 0 }}>{label('documents', 'Documents')}</div>
-            <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable={editable} employeeName={form.name}
+            <DocumentsEditor documents={form.documents} employmentType={form.employment_type} editable={editable} form={form}
               onAdd={handleAddDocuments} onRename={renameDocument} onRemove={removeDocument} />
           </>
         )}

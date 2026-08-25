@@ -68,8 +68,12 @@ async function callOllama(path, body) {
   return res.json();
 }
 
-// Single-prompt completion, used by the suggest* form helpers below.
-async function askOllama(prompt, maxTokens) {
+// Single-prompt completion, used by the suggest* form helpers below (exported for the rare
+// caller outside this file that needs true single-shot JSON extraction rather than a
+// conversational reply — see documentVerify.js's verifyDocumentFields, which switched to this
+// from chatWithAssistant after testing showed /api/chat's freeform reply mode was unreliable at
+// returning a fixed-length JSON array for every field asked about, silently dropping entries).
+export async function askOllama(prompt, maxTokens) {
   const data = await callOllama('/api/generate', { prompt, options: { num_predict: maxTokens } });
   return data.response?.trim() || '';
 }
@@ -89,7 +93,7 @@ export async function chatWithAssistant(system, history) {
 
 // The model is instructed to return raw JSON, but this defensively strips a ```json fence if one
 // slips through anyway rather than failing the whole request over formatting.
-function parseJsonReply(text) {
+export function parseJsonReply(text) {
   const jsonText = text.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
   try {
     return JSON.parse(jsonText);
@@ -131,6 +135,23 @@ export async function suggestJobDescription(title, departmentName) {
   const text = await askOllama(prompt, 500);
   if (!text) throw new Error('AI Assist returned an empty response — please write the description manually.');
   return { job_description: text };
+}
+
+// Drafts a warm festival/occasion greeting — distinct from suggestAnnouncementBody below (which
+// writes plain operational notices like "office closed"): this is meant to read like a genuine
+// greeting from company leadership, sent to every employee's inbox, not a policy/logistics notice.
+// The occasion name is the only fact the model may state as real (never invents a date/holiday
+// detail), same "no invented specifics" guardrail as the offer letter prompt.
+export async function generateFestivalGreeting({ occasionName, companyName }) {
+  if (!occasionName?.trim()) throw new Error('An occasion name is required (e.g. Diwali, Independence Day, New Year)');
+
+  const prompt = `Write a warm, genuine festival/occasion greeting message from a company to all of its employees, for the occasion of "${occasionName.trim()}".
+
+This should read like a heartfelt greeting from company leadership, not a policy notice — celebratory and warm, thanking employees for their contributions, wishing them and their families well for the occasion. 3-5 sentences, plain text, no markdown, no bracketed placeholders (no [Company Name], no [Date], no [Your Name]). Sign off as "${companyName?.trim() || 'the Company'} Leadership Team" — never a placeholder for an individual's name. Do not invent any specific company policy, holiday date, or detail beyond the occasion name itself. Respond with ONLY the greeting text, nothing else.`;
+
+  const text = await askOllama(prompt, 350);
+  if (!text) throw new Error('AI could not draft a greeting — please write it manually.');
+  return { title: `${occasionName.trim()} Greetings from ${companyName?.trim() || 'the Company'}!`, body: text };
 }
 
 // Suggests an announcement body from its title (+ category). Plain text, same reasoning as above.
@@ -268,6 +289,78 @@ Respond with ONLY a single JSON object, no markdown, no explanation:
     };
   } catch {
     return { score: null, communicationScore: null, eligible: null, summary: 'AI scoring did not return a usable result for this transcript — please review the answers manually.', strengths: '', concerns: '' };
+  }
+}
+
+// Knowledge Transfer — Weekly Idea Contribution. Checks a newly-submitted idea against every
+// existing APPROVED idea on file (capped by the caller, see ideas.routes.js) for duplication —
+// judged on substance ("the same underlying suggestion", not just similar wording), not exact
+// text match, since that's cheap enough to do without AI. Defaults to "not a duplicate" if the
+// model/JSON output misbehaves, rather than blocking a legitimate new idea over a formatting
+// hiccup — a false negative here just means an actual duplicate slips through occasionally,
+// which is a far smaller cost than incorrectly blocking every submission when Ollama is flaky.
+export async function checkIdeaDuplicate(title, description, existingIdeas) {
+  if (!existingIdeas?.length) return { isDuplicate: false, duplicateOfId: null, reason: '' };
+
+  const list = existingIdeas.map((idea, i) => `${i + 1}. "${idea.title}": ${idea.description.slice(0, 300)}`).join('\n');
+  const prompt = `You are screening employee-submitted ideas for improving an internal company HRMS (HR system) for duplicates, as part of a weekly innovation program.
+
+NEW idea just submitted:
+Title: "${title}"
+Description: ${description}
+
+EXISTING ideas already on file (numbered):
+${list}
+
+Decide if the NEW idea is a duplicate or highly similar in SUBSTANCE to any EXISTING idea — the same underlying suggestion counts as a duplicate even if worded completely differently; a genuinely different idea about a similar general area (e.g. two different ideas both about "improving Attendance") is NOT a duplicate. Respond with ONLY a single JSON object, no markdown:
+{"is_duplicate": true or false, "duplicate_number": <the number from the list above it matches, or null if not a duplicate>, "reason": "<one sentence explaining the decision>"}`;
+
+  try {
+    const parsed = parseJsonReply(await askOllama(prompt, 200));
+    const isDuplicate = parsed.is_duplicate === true;
+    const idx = Number(parsed.duplicate_number);
+    const matched = isDuplicate && Number.isFinite(idx) && existingIdeas[idx - 1] ? existingIdeas[idx - 1] : null;
+    return { isDuplicate: !!matched, duplicateOfId: matched?.id ?? null, reason: parsed.reason?.toString().trim() || '' };
+  } catch {
+    return { isDuplicate: false, duplicateOfId: null, reason: '' };
+  }
+}
+
+// Scores a unique idea on 5 named dimensions (0-100 each) plus one overall figure — these are
+// the ONLY numbers ever stored for an idea (never hand-edited by HR, same "AI-graded, not
+// manually overridable" rule as interview scoring above). Falls back to a neutral all-50 score
+// with a clear "needs manual review" note if the model/JSON output misbehaves, rather than
+// leaving the submission with no score at all.
+export async function scoreIdea(title, description) {
+  const prompt = `You are evaluating an employee-submitted idea for improving an internal company HRMS (HR system), as part of a weekly employee innovation program.
+
+Idea title: "${title}"
+Idea description: ${description}
+
+Score this idea on exactly these 5 dimensions, each an integer 0-100:
+- originality: how novel/non-obvious is this suggestion?
+- usefulness: how genuinely useful would this be in practice?
+- impact: how much positive difference could this make for employees or the company?
+- clarity: how clearly and specifically is the idea explained (vague ideas score low here even if the concept is good)?
+- feasibility: how realistic and practical would this be to actually build?
+
+Then give one overall score 0-100 (your own holistic judgment — not required to be a plain average of the five) and one short sentence of constructive feedback.
+
+Respond with ONLY a single JSON object, no markdown:
+{"originality": <int>, "usefulness": <int>, "impact": <int>, "clarity": <int>, "feasibility": <int>, "overall": <int>, "feedback": "<one sentence>"}`;
+
+  const clamp = (n) => Math.max(0, Math.min(100, Math.round(Number(n))));
+  try {
+    const parsed = parseJsonReply(await askOllama(prompt, 300));
+    const scores = ['originality', 'usefulness', 'impact', 'clarity', 'feasibility', 'overall'].map((k) => clamp(parsed[k]));
+    if (scores.some((n) => !Number.isFinite(n))) throw new Error('incomplete scores');
+    const [originality, usefulness, impact, clarity, feasibility, overall] = scores;
+    return { originality, usefulness, impact, clarity, feasibility, overall, feedback: parsed.feedback?.toString().trim() || '' };
+  } catch {
+    return {
+      originality: 50, usefulness: 50, impact: 50, clarity: 50, feasibility: 50, overall: 50,
+      feedback: 'AI scoring did not return a usable result for this idea — treat this as a placeholder score, not a real assessment.'
+    };
   }
 }
 

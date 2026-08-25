@@ -118,11 +118,40 @@ router.get('/my-courses', (req, res) => {
     ...r,
     materials: db.prepare('SELECT id, title, file_type, created_at, data_url FROM course_materials WHERE course_id = ? ORDER BY created_at').all(r.course_id).map((m) => {
       const reqRow = db.prepare('SELECT status FROM material_download_requests WHERE material_id = ? AND employee_id = ? ORDER BY created_at DESC LIMIT 1').get(m.id, me.id);
-      return { ...m, downloadRequestStatus: reqRow ? reqRow.status : null };
+      const progress = db.prepare('SELECT watched_seconds, duration_seconds, completed, last_watched_at FROM course_material_progress WHERE material_id = ? AND employee_id = ?').get(m.id, me.id);
+      return { ...m, downloadRequestStatus: reqRow ? reqRow.status : null, progress: progress || null };
     }),
     hasAssessment: db.prepare('SELECT COUNT(*) c FROM course_questions WHERE course_id = ?').get(r.course_id).c > 0
   }));
   res.json({ enrollments });
+});
+
+// Employee's own video player reports its furthest playback position periodically (throttled
+// client-side) and on pause/end — see ProtectedMaterial's onTimeUpdate in Learning.jsx. Only ever
+// increases watched_seconds (a scrub backward and rewatch doesn't reduce or double-count it), and
+// only for a material in a course this employee is actually enrolled in.
+router.post('/materials/:id/progress', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
+  const material = db.prepare('SELECT id, course_id FROM course_materials WHERE id = ? AND file_type = ?').get(req.params.id, 'video');
+  if (!material) return res.status(404).json({ error: 'Video material not found.' });
+  const enrolled = db.prepare('SELECT 1 FROM course_enrollments WHERE course_id = ? AND employee_id = ?').get(material.course_id, me.id);
+  if (!enrolled) return res.status(403).json({ error: 'You are not enrolled in that course.' });
+
+  const position = Math.max(0, Math.round(Number(req.body?.position) || 0));
+  const duration = Math.max(0, Math.round(Number(req.body?.duration) || 0)) || null;
+  const existing = db.prepare('SELECT watched_seconds FROM course_material_progress WHERE material_id = ? AND employee_id = ?').get(material.id, me.id);
+  const watched = Math.max(position, existing?.watched_seconds || 0);
+  const completed = duration && watched >= duration * 0.9 ? 1 : 0;
+
+  if (existing) {
+    db.prepare("UPDATE course_material_progress SET watched_seconds = ?, duration_seconds = COALESCE(?, duration_seconds), completed = MAX(completed, ?), last_watched_at = datetime('now') WHERE material_id = ? AND employee_id = ?")
+      .run(watched, duration, completed, material.id, me.id);
+  } else {
+    db.prepare("INSERT INTO course_material_progress (material_id, employee_id, watched_seconds, duration_seconds, completed, last_watched_at) VALUES (?, ?, ?, ?, ?, datetime('now'))")
+      .run(material.id, me.id, watched, duration, completed);
+  }
+  res.json({ ok: true });
 });
 
 // Employee: ask Super Admin/HR Admin to lift view-only on one specific file/video. Only for
@@ -427,7 +456,16 @@ router.get('/courses/:id/enrollments', (req, res) => {
     SELECT ce.*, e.name, e.employee_code, e.department
     FROM course_enrollments ce JOIN employees e ON e.id = ce.employee_id
     WHERE ce.course_id = ? ORDER BY e.name
-  `).all(req.params.id);
+  `).all(req.params.id).map((e) => ({
+    ...e,
+    // Total real watch time across every video material in this course, for this employee —
+    // visible to HR/managers on this roster, alongside their assessment status.
+    watchedSeconds: db.prepare(`
+      SELECT COALESCE(SUM(cmp.watched_seconds), 0) AS s FROM course_material_progress cmp
+      JOIN course_materials cm ON cm.id = cmp.material_id
+      WHERE cm.course_id = ? AND cmp.employee_id = ?
+    `).get(req.params.id, e.employee_id).s
+  }));
   const enrolledIds = new Set(enrollments.map((e) => e.employee_id));
   const employees = db.prepare("SELECT id, name, employee_code FROM employees WHERE status = 'Active' ORDER BY name").all()
     .filter((e) => !enrolledIds.has(e.id));
@@ -515,13 +553,21 @@ router.get('/enrollments', (req, res) => {
   const scoped = isScopedRole(req.user.role);
   const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(getSupervisorScope(myEmployee(req.user.sub)?.id))) : null;
   let rows = db.prepare(`
-    SELECT ce.id, ce.completed, ce.score, ce.certificate_issued, e.name AS employee_name, e.id AS employee_id, e.department, c.title AS course_title
+    SELECT ce.id, ce.course_id, ce.completed, ce.score, ce.certificate_issued, e.name AS employee_name, e.id AS employee_id, e.department, c.title AS course_title
     FROM course_enrollments ce JOIN employees e ON e.id = ce.employee_id JOIN courses c ON c.id = ce.course_id
     ORDER BY ce.created_at DESC
   `).all();
   if (scoped) rows = rows.filter((r) => r.department && scopeDeptNames.has(r.department));
   const status = (r) => (r.certificate_issued ? 'Certified' : (r.completed ? 'Assessed' : 'In Progress'));
-  res.json({ enrollments: rows.map((r) => ({ ...r, status: status(r) })), courses: db.prepare('SELECT id, title FROM courses ORDER BY title').all() });
+  const watchedSecondsFor = (courseId, employeeId) => db.prepare(`
+    SELECT COALESCE(SUM(cmp.watched_seconds), 0) AS s FROM course_material_progress cmp
+    JOIN course_materials cm ON cm.id = cmp.material_id
+    WHERE cm.course_id = ? AND cmp.employee_id = ?
+  `).get(courseId, employeeId).s;
+  res.json({
+    enrollments: rows.map((r) => ({ ...r, status: status(r), watchedSeconds: watchedSecondsFor(r.course_id, r.employee_id) })),
+    courses: db.prepare('SELECT id, title FROM courses ORDER BY title').all()
+  });
 });
 
 router.post('/enrollments', (req, res) => {

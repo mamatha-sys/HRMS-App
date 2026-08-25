@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -93,10 +93,50 @@ function certificateHtml({ enrollment: en, company }) {
 // Quick Actions > Request Material Download). This deters casual copying via the browser UI —
 // it isn't cryptographic DRM (a determined user can still access dev tools), but it removes
 // the obvious escape hatches for anyone who hasn't been granted download access.
+function formatWatchSeconds(s) {
+  if (!s) return '0:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
 function ProtectedMaterial({ material }) {
   const approved = material.downloadRequestStatus === 'Approved';
   const pending = material.downloadRequestStatus === 'Pending';
   const rejected = material.downloadRequestStatus === 'Rejected';
+  const isVideo = material.file_type === 'video';
+
+  // Real watch-time tracking off the <video> element's own events — furthest position ever
+  // reached, not cumulative play time, so scrubbing/rewatching a section never inflates it.
+  // Reported to the server throttled (every ~10s of playback) plus on pause/seek/end, so a
+  // page reload never loses more than ~10s of progress. Seeded from prior progress (if any) so
+  // returning to a video mid-course shows where they left off immediately, before it even plays.
+  const [watchedSeconds, setWatchedSeconds] = useState(material.progress?.watched_seconds || 0);
+  const [duration, setDuration] = useState(material.progress?.duration_seconds || 0);
+  const lastSentRef = useRef(0);
+  const videoRef = useRef(null);
+
+  function reportProgress(position, dur) {
+    if (position <= lastSentRef.current + 5 && dur === duration) return; // throttle: only every ~5s of new ground, or a duration change
+    lastSentRef.current = position;
+    api.post(`/learning/materials/${material.id}/progress`, { position, duration: dur }).catch(() => {});
+  }
+  function onTimeUpdate(e) {
+    const v = e.currentTarget;
+    const pos = Math.floor(v.currentTime);
+    const dur = Math.floor(v.duration) || duration;
+    if (pos > watchedSeconds) setWatchedSeconds(pos);
+    if (dur && dur !== duration) setDuration(dur);
+    if (pos - lastSentRef.current >= 10) reportProgress(Math.max(pos, watchedSeconds), dur);
+  }
+  function onPauseOrEnd(e) {
+    const v = e.currentTarget;
+    const pos = Math.floor(v.currentTime);
+    reportProgress(Math.max(pos, watchedSeconds), Math.floor(v.duration) || duration);
+  }
+
+  const pct = duration ? Math.min(100, Math.round((watchedSeconds / duration) * 100)) : null;
+
   return (
     <div style={{ marginBottom: 10, userSelect: approved ? 'auto' : 'none' }} onContextMenu={(e) => { if (!approved) e.preventDefault(); }}>
       <div className="feature-meta" style={{ marginBottom: 4 }}>
@@ -106,12 +146,29 @@ function ProtectedMaterial({ material }) {
           : rejected ? <span className="status-tag absent" style={{ marginLeft: 6 }}>Download request rejected</span>
           : <span className="status-tag pending" style={{ marginLeft: 6 }}>View only</span>}
       </div>
-      {material.file_type === 'video' ? (
-        <video src={material.data_url} controls controlsList={approved ? 'noremoteplayback' : 'nodownload noremoteplayback'} disablePictureInPicture style={{ width: '100%', maxWidth: 480, borderRadius: 6 }} />
+      {isVideo ? (
+        <video
+          ref={videoRef}
+          src={material.data_url}
+          controls
+          controlsList={approved ? 'noremoteplayback' : 'nodownload noremoteplayback'}
+          disablePictureInPicture
+          style={{ width: '100%', maxWidth: 480, borderRadius: 6 }}
+          onTimeUpdate={onTimeUpdate}
+          onPause={onPauseOrEnd}
+          onEnded={onPauseOrEnd}
+          onLoadedMetadata={(e) => { if (!duration) setDuration(Math.floor(e.currentTarget.duration) || 0); }}
+        />
       ) : material.file_type === 'pdf' ? (
         <iframe src={material.data_url + '#toolbar=0'} title={material.title} style={{ width: '100%', height: 380, border: '1px solid #E2E5EA', borderRadius: 6 }} />
       ) : (
         <a href={material.data_url} target="_blank" rel="noreferrer">{material.title}</a>
+      )}
+      {isVideo && (watchedSeconds > 0 || duration > 0) && (
+        <div className="feature-meta" style={{ marginTop: 4 }}>
+          Watched: {formatWatchSeconds(watchedSeconds)}{duration ? ` / ${formatWatchSeconds(duration)} (${pct}%)` : ''}
+          {pct >= 90 && ' ✓'}
+        </div>
       )}
       {approved && <div style={{ marginTop: 6 }}><a className="pill" href={material.data_url} download={material.title}>Download {material.title}</a></div>}
     </div>
@@ -965,6 +1022,7 @@ function CourseDetailScreen({ courseId, onManageAssessment, onBack }) {
                     from the employee actually taking and submitting their own assessment
                     (server-side auto-graded, see POST /my-courses/:courseId/assessment). */}
                 {e.completed && e.score != null && <div className="feature-meta">Assessment score: {e.score}%</div>}
+                <div className="feature-meta">Video watch time: {e.watchedSeconds > 0 ? formatWatchSeconds(e.watchedSeconds) : 'Not started'}</div>
               </div>
             ))}
             <form onSubmit={enroll} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
@@ -1044,9 +1102,13 @@ function EnrollmentScreen({ canManage, onBack }) {
         {data && data.enrollments.length === 0 && <div className="empty">No enrollments yet.</div>}
         {data && data.enrollments.length > 0 && (
           <table>
-            <thead><tr><th>Employee</th><th>Course</th><th>Status</th></tr></thead>
+            <thead><tr><th>Employee</th><th>Course</th><th>Status</th><th>Video Watch Time</th></tr></thead>
             <tbody>{data.enrollments.map((e) => (
-              <tr key={e.id}><td>{e.employee_name}</td><td>{e.course_title}</td><td><span className={'status-tag ' + statusClass(e.status)}>{e.status}</span></td></tr>
+              <tr key={e.id}>
+                <td>{e.employee_name}</td><td>{e.course_title}</td>
+                <td><span className={'status-tag ' + statusClass(e.status)}>{e.status}</span></td>
+                <td>{e.watchedSeconds > 0 ? formatWatchSeconds(e.watchedSeconds) : '—'}</td>
+              </tr>
             ))}</tbody>
           </table>
         )}

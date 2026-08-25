@@ -30,6 +30,9 @@ export default function Announcements() {
   const [options, setOptions] = useState({ departments: [], employees: [] });
   const [deliveries, setDeliveries] = useState([]);
   const [aiLoading, setAiLoading] = useState(false);
+  const [festivalMode, setFestivalMode] = useState(false);
+  const [occasion, setOccasion] = useState('');
+  const [festivalLoading, setFestivalLoading] = useState(false);
 
   function load() { api.get('/announcements').then((r) => setAnnouncements(r.data.announcements)).catch(() => setError('Could not load announcements.')); }
   useEffect(load, []);
@@ -53,6 +56,25 @@ export default function Announcements() {
     } catch (err) { setError(err.response?.data?.error || 'AI Assist could not draft an announcement.'); }
     finally { setAiLoading(false); }
   }
+  function openFestivalGreeting() {
+    setError('');
+    setForm({ title: '', body: '', category: 'Holiday', pinned: false });
+    setTargetMode('all'); setTargetDepartment(''); setEmployeeIds([]);
+    setChannels(['email']);
+    setOccasion('');
+    setFestivalMode(true);
+    setShowForm(true);
+  }
+  async function draftFestivalGreeting() {
+    setError('');
+    if (!occasion.trim()) { setError('Enter the occasion first (e.g. Diwali, Independence Day, New Year).'); return; }
+    setFestivalLoading(true);
+    try {
+      const r = await api.post('/announcements/festival-greeting', { occasion });
+      setForm((f) => ({ ...f, title: r.data.title || f.title, body: r.data.body || f.body }));
+    } catch (err) { setError(err.response?.data?.error || 'Could not draft a greeting.'); }
+    finally { setFestivalLoading(false); }
+  }
   async function submit(e) {
     e.preventDefault(); setError('');
     if (!form.title.trim() || !form.body.trim()) { setError('Title and body are both required.'); return; }
@@ -66,7 +88,8 @@ export default function Announcements() {
       });
       setForm({ title: '', body: '', category: 'General', pinned: false });
       setTargetMode('all'); setTargetDepartment(''); setEmployeeIds([]); setChannels([]);
-      setShowForm(false); load();
+      setShowForm(false); setFestivalMode(false); setOccasion('');
+      load();
     }
     catch (err) { setError(err.response?.data?.error || 'Could not post announcement.'); }
     finally { setSending(false); }
@@ -119,6 +142,16 @@ export default function Announcements() {
         <div className="card" style={{ marginBottom: 14 }}>
           {showForm ? (
             <form onSubmit={submit}>
+              {festivalMode && (
+                <div className="banner info" style={{ marginBottom: 10 }}>
+                  <div className="feature-name" style={{ marginBottom: 6 }}>🎉 Festival Greeting</div>
+                  <div className="row" style={{ marginBottom: 4 }}>
+                    <input placeholder="Occasion — e.g. Diwali, Independence Day, New Year" value={occasion} onChange={(e) => setOccasion(e.target.value)} style={{ flex: 1 }} />
+                    <button type="button" onClick={draftFestivalGreeting} disabled={festivalLoading}>{festivalLoading ? 'Drafting…' : '✨ Draft Greeting'}</button>
+                  </div>
+                  <div className="feature-meta">Drafts a warm greeting below — review/edit it, then Post to email every employee (Send to: Everyone, Email already selected).</div>
+                </div>
+              )}
               <label className="field-label">Title *</label>
               <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} required style={{ marginBottom: 10 }} />
               <div className="row" style={{ marginBottom: 6 }}>
@@ -170,11 +203,14 @@ export default function Announcements() {
               </label>
               <div className="row" style={{ marginTop: 10 }}>
                 <button className="primary" type="submit" disabled={sending}>{sending ? 'Posting…' : 'Post Announcement'}</button>
-                <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+                <button type="button" onClick={() => { setShowForm(false); setFestivalMode(false); setOccasion(''); }}>Cancel</button>
               </div>
             </form>
           ) : (
-            <button className="primary" onClick={() => setShowForm(true)}>+ Post Announcement</button>
+            <div className="row">
+              <button className="primary" onClick={() => setShowForm(true)}>+ Post Announcement</button>
+              <button onClick={openFestivalGreeting}>🎉 Send Festival Greeting</button>
+            </div>
           )}
         </div>
       )}

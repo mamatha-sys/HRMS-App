@@ -45,12 +45,17 @@ router.get('/', (req, res) => {
             ))
          OR (n.employee_id IS NULL AND n.target_department IS NULL AND n.target_role = ?))
         AND (n.ticket_id IS NULL OR NOT EXISTS (SELECT 1 FROM tickets t WHERE t.id = n.ticket_id AND t.status IN ('Resolved','Closed')))
+        AND NOT EXISTS (SELECT 1 FROM notification_reads r2 WHERE r2.notification_id = n.id AND r2.user_id = ?)
       ORDER BY n.created_at DESC
       LIMIT 30
-    `).all(req.user.sub, employee ? employee.id : null, ...names, ...names, req.user.role);
+    `).all(req.user.sub, employee ? employee.id : null, ...names, ...names, req.user.role, req.user.sub);
     return res.json({ notifications: rows.map((r) => ({ ...r, is_read: !!r.is_read })) });
   }
 
+  // Once marked read, a notification drops off this list entirely (this endpoint only backs the
+  // Dashboard's Alerts & Notifications widget — see NotificationsWidget.jsx, its only consumer —
+  // so "read" here really does mean "dealt with, stop showing it on the dashboard" rather than a
+  // read/unread toggle on a persistent inbox).
   const rows = db.prepare(`
     SELECT n.*, EXISTS(SELECT 1 FROM notification_reads r WHERE r.notification_id = n.id AND r.user_id = @uid) AS is_read
     FROM notifications n
@@ -58,6 +63,7 @@ router.get('/', (req, res) => {
        OR (n.employee_id IS NULL AND n.target_department IS NOT NULL AND n.target_department = @dept)
        OR (n.employee_id IS NULL AND n.target_department IS NULL AND (n.target_role = 'all' OR (n.target_role = 'staff' AND @role != 'employee') OR n.target_role = @role)))
       AND (n.ticket_id IS NULL OR NOT EXISTS (SELECT 1 FROM tickets t WHERE t.id = n.ticket_id AND t.status IN ('Resolved','Closed')))
+      AND NOT EXISTS (SELECT 1 FROM notification_reads r2 WHERE r2.notification_id = n.id AND r2.user_id = @uid)
     ORDER BY n.created_at DESC
     LIMIT 30
   `).all({ uid: req.user.sub, role: req.user.role, empId: employee ? employee.id : null, dept: employee ? employee.department : null });

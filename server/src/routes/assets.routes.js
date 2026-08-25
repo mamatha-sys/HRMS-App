@@ -29,7 +29,7 @@ const SCOPE_BANNER = {
 };
 
 const KEY_FEATURES = [
-  { key: 'inventory', label: 'Asset Inventory & Allocation', screen: 'dashboard' },
+  { key: 'inventory', label: 'Asset Inventory & Allocation', screen: 'inventory' },
   { key: 'transfer', label: 'Asset Transfer', screen: 'transfer' },
   { key: 'return', label: 'Asset Return', screen: 'return' },
   { key: 'maintenance', label: 'Asset Maintenance & Repair', screen: 'maintenance' },

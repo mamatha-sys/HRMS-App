@@ -64,6 +64,16 @@ router.post('/ai-assist', async (req, res) => {
   }
 });
 
+// Drafts the JD from the position's own title/department, and stamps jd_date to today (matching
+// what a human filling in "JD (date)" by hand would do) — shared by the auto-draft-on-create path
+// below and the manual regenerate endpoint further down.
+async function draftJobDescription(positionId, title, departmentName) {
+  const { job_description } = await suggestJobDescription(title, departmentName);
+  const today = new Date().toISOString().slice(0, 10);
+  db.prepare('UPDATE positions SET job_description = ?, jd_date = ? WHERE id = ?').run(job_description, today, positionId);
+  return job_description;
+}
+
 router.post('/', (req, res) => {
   if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { department_id, title, target_headcount, is_replacement, replacement_for, replacement_target_date, job_description, jd_date } = req.body || {};
@@ -88,7 +98,46 @@ router.post('/', (req, res) => {
     `)
     .run(department_id, title, count, req.user.name || null, replacing ? 1 : 0, replacing ? replacement_for.trim() : null,
       replacing ? (replacement_target_date || null) : null, job_description?.trim() || null, jd_date || null);
-  res.status(201).json({ position: db.prepare('SELECT * FROM positions WHERE id = ?').get(info.lastInsertRowid) });
+
+  const positionId = info.lastInsertRowid;
+  // HR left the JD blank — respond with the requisition already created (never make requisition
+  // creation itself wait 10-30s on the model), then draft the JD in the background exactly like
+  // the Offer Letter flow: the client polls and shows a "drafting" placeholder in the meantime.
+  const jdPending = !job_description?.trim();
+  res.status(201).json({ position: db.prepare('SELECT * FROM positions WHERE id = ?').get(positionId), jdPending });
+
+  if (jdPending) {
+    draftJobDescription(positionId, title, dept.name).catch(() => {
+      // Local AI unavailable/flaky — requisition itself is unaffected; HR can still write the JD
+      // by hand or hit the manual AI Assist / Regenerate button later.
+    });
+  }
+});
+
+// Manual re-draft — same helper the auto-draft-on-create path uses, for when HR wants a fresh
+// attempt (a flaky/empty first draft) or just wants the AI to try again after editing the title.
+router.post('/:id/job-description/regenerate', async (req, res) => {
+  if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const position = db.prepare('SELECT * FROM positions WHERE id = ?').get(req.params.id);
+  if (!position) return res.status(404).json({ error: 'Position not found' });
+  try {
+    const dept = db.prepare('SELECT name FROM departments WHERE id = ?').get(position.department_id);
+    await draftJobDescription(position.id, position.title, dept?.name);
+    res.json({ position: db.prepare('SELECT * FROM positions WHERE id = ?').get(position.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// HR hand-edits the AI draft (or writes their own from scratch).
+router.put('/:id/job-description', (req, res) => {
+  if (!REQUISITION_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const position = db.prepare('SELECT * FROM positions WHERE id = ?').get(req.params.id);
+  if (!position) return res.status(404).json({ error: 'Position not found' });
+  const text = req.body?.job_description;
+  if (!text?.trim()) return res.status(400).json({ error: 'Job description text is required.' });
+  db.prepare('UPDATE positions SET job_description = ? WHERE id = ?').run(text.trim(), position.id);
+  res.json({ position: db.prepare('SELECT * FROM positions WHERE id = ?').get(position.id) });
 });
 
 router.put('/:id', requireRole('super_admin', 'manager'), (req, res) => {

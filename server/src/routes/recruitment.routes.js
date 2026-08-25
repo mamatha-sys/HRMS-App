@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
-import { recomputeOffboardingClearance } from '../utils/offboarding.js';
+import { recomputeOffboardingClearance, autoCompleteOffboardingTask } from '../utils/offboarding.js';
 import { sendEmail, sendWhatsapp } from '../utils/channels.js';
 import { generateInterviewQuestions, generateOfferLetter } from '../utils/aiAssist.js';
 import { extractResumeText, screenResume } from '../utils/resumeScreen.js';
@@ -135,8 +135,34 @@ function taskProgress(rows) {
   return { total, completed, pct: total > 0 ? Math.round((completed / total) * 100) : 0 };
 }
 
+// Auto-disables (never deletes) an exiting employee's login the moment their Last Working Day
+// arrives — access stays live through the notice period (so they can still do handover work),
+// then gets cut on/after LWD regardless of whether the rest of the offboarding checklist (asset
+// return, finance clearance, etc.) is finished, since login access is a security concern that
+// shouldn't wait on paperwork. Same "lazy check at the top of a list endpoint" idiom as
+// sendPendingLeaveReminders/sendSlaBreachReminders — no cron/scheduler, just re-runs (cheaply,
+// since the WHERE clause only matches rows that still need it) every time /overview loads.
+function autoDisableExitedLogins() {
+  const due = db.prepare(`
+    SELECT x.id AS exit_id, e.id AS employee_id, e.name, u.id AS user_id
+    FROM exits x
+    JOIN employees e ON e.id = x.employee_id
+    JOIN users u ON u.id = e.user_id
+    WHERE x.status = 'Serving Notice' AND x.last_working_day IS NOT NULL
+      AND date(x.last_working_day) <= date('now') AND u.active = 1
+  `).all();
+  due.forEach((row) => {
+    db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(row.user_id);
+    db.prepare("UPDATE employees SET status = 'Exited' WHERE id = ?").run(row.employee_id);
+    autoCompleteOffboardingTask(row.employee_id, 'Revoke system login access');
+    db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
+      .run('Employee Login Auto-Disabled', `${row.name}'s login was automatically disabled — their Last Working Day has arrived. The account still exists (not deleted) and can be reactivated from Employee Management if needed.`, 'staff');
+  });
+}
+
 router.get('/overview', (req, res) => {
   if (!canViewRecruitment(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  autoDisableExitedLogins();
   const scoped = isScopedRole(req.user.role);
   const scope = scoped ? getSupervisorScope(myEmployee(req.user.sub)?.id) : null;
   const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(scope)) : null;

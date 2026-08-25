@@ -34,6 +34,7 @@ import Recognition from './pages/Recognition.jsx';
 import Projects from './pages/Projects.jsx';
 import Timesheet from './pages/Timesheet.jsx';
 import Disciplinary from './pages/Disciplinary.jsx';
+import KnowledgeTransfer from './pages/KnowledgeTransfer.jsx';
 import ProtectedRoute from './components/ProtectedRoute.jsx';
 import RequireSuperAdmin from './components/RequireSuperAdmin.jsx';
 import AppLayout from './components/AppLayout.jsx';
@@ -71,6 +72,7 @@ export default function App() {
         <Route path="/projects" element={<Projects />} />
         <Route path="/timesheet" element={<Timesheet />} />
         <Route path="/disciplinary" element={<Disciplinary />} />
+        <Route path="/knowledge-transfer" element={<KnowledgeTransfer />} />
         <Route path="/reports" element={<Reports />} />
         <Route path="/custom/:moduleId/:featureId" element={<CustomFeature />} />
         <Route path="/configurations" element={<RequireSuperAdmin><Configurations /></RequireSuperAdmin>} />

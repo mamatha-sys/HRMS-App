@@ -8,6 +8,7 @@ const FULL_HR_ROLES = ['super_admin'];
 // (MyProjects) AND the company project list below it, rather than one replacing the other.
 const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const STATUS_CLASS = { Active: 'present', 'On Hold': 'pending', Completed: 'locked' };
+const TIMESHEET_STATUS_CLASS = { Pending: 'pending', Approved: 'present', Rejected: 'absent' };
 
 export default function Projects() {
   const { user } = useAuth();
@@ -17,20 +18,21 @@ export default function Projects() {
 
   if (screen === 'detail') return <ProjectDetail id={selectedId} isHR={isHR} onBack={() => setScreen('list')} />;
   if (screen === 'resources') return <ResourceOverview onBack={() => setScreen('list')} />;
+  if (screen === 'timesheetReports') return <TimesheetReportsScreen onBack={() => setScreen('list')} />;
 
   if (FULL_HR_ROLES.includes(user?.role)) {
-    return <ProjectList onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />;
+    return <ProjectList onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} onTimesheetReports={() => setScreen('timesheetReports')} />;
   }
   if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
     return (<>
       <MyProjects compact />
-      <ProjectList compact sectionLabel="Company Projects" onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} />
+      <ProjectList compact sectionLabel="Company Projects" onOpen={(id) => { setSelectedId(id); setScreen('detail'); }} onResources={() => setScreen('resources')} onTimesheetReports={() => setScreen('timesheetReports')} />
     </>);
   }
   return <MyProjects />;
 }
 
-function ProjectList({ onOpen, onResources, compact, sectionLabel }) {
+function ProjectList({ onOpen, onResources, onTimesheetReports, compact, sectionLabel }) {
   const [projects, setProjects] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
@@ -51,9 +53,12 @@ function ProjectList({ onOpen, onResources, compact, sectionLabel }) {
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <div>
           {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Projects'}</div> : <h1>Project &amp; Resource Management</h1>}
-          {!compact && <div className="subtitle">Track projects and who's allocated to them.</div>}
+          {!compact && <div className="subtitle">Track projects, hours logged against them, and who's allocated to them.</div>}
         </div>
-        <button onClick={onResources}>Resource Overview</button>
+        <div className="row" style={{ gap: 6 }}>
+          <button onClick={onTimesheetReports}>Timesheet Reports</button>
+          <button onClick={onResources}>Resource Overview</button>
+        </div>
       </div>
       {error && <div className="banner error">{error}</div>}
 
@@ -69,7 +74,7 @@ function ProjectList({ onOpen, onResources, compact, sectionLabel }) {
         ) : <button className="primary" onClick={() => setShowForm(true)}>+ Add Project</button>}
       </div>
 
-      <div className="card">
+      <div className="card" style={{ marginBottom: 14 }}>
         {projects.length === 0 && <div className="empty">No projects yet.</div>}
         {projects.map((p) => (
           <div key={p.id} className="rec-row" onClick={() => onOpen(p.id)} style={{ cursor: 'pointer' }}>
@@ -80,6 +85,8 @@ function ProjectList({ onOpen, onResources, compact, sectionLabel }) {
           </div>
         ))}
       </div>
+
+      <TimesheetApprovalSection />
     </div>
   );
 }
@@ -182,6 +189,128 @@ function ResourceOverview({ onBack }) {
   );
 }
 
+// Total approved hours by project, and by employee.
+function TimesheetReportsScreen({ onBack }) {
+  const [byProject, setByProject] = useState([]);
+  const [byEmployee, setByEmployee] = useState([]);
+  useEffect(() => { api.get('/projects/timesheet/reports').then((r) => { setByProject(r.data.byProject); setByEmployee(r.data.byEmployee); }).catch(() => {}); }, []);
+
+  return (
+    <div>
+      <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Projects</button>
+      <h1>Timesheet Reports</h1>
+      <div className="subtitle">Total approved hours by project and by employee.</div>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="feature-name" style={{ marginBottom: 8 }}>By Project</div>
+        {byProject.map((p, i) => (
+          <div key={i} className="rec-row"><span>{p.project_name}</span><span>{p.total_hours}h</span></div>
+        ))}
+      </div>
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>By Employee</div>
+        {byEmployee.map((e, i) => (
+          <div key={i} className="rec-row"><span>{e.employee_name}</span><span>{e.total_hours}h</span></div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// HR/manager-facing card: review and approve/reject hours employees have logged against
+// projects. Shown beneath the project list — same audience as the rest of this admin view
+// (company-wide HR-tier, or scoped for Assistant Manager/STL/TL).
+function TimesheetApprovalSection() {
+  const [entries, setEntries] = useState([]);
+  const [error, setError] = useState('');
+
+  function load() { api.get('/projects/timesheet/overview').then((r) => setEntries(r.data.entries)).catch(() => setError('Could not load timesheet entries.')); }
+  useEffect(load, []);
+
+  async function decide(id, decision) {
+    try { await api.put(`/projects/timesheet/${id}/${decision}`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not decide.'); }
+  }
+
+  return (
+    <div className="card">
+      <div className="feature-name" style={{ marginBottom: 8 }}>Timesheet Approval</div>
+      {error && <div className="banner error">{error}</div>}
+      {entries.length === 0 && <div className="empty">No timesheet entries yet.</div>}
+      {entries.map((e) => (
+        <div key={e.id} className="rec-row">
+          <span>{e.employee_name} — <strong>{e.project_name}</strong> · {e.date} · {e.hours}h
+            {e.task_description && <div className="feature-meta">{e.task_description}</div>}
+          </span>
+          <span className="row" style={{ gap: 6 }}>
+            <span className={'status-tag ' + (TIMESHEET_STATUS_CLASS[e.status] || 'info')}>{e.status}</span>
+            {e.status === 'Pending' && <>
+              <button onClick={() => decide(e.id, 'approve')}>Approve</button>
+              <button onClick={() => decide(e.id, 'reject')}>Reject</button>
+            </>}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Employee self-service: log hours against a project I'm assigned to, and see my own entries.
+function MyTimesheetSection() {
+  const [entries, setEntries] = useState([]);
+  const [myProjects, setMyProjects] = useState([]);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({ project_id: '', date: '', task_description: '', hours: '' });
+
+  function load() { api.get('/projects/timesheet').then((r) => { setEntries(r.data.entries); setMyProjects(r.data.myProjects); }).catch(() => setError('Could not load timesheet.')); }
+  useEffect(load, []);
+
+  async function submit(e) {
+    e.preventDefault(); setError('');
+    try {
+      await api.post('/projects/timesheet', form);
+      setForm({ project_id: '', date: '', task_description: '', hours: '' });
+      setShowForm(false);
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not log hours.'); }
+  }
+
+  return (
+    <div>
+      <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>My Timesheet</div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        {showForm ? (
+          <form onSubmit={submit} className="row" style={{ flexWrap: 'wrap' }}>
+            <select value={form.project_id} onChange={(e) => setForm({ ...form, project_id: e.target.value })} required style={{ flex: '1 1 160px' }}>
+              <option value="">Select project…</option>
+              {myProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required />
+            <input placeholder="Task description" value={form.task_description} onChange={(e) => setForm({ ...form, task_description: e.target.value })} style={{ flex: '2 1 200px' }} />
+            <input type="number" step="0.5" min="0" max="24" placeholder="Hours" value={form.hours} onChange={(e) => setForm({ ...form, hours: e.target.value })} required style={{ width: 90 }} />
+            <button className="primary" type="submit">Log Hours</button>
+            <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+          </form>
+        ) : <button className="primary" onClick={() => setShowForm(true)}>+ Log Hours</button>}
+      </div>
+
+      <div className="card">
+        {entries.length === 0 && <div className="empty">No timesheet entries yet.</div>}
+        {entries.map((e) => (
+          <div key={e.id} className="rec-row">
+            <span><strong>{e.project_name}</strong> — {e.date} · {e.hours}h
+              {e.task_description && <div className="feature-meta">{e.task_description}</div>}
+            </span>
+            <span className={'status-tag ' + (TIMESHEET_STATUS_CLASS[e.status] || 'info')}>{e.status}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MyProjects({ compact }) {
   const [assignments, setAssignments] = useState([]);
   const [error, setError] = useState('');
@@ -204,6 +333,8 @@ function MyProjects({ compact }) {
           </div>
         ))}
       </div>
+
+      <MyTimesheetSection />
     </div>
   );
 }

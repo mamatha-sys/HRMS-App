@@ -2,152 +2,66 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-// Super Admin is a pure system-administrator account — admin overview only, no own timesheet.
-const FULL_HR_ROLES = ['super_admin'];
-// Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own timesheet
-// (EmployeeView) AND the company overview below it, rather than one replacing the other.
-const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
-// Assistant Manager/STL/TL can view + approve their assigned department/team's logged hours.
-// Unlike Assistant Manager, STL/TL can also assign — and view — "My Tasks" for employees within
-// their own assigned department(s)/team(s) (a supervisory action, not company-wide management).
+// Assign-to-others in My Tasks: full managers assign company-wide; STL/TL assign within their
+// own assigned department(s)/team(s) only (enforced server-side either way). Everyone else
+// (including Assistant Manager) can still see the module and their own/scoped tasks — they just
+// can't assign to someone else.
 const CAN_MANAGE_ROLES = ['super_admin', 'manager', 'hr_admin'];
 const STL_TL_ROLES = ['stl', 'tl'];
-const STATUS_CLASS = { Pending: 'pending', Approved: 'present', Rejected: 'absent' };
+// Task Reports (company-wide task-status breakdown) is visible to the same audience as the
+// scoped/company-wide view in My Tasks itself — i.e. everyone except a plain employee.
+const CAN_SEE_REPORTS_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function Timesheet() {
   const { user } = useAuth();
   const [screen, setScreen] = useState('main');
+  const canAssignTasks = CAN_MANAGE_ROLES.includes(user?.role) || STL_TL_ROLES.includes(user?.role);
+  const canSeeReports = CAN_SEE_REPORTS_ROLES.includes(user?.role);
 
-  if (screen === 'reports') return <ReportsScreen onBack={() => setScreen('main')} />;
-  if (FULL_HR_ROLES.includes(user?.role)) return <HRView onReports={() => setScreen('reports')} />;
-  if (SELF_AND_ADMIN_ROLES.includes(user?.role)) {
-    return (<><EmployeeView compact /><HRView compact sectionLabel="Company Timesheet" onReports={() => setScreen('reports')} /></>);
-  }
-  return <EmployeeView />;
-}
-
-function EmployeeView({ compact }) {
-  const [entries, setEntries] = useState([]);
-  const [myProjects, setMyProjects] = useState([]);
-  const [error, setError] = useState('');
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ project_id: '', date: '', task_description: '', hours: '' });
-
-  function load() { api.get('/timesheet').then((r) => { setEntries(r.data.entries); setMyProjects(r.data.myProjects); }).catch(() => setError('Could not load timesheet.')); }
-  useEffect(load, []);
-
-  async function submit(e) {
-    e.preventDefault(); setError('');
-    try {
-      await api.post('/timesheet', form);
-      setForm({ project_id: '', date: '', task_description: '', hours: '' });
-      setShowForm(false);
-      load();
-    } catch (err) { setError(err.response?.data?.error || 'Could not log hours.'); }
-  }
-
-  return (
-    <div>
-      {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Timesheet</div> : <h1>Timesheet</h1>}
-      {!compact && <div className="subtitle">Log hours against your assigned projects.</div>}
-      {error && <div className="banner error">{error}</div>}
-
-      <div className="card" style={{ marginBottom: 14 }}>
-        {showForm ? (
-          <form onSubmit={submit} className="row" style={{ flexWrap: 'wrap' }}>
-            <select value={form.project_id} onChange={(e) => setForm({ ...form, project_id: e.target.value })} required style={{ flex: '1 1 160px' }}>
-              <option value="">Select project…</option>
-              {myProjects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-            <input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} required />
-            <input placeholder="Task description" value={form.task_description} onChange={(e) => setForm({ ...form, task_description: e.target.value })} style={{ flex: '2 1 200px' }} />
-            <input type="number" step="0.5" min="0" max="24" placeholder="Hours" value={form.hours} onChange={(e) => setForm({ ...form, hours: e.target.value })} required style={{ width: 90 }} />
-            <button className="primary" type="submit">Log Hours</button>
-            <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
-          </form>
-        ) : <button className="primary" onClick={() => setShowForm(true)}>+ Log Hours</button>}
-      </div>
-
-      <div className="card" style={{ marginBottom: 14 }}>
-        {entries.length === 0 && <div className="empty">No timesheet entries yet.</div>}
-        {entries.map((e) => (
-          <div key={e.id} className="rec-row">
-            <span><strong>{e.project_name}</strong> — {e.date} · {e.hours}h
-              {e.task_description && <div className="feature-meta">{e.task_description}</div>}
-            </span>
-            <span className={'status-tag ' + (STATUS_CLASS[e.status] || 'info')}>{e.status}</span>
-          </div>
-        ))}
-      </div>
-
-      {!compact && <MyTasksSection isHR={false} />}
-    </div>
-  );
-}
-
-function HRView({ onReports, compact, sectionLabel }) {
-  const { user } = useAuth();
-  const canManage = CAN_MANAGE_ROLES.includes(user?.role);
-  // "Assign to others" in My Tasks: full managers assign company-wide; STL/TL assign within
-  // their own assigned department(s)/team(s) only (enforced server-side either way).
-  const canAssignTasks = canManage || STL_TL_ROLES.includes(user?.role);
-  const [entries, setEntries] = useState([]);
-  const [error, setError] = useState('');
-
-  function load() { api.get('/timesheet/overview').then((r) => setEntries(r.data.entries)).catch(() => setError('Could not load timesheet entries.')); }
-  useEffect(load, []);
-
-  async function decide(id, decision) {
-    try { await api.put(`/timesheet/${id}/${decision}`); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not decide.'); }
-  }
+  if (screen === 'taskReports') return <TaskStatusReportScreen onBack={() => setScreen('main')} />;
 
   return (
     <div>
       <div className="row" style={{ justifyContent: 'space-between' }}>
         <div>
-          {compact ? <div className="section-label" style={{ paddingLeft: 0, marginTop: 18 }}>{sectionLabel || 'Company Timesheet'}</div> : <h1>Timesheet</h1>}
-          {!compact && <div className="subtitle">Review and approve logged hours.</div>}
+          <h1>Timesheet</h1>
+          <div className="subtitle">Track and assign work via My Tasks.</div>
         </div>
-        <button onClick={onReports}>Reports</button>
+        {canSeeReports && <button onClick={() => setScreen('taskReports')}>Task Reports</button>}
       </div>
-      {error && <div className="banner error">{error}</div>}
-      <div className="card" style={{ marginBottom: 14 }}>
-        {entries.length === 0 && <div className="empty">No timesheet entries yet.</div>}
-        {entries.map((e) => (
-          <div key={e.id} className="rec-row">
-            <span>{e.employee_name} — <strong>{e.project_name}</strong> · {e.date} · {e.hours}h
-              {e.task_description && <div className="feature-meta">{e.task_description}</div>}
-            </span>
-            <span className="row" style={{ gap: 6 }}>
-              <span className={'status-tag ' + (STATUS_CLASS[e.status] || 'info')}>{e.status}</span>
-              {e.status === 'Pending' && <>
-                <button onClick={() => decide(e.id, 'approve')}>Approve</button>
-                <button onClick={() => decide(e.id, 'reject')}>Reject</button>
-              </>}
-            </span>
-          </div>
-        ))}
-      </div>
-
       <MyTasksSection isHR={canAssignTasks} />
     </div>
   );
 }
 
-// "My Tasks" — shared by both employee and HR views. HR additionally gets an "Assign To"
-// picker in the New Task modal so a higher authority can assign a task straight to an
-// employee, and it shows up on that employee's own My Tasks list (with a notification).
+// "My Tasks" — the same list works for both a plain employee (own tasks only) and HR/supervisory
+// roles (company-wide or scoped, with an "Assign To" picker in the New Task modal), since the
+// server already returns the right scope for whoever's asking. Super Admin and every HR-tier/
+// scoped role additionally get Department, Team, and Daily/Weekly/Monthly filters to slice the
+// list down — the Range filter is available to everyone, Department/Team only to isHR since a
+// plain employee's own list rarely spans more than one of either.
 function MyTasksSection({ isHR }) {
   const [tasks, setTasks] = useState([]);
+  const [teams, setTeams] = useState([]);
+  const [departments, setDepartments] = useState([]);
   const [error, setError] = useState('');
   const [showModal, setShowModal] = useState(false);
   const [updatesTaskId, setUpdatesTaskId] = useState(null);
   const [editingTask, setEditingTask] = useState(null);
+  const [filterDept, setFilterDept] = useState('');
+  const [filterTeam, setFilterTeam] = useState('');
+  const [range, setRange] = useState('all');
 
-  function load() { api.get('/timesheet/tasks').then((r) => setTasks(r.data.tasks)).catch(() => setError('Could not load tasks.')); }
-  useEffect(load, []);
+  function load() {
+    const params = {};
+    if (filterDept) params.department = filterDept;
+    if (filterTeam) params.team_id = filterTeam;
+    if (range !== 'all') params.range = range;
+    api.get('/timesheet/tasks', { params }).then((r) => setTasks(r.data.tasks)).catch(() => setError('Could not load tasks.'));
+  }
+  useEffect(load, [filterDept, filterTeam, range]);
+  useEffect(() => { api.get('/timesheet/tasks/options').then((r) => { setDepartments(r.data.departments); setTeams(r.data.teams); }).catch(() => {}); }, []);
 
   async function setStatus(taskId, status) {
     try { await api.put(`/timesheet/tasks/${taskId}`, { status }); load(); }
@@ -156,9 +70,29 @@ function MyTasksSection({ isHR }) {
 
   return (
     <div className="card">
-      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8 }}>
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
         <div className="feature-name">My Tasks</div>
         <button className="primary" onClick={() => setShowModal(true)}>+ New Task</button>
+      </div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 10 }}>
+        {isHR && (
+          <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)}>
+            <option value="">All Departments</option>
+            {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        )}
+        {isHR && (
+          <select value={filterTeam} onChange={(e) => setFilterTeam(e.target.value)}>
+            <option value="">All Teams</option>
+            {teams.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.department})</option>)}
+          </select>
+        )}
+        <select value={range} onChange={(e) => setRange(e.target.value)}>
+          <option value="all">All Time</option>
+          <option value="daily">Today</option>
+          <option value="weekly">This Week</option>
+          <option value="monthly">This Month</option>
+        </select>
       </div>
       {error && <div className="banner error">{error}</div>}
       {tasks.length === 0 && <div className="empty">No tasks yet.</div>}
@@ -460,27 +394,92 @@ function TaskUpdatesModal({ taskId, onClose }) {
   );
 }
 
-function ReportsScreen({ onBack }) {
-  const [byProject, setByProject] = useState([]);
-  const [byEmployee, setByEmployee] = useState([]);
-  useEffect(() => { api.get('/timesheet/reports').then((r) => { setByProject(r.data.byProject); setByEmployee(r.data.byEmployee); }).catch(() => {}); }, []);
+// Company-wide view of how the allocated My Tasks work is progressing per employee — who's
+// completed their allocated tasks vs who still has work pending or in progress.
+function TaskStatusReportScreen({ onBack }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [teams, setTeams] = useState([]);
+  const [filterDept, setFilterDept] = useState('');
+  const [filterTeam, setFilterTeam] = useState('');
+  const [range, setRange] = useState('all');
+
+  useEffect(() => { api.get('/timesheet/tasks/options').then((r) => { setDepartments(r.data.departments); setTeams(r.data.teams); }).catch(() => {}); }, []);
+  useEffect(() => {
+    const params = {};
+    if (filterDept) params.department = filterDept;
+    if (filterTeam) params.team_id = filterTeam;
+    if (range !== 'all') params.range = range;
+    api.get('/timesheet/reports/task-status', { params }).then((r) => setData(r.data)).catch(() => setError('Could not load task status report.'));
+  }, [filterDept, filterTeam, range]);
 
   return (
     <div>
       <button onClick={onBack} style={{ marginBottom: 10 }}>← Back to Timesheet</button>
-      <h1>Timesheet Reports</h1>
-      <div className="subtitle">Total approved hours by project and by employee.</div>
-      <div className="card" style={{ marginBottom: 14 }}>
-        <div className="feature-name" style={{ marginBottom: 8 }}>By Project</div>
-        {byProject.map((p, i) => (
-          <div key={i} className="rec-row"><span>{p.project_name}</span><span>{p.total_hours}h</span></div>
-        ))}
+      <h1>Task Status Report</h1>
+      <div className="subtitle">Allocated tasks per employee — completed, in progress, pending, and on hold.</div>
+      <div className="row" style={{ flexWrap: 'wrap', gap: 8, marginBottom: 12 }}>
+        <select value={filterDept} onChange={(e) => setFilterDept(e.target.value)}>
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select value={filterTeam} onChange={(e) => setFilterTeam(e.target.value)}>
+          <option value="">All Teams</option>
+          {teams.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.department})</option>)}
+        </select>
+        <select value={range} onChange={(e) => setRange(e.target.value)}>
+          <option value="all">All Time</option>
+          <option value="daily">Today</option>
+          <option value="weekly">This Week</option>
+          <option value="monthly">This Month</option>
+        </select>
       </div>
+      {error && <div className="banner error">{error}</div>}
+
+      {data && (
+        <div className="kpi-row">
+          <div className="kpi-card blue"><div className="kpi-label">Total Allocated</div><div className="kpi-value">{data.totals.total}</div></div>
+          <div className="kpi-card green"><div className="kpi-label">Completed</div><div className="kpi-value">{data.totals.completed}</div></div>
+          <div className="kpi-card gold"><div className="kpi-label">In Progress</div><div className="kpi-value">{data.totals.in_progress}</div></div>
+          <div className="kpi-card red"><div className="kpi-label">Pending</div><div className="kpi-value">{data.totals.pending}</div></div>
+        </div>
+      )}
+
       <div className="card">
         <div className="feature-name" style={{ marginBottom: 8 }}>By Employee</div>
-        {byEmployee.map((e, i) => (
-          <div key={i} className="rec-row"><span>{e.employee_name}</span><span>{e.total_hours}h</span></div>
-        ))}
+        {!data && <div className="empty">Loading…</div>}
+        {data && data.rows.length === 0 && <div className="empty">No allocated tasks yet.</div>}
+        {data && data.rows.length > 0 && (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '2px solid #EEF0F3' }}>
+                  <th style={{ padding: '6px 8px' }}>Employee</th>
+                  <th style={{ padding: '6px 8px' }}>Department</th>
+                  <th style={{ padding: '6px 8px' }}>Total</th>
+                  <th style={{ padding: '6px 8px' }}>Completed</th>
+                  <th style={{ padding: '6px 8px' }}>In Progress</th>
+                  <th style={{ padding: '6px 8px' }}>Pending</th>
+                  <th style={{ padding: '6px 8px' }}>On Hold</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.rows.map((r) => (
+                  <tr key={r.employee_id} style={{ borderBottom: '1px solid #EEF0F3' }}>
+                    <td style={{ padding: '6px 8px' }}>{r.employee_name} <span className="feature-meta">({r.employee_code})</span></td>
+                    <td style={{ padding: '6px 8px' }}>{r.department || '—'}</td>
+                    <td style={{ padding: '6px 8px' }}>{r.total}</td>
+                    <td style={{ padding: '6px 8px' }}><span className="status-tag present">{r.completed}</span></td>
+                    <td style={{ padding: '6px 8px' }}><span className="status-tag info">{r.in_progress}</span></td>
+                    <td style={{ padding: '6px 8px' }}><span className="status-tag pending">{r.pending}</span></td>
+                    <td style={{ padding: '6px 8px' }}><span className="status-tag absent">{r.on_hold}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

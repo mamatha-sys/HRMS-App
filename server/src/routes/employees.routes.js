@@ -5,11 +5,11 @@ import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { sendSms, sendEmail } from '../utils/channels.js';
-import { isScopedRole, filterToScope } from '../utils/scope.js';
+import { filterToScope, getSupervisorScope, isEmployeeInScope } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { CSV_FIELDS, DIRECT_COLUMN_KEYS } from '../utils/employeeCsvFields.js';
-import { verifyDocumentName } from '../utils/documentVerify.js';
+import { verifyDocumentFields } from '../utils/documentVerify.js';
 import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
 
 const router = Router();
@@ -24,6 +24,13 @@ function requireHR(req, res, next) {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   next();
 }
+
+// Senior Team Lead/Team Lead are always scoped to their own assigned department(s)/team(s) for
+// Employee Management — even if granted a write action elsewhere in Manage Roles, they never get
+// unrestricted company-wide visibility here. Assistant Manager is deliberately NOT in this list:
+// unlike STL/TL, Assistant Manager is meant to see all departments' employee data once granted
+// real access (matching Manager/HR Admin), so it's gated purely by isHR() below like they are.
+const STL_TL_ROLES = ['stl', 'tl'];
 
 const ADDRESS_FIELDS = [
   'address_type', 'address_line1', 'address_line2',
@@ -198,12 +205,14 @@ const EMP_WITH_TEAM = 'SELECT e.*, t.name AS team_name, u.active AS account_acti
 const getEmp = (id) => db.prepare(`${EMP_WITH_TEAM} WHERE e.id = ?`).get(id);
 
 // AI-assisted document check: OCRs the document the caller is already looking at (sent in the
-// request body, not fetched from the DB) and cross-checks the name. Open to any authenticated
-// user rather than HR-only, since both the HR "Add/Edit Employee" form and the employee's own
-// self-service form use it, on a document the requester already has in front of them either way.
+// request body, not fetched from the DB) and cross-checks every relevant typed field against it
+// — not just the name (which document's typed fields are "relevant" is decided client-side, per
+// document type — see relevantFieldsFor in Employees.jsx). Open to any authenticated user rather
+// than HR-only, since both the HR "Add/Edit Employee" form and the employee's own self-service
+// form use it, on a document the requester already has in front of them either way.
 router.post('/verify-document', async (req, res) => {
   try {
-    const result = await verifyDocumentName(req.body?.name, req.body?.dataUrl);
+    const result = await verifyDocumentFields(req.body?.documentLabel, req.body?.fields, req.body?.dataUrl);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err.message });
@@ -217,17 +226,21 @@ router.post('/verify-document', async (req, res) => {
 const withAttritionRisk = (rows) => rows.map((r) => (r.status !== 'Exited' ? { ...r, attrition_risk: attritionRiskFor(r.id) } : r));
 
 router.get('/', (req, res) => {
-  if (isHR(req.user.role)) {
-    const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
-    return res.json({ employees: withAttritionRisk(rows).map((r) => present(r, req.user)) });
-  }
-  // A Senior Team Lead/Team Lead can browse (read-only) the employee records in their own
-  // assigned departments/teams — same fetch-then-filter scoping as Attendance/Leave — without
-  // being granted module '02' admin (create/bulk-import/pause/onboarding-decide stay blocked).
-  if (isScopedRole(req.user.role)) {
+  // Checked BEFORE isHR, deliberately: STL/TL are scoped-by-nature roles — they must never see
+  // company-wide data, even if Super Admin grants one of them a write action on Employee
+  // Management in Manage Roles. A granted action making canModuleAdmin() true is about WHAT they
+  // can do, not about widening WHICH employees they can see — those are separate questions, and
+  // this order keeps them that way. Same fetch-then-filter scoping as Attendance/Leave.
+  // Assistant Manager is NOT in STL_TL_ROLES — once granted real access, they see company-wide
+  // data via the isHR branch below, same tier as Manager/HR Admin.
+  if (STL_TL_ROLES.includes(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
     const scoped = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
     return res.json({ employees: withAttritionRisk(scoped).map((r) => present(r, req.user)) });
+  }
+  if (isHR(req.user.role)) {
+    const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
+    return res.json({ employees: withAttritionRisk(rows).map((r) => present(r, req.user)) });
   }
   const rows = db.prepare(`${EMP_WITH_TEAM} WHERE e.user_id = ?`).all(req.user.sub);
   res.json({ employees: rows.map((r) => present(r, req.user)) });
@@ -380,9 +393,15 @@ router.get('/import-template.csv', requireHR, (req, res) => {
 router.get('/:id', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
-  if (!isHR(req.user.role) && emp.user_id !== req.user.sub) {
-    const inScope = isScopedRole(req.user.role) && filterToScope([emp], req.user.role, myEmployee(req.user.sub)?.id).length > 0;
+  // Same precedence as GET / above: STL/TL are checked against scope first and ALWAYS, regardless
+  // of isHR — never falls through to unrestricted access just because Super Admin granted them
+  // some write action on Employee Management elsewhere. Assistant Manager is excluded from
+  // STL_TL_ROLES on purpose — they get company-wide access via isHR below once granted real access.
+  if (STL_TL_ROLES.includes(req.user.role)) {
+    const inScope = emp.user_id === req.user.sub || filterToScope([emp], req.user.role, myEmployee(req.user.sub)?.id).length > 0;
     if (!inScope) return res.status(403).json({ error: 'Insufficient permissions' });
+  } else if (!isHR(req.user.role) && emp.user_id !== req.user.sub) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
   }
   res.json({ employee: present(emp, req.user) });
 });
@@ -556,12 +575,23 @@ router.put('/:id/account-status', requireHR, (req, res) => {
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
+// Senior Team Lead/Team Lead may also transfer — but only an employee within their own assigned
+// department(s)/team(s), same scoped reach as everywhere else STL/TL get a write action in this
+// app (Timesheet Approval, etc.). Not extended to Assistant Manager, which — unlike STL/TL — is
+// granted full company-wide access here once given real permissions, same tier as Manager/HR
+// Admin (see STL_TL_ROLES's own definition near the top of this file).
+
 // Transfer: department/designation/team change with an effective date, kept as its own dated
 // history (employee_transfers) instead of a plain field edit that would silently overwrite the
 // old value — so the profile can show what changed and when, not just the current designation.
-router.post('/:id/transfer', requireHR, (req, res) => {
+router.post('/:id/transfer', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  if (!isHR(req.user.role)) {
+    if (!STL_TL_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+    const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
+    if (!isEmployeeInScope(scope, emp)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+  }
   const { department, designation, team_id, transfer_date, reason } = req.body || {};
   if (!transfer_date) return res.status(400).json({ error: 'transfer_date is required' });
   const toDepartment = department?.trim() || emp.department;

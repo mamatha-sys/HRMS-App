@@ -43,6 +43,7 @@ import myAccessRoutes from './routes/myAccess.routes.js';
 import chatbotRoutes from './routes/chatbot.routes.js';
 import agentRoutes from './routes/agent.routes.js';
 import interviewRoutes from './routes/interview.routes.js';
+import ideasRoutes from './routes/ideas.routes.js';
 
 const app = express();
 app.use(cors());
@@ -90,6 +91,7 @@ app.use('/api/my-access', myAccessRoutes);
 app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/agent', agentRoutes);
 app.use('/api/interview', interviewRoutes);
+app.use('/api/ideas', ideasRoutes);
 
 // Production: this same process also serves the built React app (client/dist) — one Node
 // process per domain is what Hostinger's Node.js Selector (and most shared-hosting Node
