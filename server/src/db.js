@@ -152,12 +152,10 @@ db.exec(`
   // green/yellow/orange/red badge the Helpdesk module itself uses. NULL for every other kind
   // of notification (leave/expense/announcement, etc.), which render with no badge as before.
   if (!notificationCols.includes('priority')) db.exec('ALTER TABLE notifications ADD COLUMN priority TEXT');
-  // Links a Helpdesk-ticket-related notification back to its ticket, so the notification feed
-  // can drop it once that ticket is Resolved/Closed — matching the Helpdesk dashboard's own
-  // "resolved tickets drop off the list" behavior instead of leaving a stale urgent-looking
-  // alert around after the thing it was about is already handled.
-  if (!notificationCols.includes('ticket_id')) db.exec('ALTER TABLE notifications ADD COLUMN ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL');
-  migrateNotificationsTargetRole();
+  // `ticket_id` (below) references the `tickets` table, which doesn't exist yet this early in
+  // migrate() — moved, along with migrateNotificationsTargetRole()'s rebuild (whose CREATE TABLE
+  // also references tickets), to run right after `tickets` is created further down. Running
+  // either one here crashes a fresh DB with "no such table: main.tickets".
 
   // --- Multi-channel delivery log: every Email/SMS/WhatsApp send attempt for a Notification
   // or Announcement, one row per (recipient, channel) — this is the "Notification Log" the
@@ -1289,6 +1287,16 @@ function migrate() {
     );
   `);
   migrateTicketsTable();
+
+  // Links a Helpdesk-ticket-related notification back to its ticket, so the notification feed
+  // can drop it once that ticket is Resolved/Closed — matching the Helpdesk dashboard's own
+  // "resolved tickets drop off the list" behavior instead of leaving a stale urgent-looking
+  // alert around after the thing it was about is already handled. Must run here, after `tickets`
+  // exists — see the comment where this used to run, near the top of migrate().
+  const notificationColsPostTickets = db.prepare('PRAGMA table_info(notifications)').all().map((c) => c.name);
+  if (!notificationColsPostTickets.includes('ticket_id')) db.exec('ALTER TABLE notifications ADD COLUMN ticket_id INTEGER REFERENCES tickets(id) ON DELETE SET NULL');
+  migrateNotificationsTargetRole();
+
   // Tracks when a ticket was last auto-escalated (see runAutoEscalations in helpdesk.routes.js)
   // so the 24-hour unresolved-ticket check knows where its next 24-hour window starts, distinct
   // from created_at (which stays fixed) and from manual escalation (which doesn't touch this).
@@ -1862,6 +1870,10 @@ function migrateTeamsAndScopes() {
   }
   const exitCols = db.prepare('PRAGMA table_info(exits)').all().map((c) => c.name);
   if (!exitCols.includes('reason')) db.exec('ALTER TABLE exits ADD COLUMN reason TEXT');
+  // Resignation letter attached at submission time (self-service /resign) — same base64
+  // data-URL pattern as every other document upload in this app (leave/expense/employee docs).
+  if (!exitCols.includes('resignation_letter_data_url')) db.exec('ALTER TABLE exits ADD COLUMN resignation_letter_data_url TEXT');
+  if (!exitCols.includes('resignation_letter_name')) db.exec('ALTER TABLE exits ADD COLUMN resignation_letter_name TEXT');
 
   // Announcements widget on the Dashboard — added after the initial dashboard_config seed above,
   // so an already-installed DB needs this added once rather than picking it up from seeding.
@@ -2290,13 +2302,20 @@ function migrateLeavesTable() {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         current_stage_role_id INTEGER REFERENCES roles(id),
         cancel_requested INTEGER NOT NULL DEFAULT 0,
-        cancelled INTEGER NOT NULL DEFAULT 0
+        cancelled INTEGER NOT NULL DEFAULT 0,
+        approval_reason_ids TEXT,
+        is_emergency INTEGER NOT NULL DEFAULT 0,
+        last_reminded_at TEXT,
+        handover_to_employee_id INTEGER REFERENCES employees(id) ON DELETE SET NULL,
+        handover_notes TEXT,
+        handover_attachment_data_url TEXT,
+        handover_attachment_name TEXT
       );
     `);
     const codeOfOldType = { Casual: 'CL', Sick: 'SL', Earned: 'EL' };
     const insert = db.prepare(`
-      INSERT INTO leaves_new (id, employee_id, leave_type_id, type, from_date, to_date, days, reason, status, decided_by, created_at, current_stage_role_id, cancel_requested, cancelled)
-      VALUES (@id, @employee_id, @leave_type_id, @type, @from_date, @to_date, @days, @reason, @status, @decided_by, @created_at, @current_stage_role_id, @cancel_requested, @cancelled)
+      INSERT INTO leaves_new (id, employee_id, leave_type_id, type, from_date, to_date, days, reason, status, decided_by, created_at, current_stage_role_id, cancel_requested, cancelled, approval_reason_ids, is_emergency, last_reminded_at, handover_to_employee_id, handover_notes, handover_attachment_data_url, handover_attachment_name)
+      VALUES (@id, @employee_id, @leave_type_id, @type, @from_date, @to_date, @days, @reason, @status, @decided_by, @created_at, @current_stage_role_id, @cancel_requested, @cancelled, @approval_reason_ids, @is_emergency, @last_reminded_at, @handover_to_employee_id, @handover_notes, @handover_attachment_data_url, @handover_attachment_name)
     `);
     db.prepare('SELECT * FROM leaves').all().forEach((r) => {
       const code = codeOfOldType[r.type];
@@ -2351,16 +2370,25 @@ function seedModuleData() {
 
   // Salary components catalog + per-employee lines, migrated from the old fixed
   // salary_structures columns so every existing employee keeps their current pay.
-  if (db.prepare('SELECT COUNT(*) AS c FROM salary_components').get().c === 0) {
-    const insC = db.prepare('INSERT INTO salary_components (key, label, type, sort_order) VALUES (?, ?, ?, ?)');
-    insC.run('basic', 'Basic', 'earning', 0);
-    insC.run('hra', 'HRA', 'earning', 1);
-    insC.run('conveyance', 'Conveyance Allowance', 'earning', 2);
-    insC.run('special_allowance', 'Special Allowance', 'earning', 3);
-    insC.run('pf', 'PF (Provident Fund)', 'deduction', 4);
-    insC.run('pt', 'PT (Professional Tax)', 'deduction', 5);
-    insC.run('tds', 'TDS (Income Tax)', 'deduction', 6);
-  }
+  // Seeded per-key (not gated on the table being empty) because migratePayrollFormula() above
+  // already inserts 'bonus'/'employer_pf'/'gratuity' unconditionally on a fresh DB — if this
+  // block only ran when the table was empty, that non-zero count would skip it entirely and
+  // leave basic/hra/special_allowance/pf/pt (and every payslip built from them) missing, which
+  // is exactly how CTC split used to silently drop 5 of the 8 standard components on a fresh
+  // install (see applyCtcSplit()'s own error-on-missing-key check for the other half of that fix).
+  const STANDARD_SALARY_COMPONENTS = [
+    ['basic', 'Basic', 'earning', 0],
+    ['hra', 'HRA', 'earning', 1],
+    ['conveyance', 'Conveyance Allowance', 'earning', 2],
+    ['special_allowance', 'Special Allowance', 'earning', 3],
+    ['pf', 'PF (Provident Fund)', 'deduction', 4],
+    ['pt', 'PT (Professional Tax)', 'deduction', 5],
+    ['tds', 'TDS (Income Tax)', 'deduction', 6]
+  ];
+  const insC = db.prepare('INSERT INTO salary_components (key, label, type, sort_order) VALUES (?, ?, ?, ?)');
+  STANDARD_SALARY_COMPONENTS.forEach(([key, label, type, sortOrder]) => {
+    if (!db.prepare('SELECT 1 FROM salary_components WHERE key = ?').get(key)) insC.run(key, label, type, sortOrder);
+  });
   if (db.prepare('SELECT COUNT(*) AS c FROM employee_salary_lines').get().c === 0) {
     const components = db.prepare('SELECT id, key FROM salary_components').all();
     const insLine = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, ?)');

@@ -8,8 +8,8 @@ export default function Login() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [email, setEmail] = useState('admin@hrms.com');
-  const [password, setPassword] = useState('Admin@123');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [branding, setBranding] = useState(null);
@@ -99,10 +99,6 @@ export default function Login() {
             {submitting ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
-
-        <div className="note login-hint">
-          Demo accounts — Super Admin: admin@hrms.com / Admin@123 · Manager: manager@hrms.com / Manager@123 · Employee: employee@hrms.com / Employee@123
-        </div>
       </div>
     </div>
   );

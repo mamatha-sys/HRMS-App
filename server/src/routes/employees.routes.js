@@ -2,17 +2,54 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
-import { requireAuth } from '../middleware/auth.middleware.js';
+import { requireAuth, requireAuthFromHeaderOrQuery } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { sendSms, sendEmail } from '../utils/channels.js';
 import { filterToScope, getSupervisorScope, isEmployeeInScope } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
+import { autoCompleteOffboardingTask } from '../utils/offboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { CSV_FIELDS, DIRECT_COLUMN_KEYS } from '../utils/employeeCsvFields.js';
 import { verifyDocumentFields } from '../utils/documentVerify.js';
 import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
+import { applyCtcSplit } from './payroll.routes.js';
 
 const router = Router();
+
+// A photo/document value is either a real data URL (uploaded through the app) or a plain http(s)
+// link (came in via Excel bulk import's "photo/document link" columns — see POST /bulk). Serving
+// both through the same URL shape means an Excel export's hyperlink always looks the same
+// regardless of which kind the underlying employee has.
+function serveDataUrlOrRedirect(res, value, { download } = {}) {
+  const m = /^data:([^;]+);base64,(.+)$/.exec(value || '');
+  if (!m) return res.redirect(value); // plain external link — send the browser straight there
+  res.setHeader('Content-Type', m[1]);
+  if (download) res.setHeader('Content-Disposition', `attachment; filename="${download.replace(/"/g, '')}"`);
+  res.send(Buffer.from(m[2], 'base64'));
+}
+
+// Registered before requireAuth below (and using requireAuthFromHeaderOrQuery, not requireAuth)
+// so these can work as a plain clickable link opened straight from an exported Excel file — see
+// GET /reports/employees.xlsx, which builds hyperlinks pointing here with the exporting user's
+// own token as ?token=. Same viewing rule as everywhere else: HR, or the employee's own record.
+router.get('/:id/photo', requireAuthFromHeaderOrQuery, (req, res) => {
+  const emp = db.prepare('SELECT id, photo, user_id FROM employees WHERE id = ?').get(req.params.id);
+  if (!emp?.photo) return res.status(404).json({ error: 'No photo on file for this employee.' });
+  if (!canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) return res.status(403).json({ error: 'Insufficient permissions' });
+  serveDataUrlOrRedirect(res, emp.photo);
+});
+
+router.get('/:id/documents/:index', requireAuthFromHeaderOrQuery, (req, res) => {
+  const emp = db.prepare('SELECT id, documents, user_id FROM employees WHERE id = ?').get(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  if (!canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) return res.status(403).json({ error: 'Insufficient permissions' });
+  let docs = [];
+  try { docs = emp.documents ? JSON.parse(emp.documents) : []; } catch { docs = []; }
+  const doc = docs[Number(req.params.index)];
+  if (!doc?.dataUrl) return res.status(404).json({ error: 'Document not found' });
+  serveDataUrlOrRedirect(res, doc.dataUrl, { download: doc.name || 'document' });
+});
+
 router.use(requireAuth);
 
 // "HR" = anyone who can administer employee records / approve the onboarding workflow.
@@ -45,7 +82,7 @@ const HR_EDITABLE_FIELDS = [
   'name', 'email', 'phone', 'photo', 'date_of_birth',
   'emergency_contact_name', 'emergency_contact_relation', 'emergency_contact_number',
   ...ADDRESS_FIELDS,
-  'department', 'branch', 'team_id', 'designation', 'date_of_joining', 'reporting_manager', 'status', 'shift',
+  'department', 'branch', 'team_id', 'designation', 'date_of_joining', 'reporting_manager', 'status', 'shift', 'ctc',
   'bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number', 'uan_number', 'pf_number', 'esi_number',
   'employment_type', 'education', 'experience', 'skills', 'documents'
 ];
@@ -74,6 +111,7 @@ function serializeField(field, value) {
   // treat '' the same as "not provided" instead of storing it as a real value.
   if (field === 'email') return value ? value : null;
   if (field === 'employment_type') return ['Fresher', 'Experienced'].includes(value) ? value : null;
+  if (field === 'ctc') return value ? Math.max(0, parseInt(value, 10) || 0) : null; // INTEGER column, annual CTC
   if (field !== 'documents') return value ?? null;
   if (Array.isArray(value)) return JSON.stringify(value);
   if (typeof value === 'string') return value || null;
@@ -463,6 +501,13 @@ router.post('/', requireHR, (req, res) => {
   if (!body.password || body.password.length < 6) {
     return res.status(400).json({ error: 'Password must be at least 6 characters' });
   }
+  if (body.date_of_joining) {
+    const oneYearOut = new Date();
+    oneYearOut.setFullYear(oneYearOut.getFullYear() + 1);
+    if (new Date(body.date_of_joining) > oneYearOut) {
+      return res.status(400).json({ error: 'Date of joining cannot be more than a year in the future' });
+    }
+  }
 
   if (db.prepare('SELECT id FROM employees WHERE email = ?').get(email)) {
     return res.status(409).json({ error: 'An employee with this email already exists' });
@@ -486,12 +531,15 @@ router.post('/', requireHR, (req, res) => {
   HR_EDITABLE_FIELDS.forEach((f) => { values[f] = serializeField(f, body[f]); });
   values.email = email;
   values.status = ['Active', 'On Probation', 'Exited'].includes(body.status) ? body.status : 'Active';
+  // Not provided → leave the key out of the INSERT entirely so the column's own
+  // NOT NULL DEFAULT applies, instead of inserting an explicit NULL that violates it.
+  if (values.shift == null) delete values.shift;
 
   const createBoth = db.transaction(() => {
     const userInfo = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)')
       .run(body.name.trim(), email, bcrypt.hashSync(body.password, 10), roleKey);
     values.user_id = userInfo.lastInsertRowid;
-    const columns = ['employee_code', 'stage', 'user_id', ...HR_EDITABLE_FIELDS];
+    const columns = ['employee_code', 'stage', 'user_id', ...HR_EDITABLE_FIELDS].filter((c) => c in values);
     const result = db.prepare(`INSERT INTO employees (${columns.join(', ')}) VALUES (${columns.map((c) => '@' + c).join(', ')})`).run(values);
     saveCustomFieldValues(result.lastInsertRowid, body.custom_fields);
     return result;
@@ -533,7 +581,7 @@ router.post('/bulk', requireHR, (req, res) => {
     return db.prepare('SELECT id FROM teams WHERE name = ? AND department_id = ?').get(teamName.trim(), dept.id)?.id || null;
   }
 
-  const results = { inserted: 0, skipped: 0, errors: [] };
+  const results = { inserted: 0, skipped: 0, errors: [], payrollWarnings: [] };
   const insertOne = db.transaction((list) => {
     list.forEach((raw, i) => {
       const name = raw.name?.trim();
@@ -555,9 +603,21 @@ router.post('/bulk', requireHR, (req, res) => {
         if (key === 'status' && !['Active', 'On Probation', 'Exited'].includes(v)) v = 'Active';
         if (key === 'pay_type' && !['Package', 'Stipend'].includes(v)) v = 'Package'; // CHECK-constrained column
         if (key === 'ctc') v = v ? Math.max(0, parseInt(v, 10) || 0) : null; // INTEGER column
+        // Not provided → leave shift out of `values` so the NOT NULL DEFAULT applies below,
+        // instead of inserting an explicit NULL that violates it.
+        if (key === 'shift' && !v) return;
         values[key] = serializeField(key, typeof v === 'string' ? v.trim() || null : v ?? null);
       });
       values.team_id = resolveTeamId(raw.team, department);
+
+      // Plain CSV rows never carry these (a data URL / a {name,dataUrl}[] don't fit a CSV cell —
+      // see employeeCsvFields.js), but a row from Employee Management's full JSON export does, so
+      // that export/import round-trip keeps every employee's photo and documents, not just the
+      // spreadsheet-friendly fields.
+      if (raw.photo) values.photo = raw.photo;
+      let docs = raw.documents;
+      if (typeof docs === 'string') { try { docs = JSON.parse(docs); } catch { docs = null; } }
+      if (Array.isArray(docs) && docs.length) values.documents = JSON.stringify(docs);
 
       // A per-row try/catch — one row hitting an unexpected constraint (or anything else) turns
       // into an error entry for that row alone, instead of throwing inside the transaction and
@@ -576,6 +636,14 @@ router.post('/bulk', requireHR, (req, res) => {
           if (customFieldByKey[k]) customValues[customFieldByKey[k].id] = v;
         });
         if (Object.keys(customValues).length) saveCustomFieldValues(info.lastInsertRowid, customValues);
+
+        // A CTC came in on this row — apply it to Payroll right away, same as HR entering it
+        // by hand on the Payroll page, so imported employees don't sit at Gross/Net = ₹0 until
+        // someone re-enters a CTC that was already right there in the CSV.
+        if (values.ctc && values.pay_type !== 'Stipend') {
+          try { applyCtcSplit(info.lastInsertRowid, values.ctc); }
+          catch (err) { results.payrollWarnings.push(`Row ${i + 1} (${name}): CTC not applied to Payroll — ${err.message}`); }
+        }
 
         results.inserted++;
       } catch (err) {
@@ -615,6 +683,10 @@ router.put('/:id/account-status', requireHR, (req, res) => {
   const { active } = req.body || {};
   db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, emp.user_id);
   db.prepare('UPDATE employees SET status = ? WHERE id = ?').run(active ? 'Active' : 'Exited', req.params.id);
+  // Login only ever gets revoked here — an employee's Last Working Day arriving does NOT do this
+  // automatically (see autoMarkExitedEmployees in recruitment.routes.js) — so this is the one real
+  // moment the "Revoke system login access" offboarding checklist item should tick itself off.
+  if (!active) autoCompleteOffboardingTask(req.params.id, 'Revoke system login access');
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
@@ -862,8 +934,15 @@ router.post('/:id/approve-edit', requireHR, (req, res) => {
 
 router.delete('/:id', requireHR, (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can delete an employee record' });
-  const info = db.prepare('DELETE FROM employees WHERE id = ?').run(req.params.id);
-  if (info.changes === 0) return res.status(404).json({ error: 'Employee not found' });
+  const emp = db.prepare('SELECT user_id FROM employees WHERE id = ?').get(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  // Deleting the employee record must not leave their login account active — otherwise the
+  // deleted employee can still sign in even though their employee record is gone.
+  const deleteBoth = db.transaction(() => {
+    if (emp.user_id) db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(emp.user_id);
+    db.prepare('DELETE FROM employees WHERE id = ?').run(req.params.id);
+  });
+  deleteBoth();
   res.status(204).send();
 });
 

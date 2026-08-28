@@ -71,12 +71,18 @@ function setSplitPolicy(name, value) {
   else db.prepare("INSERT INTO policies (category, name, value) VALUES ('setting', ?, ?)").run(name, String(value));
 }
 
-// Splits a monthly CTC into components keyed exactly like salary_components.key, so the result
-// can be written straight into employee_salary_lines. Special Allowance absorbs whatever's left
-// after every fixed/percentage-based piece is accounted for, so Gross + Employer Costs always
-// reconciles back to the entered CTC exactly (rounding aside).
-function splitCtc(ctc) {
+// Splits an ANNUAL CTC into monthly components keyed exactly like salary_components.key, so the
+// result can be written straight into employee_salary_lines. Annual matches the convention used
+// everywhere else CTC is entered (Recruitment offer, Bulk Import's "CTC (annual, ₹)" column) —
+// this function is the only place that converts it down to a monthly figure before splitting, so
+// callers everywhere pass/store the same annual number instead of two different units silently
+// meaning two different things (that used to make monthly Basic/Net come out ~12x too high).
+// Special Allowance absorbs whatever's left after every fixed/percentage-based piece is
+// accounted for, so Gross + Employer Costs always reconciles back to the monthly CTC exactly
+// (rounding aside).
+function splitCtc(annualCtc) {
   const cfg = splitConfig();
+  const ctc = Math.round(annualCtc / 12);
   const basic = Math.round(ctc * cfg['Basic % of CTC'] / 100);
   const hra = Math.round(basic * cfg['HRA % of Basic'] / 100);
   const employeePf = Math.min(Math.round(basic * cfg['Employee PF % of Basic'] / 100), cfg['Employee PF Monthly Cap']);
@@ -87,7 +93,7 @@ function splitCtc(ctc) {
   const fixedTotal = basic + hra + bonus + employerPf + gratuity;
   const specialAllowance = ctc - fixedTotal;
   if (specialAllowance < 0) {
-    throw Object.assign(new Error(`CTC too low for the current split settings — minimum CTC is ₹${fixedTotal.toLocaleString('en-IN')}.`), { status: 400 });
+    throw Object.assign(new Error(`CTC too low for the current split settings — minimum annual CTC is ₹${(fixedTotal * 12).toLocaleString('en-IN')}.`), { status: 400 });
   }
   return { basic, hra, bonus, special_allowance: specialAllowance, pf: employeePf, pt, employer_pf: employerPf, gratuity };
 }
@@ -96,15 +102,18 @@ function splitCtc(ctc) {
 // Shared by the per-employee CTC endpoint and the split-config save handler below (which
 // re-applies this to every already-configured employee, so a percentage change doesn't leave
 // existing structures silently stale at the old ratios).
-function applyCtcSplit(employeeId, ctc) {
+export function applyCtcSplit(employeeId, ctc) {
   const split = splitCtc(ctc);
   ensureLines(employeeId);
   const byKey = {};
   allComponents().forEach((c) => { byKey[c.key] = c.id; });
+  const missing = Object.keys(split).filter((key) => !byKey[key]);
+  if (missing.length) {
+    throw Object.assign(new Error(`Salary component(s) missing from the catalog: ${missing.join(', ')} — add them under Manage Salary Components before splitting CTC.`), { status: 500 });
+  }
   const upsert = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, ?) ON CONFLICT(employee_id, component_id) DO UPDATE SET amount = excluded.amount');
   Object.entries(split).forEach(([key, amount]) => {
-    const componentId = byKey[key];
-    if (componentId) upsert.run(employeeId, componentId, amount);
+    upsert.run(employeeId, byKey[key], amount);
   });
   db.prepare('UPDATE employees SET ctc = ? WHERE id = ?').run(ctc, employeeId);
 }
@@ -149,8 +158,8 @@ function breakdownFor(employeeId) {
 }
 
 // HR overview: KPIs + an illustrative "standard structure" reference card, built by running a
-// sample ₹25,000 CTC through the live split settings — so it always reflects whatever Super
-// Admin has configured, not a stale hardcoded example.
+// sample ₹3,00,000 annual CTC (₹25,000/month) through the live split settings — so it always
+// reflects whatever Super Admin has configured, not a stale hardcoded example.
 router.get('/overview', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
 
@@ -161,7 +170,7 @@ router.get('/overview', (req, res) => {
 
   const comps = activeComponents();
   let sample = {};
-  try { sample = splitCtc(25000); } catch { /* current split settings can't fit a ₹25,000 sample — template just shows 0s */ }
+  try { sample = splitCtc(300000); } catch { /* current split settings can't fit a ₹25,000/month sample — template just shows 0s */ }
   const templateLines = comps.map((c) => ({
     component_id: c.id, key: c.key, label: c.label, type: c.type, withheld: c.withheld,
     amount: sample[c.key] || 0

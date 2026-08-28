@@ -5,7 +5,16 @@ import { notifyEmployee } from './notify.js';
 // (integrations.routes.js), so a punch from a real fingerprint/face device is subject to the
 // exact same late-arrival grace period and half-day-cut rules as a manual check-in.
 
-export const nowTime = () => new Date().toTimeString().slice(0, 5);
+// Explicitly Asia/Kolkata, not the server's own local clock — a cloud VM commonly defaults to
+// UTC, which would silently shift every late-arrival/half-day/early-logout comparison below by
+// whatever offset separates the server's OS timezone from IST (5:30h for UTC).
+const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+export const nowTime = () => {
+  const parts = IST_TIME_FORMAT.formatToParts(new Date());
+  const h = parts.find((p) => p.type === 'hour').value;
+  const m = parts.find((p) => p.type === 'minute').value;
+  return `${h}:${m}`;
+};
 export const today = () => db.prepare("SELECT date('now') AS d").get().d;
 // Company rule: General shift is 9:00 AM – 6:00 PM with a grace period until 9:15.
 export const LATE_AFTER = '09:15';

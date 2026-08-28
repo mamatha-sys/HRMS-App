@@ -10,8 +10,11 @@ const FULL_HR_ROLES = ['super_admin'];
 const SELF_AND_ADMIN_ROLES = ['manager', 'hr_admin', 'assistant_manager'];
 const inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN');
 // Mirrors the server's splitCtc() exactly, so the CTC edit form can preview the breakdown live
-// before HR saves — the server remains the source of truth (this is a preview only).
-function splitCtcPreview(ctc, cfg) {
+// before HR saves — the server remains the source of truth (this is a preview only). Takes the
+// same ANNUAL figure the input collects (matching Recruitment/Bulk Import's convention) and
+// converts to monthly before splitting, just like the server does.
+function splitCtcPreview(annualCtc, cfg) {
+  const ctc = Math.round(annualCtc / 12);
   const basic = Math.round(ctc * cfg['Basic % of CTC'] / 100);
   const hra = Math.round(basic * cfg['HRA % of Basic'] / 100);
   const employeePf = Math.min(Math.round(basic * cfg['Employee PF % of Basic'] / 100), cfg['Employee PF Monthly Cap']);
@@ -21,7 +24,7 @@ function splitCtcPreview(ctc, cfg) {
   const bonus = Math.round(basic * cfg['Bonus % of Basic'] / 100);
   const fixedTotal = basic + hra + bonus + employerPf + gratuity;
   const specialAllowance = ctc - fixedTotal;
-  return { basic, hra, bonus, special_allowance: specialAllowance, pf: employeePf, pt, employer_pf: employerPf, gratuity, valid: specialAllowance >= 0, minCtc: fixedTotal };
+  return { basic, hra, bonus, special_allowance: specialAllowance, pf: employeePf, pt, employer_pf: employerPf, gratuity, valid: specialAllowance >= 0, minCtc: fixedTotal * 12 };
 }
 const inr2 = (n) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const esc = (v) => (v == null || v === '' ? '' : String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
@@ -361,7 +364,7 @@ function HRPayroll({ compact, sectionLabel }) {
               </div>
 
               <div className="feature-meta" style={{ marginBottom: 8 }}>
-                Enter one CTC figure per employee — the system splits it into Basic, HRA, Bonus, Special Allowance, Employee PF, PT, Employer PF and Gratuity automatically, per the CTC Split Settings below. Components are no longer edited by hand.{' '}
+                Enter one annual CTC figure per employee — the system splits it into monthly Basic, HRA, Bonus, Special Allowance, Employee PF, PT, Employer PF and Gratuity automatically, per the CTC Split Settings below. Components are no longer edited by hand.{' '}
                 <strong>Stipend</strong>: a fixed {inr(10000)}/month, no deductions or add-ons.
               </div>
 
@@ -390,11 +393,11 @@ function HRPayroll({ compact, sectionLabel }) {
                         ) : editing === s.employee_id ? (
                           <td colSpan={components.length + 2}>
                             <div className="row" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
-                              <span className="field-label" style={{ width: 'auto' }}>CTC (monthly)</span>
+                              <span className="field-label" style={{ width: 'auto' }}>CTC (annual)</span>
                               <input value={ctcDraft} onChange={(e) => setCtcDraft(e.target.value)} style={{ width: 100 }} />
                               <button className="primary" onClick={() => save(s.employee_id)} disabled={!preview?.valid}>Save</button>
                               <button onClick={() => setEditing(null)}>Cancel</button>
-                              {preview && !preview.valid && <span className="feature-meta" style={{ color: '#B3401E' }}>Too low — minimum CTC is {inr(preview.minCtc)}</span>}
+                              {preview && !preview.valid && <span className="feature-meta" style={{ color: '#B3401E' }}>Too low — minimum annual CTC is {inr(preview.minCtc)}</span>}
                             </div>
                             {preview?.valid && (
                               <div className="feature-meta" style={{ marginTop: 4 }}>

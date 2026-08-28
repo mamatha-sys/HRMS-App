@@ -130,27 +130,29 @@ function BasicRecruitment({ compact }) {
   const [openPositions, setOpenPositions] = useState([]);
   const [resignation, setResignation] = useState(null);
   const [onboarding, setOnboarding] = useState(null);
+  const [hasOfferLetter, setHasOfferLetter] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
   const [showReferForm, setShowReferForm] = useState(false);
   const [referForm, setReferForm] = useState({ name: '', position_id: '', contact: '' });
-  const [showResignForm, setShowResignForm] = useState(false);
-  const [resignForm, setResignForm] = useState({ last_working_day: '', reason: '' });
+  const [resignForm, setResignForm] = useState({ last_working_day: '', reason: '', resignation_letter_data_url: '', resignation_letter_name: '' });
+  const [resignSubmitting, setResignSubmitting] = useState(false);
   const [noticeDays, setNoticeDays] = useState(45);
 
   function load() {
     api.get('/recruitment/my').then((r) => {
       setReferrals(r.data.referrals); setOpenPositions(r.data.openPositions);
       setResignation(r.data.resignation); setOnboarding(r.data.onboarding);
+      setHasOfferLetter(!!r.data.hasOfferLetter);
     }).catch(() => {});
   }
   useEffect(load, []);
-  useEffect(() => { api.get('/recruitment/notice-period').then((r) => setNoticeDays(r.data.days)).catch(() => {}); }, []);
-
-  function openResignForm() {
-    setResignForm((f) => ({ ...f, last_working_day: f.last_working_day || addDaysIso(noticeDays) }));
-    setShowResignForm(true);
-  }
+  useEffect(() => {
+    api.get('/recruitment/notice-period').then((r) => {
+      setNoticeDays(r.data.days);
+      setResignForm((f) => ({ ...f, last_working_day: f.last_working_day || addDaysIso(r.data.days) }));
+    }).catch(() => {});
+  }, []);
 
   async function submitRefer(e) {
     e.preventDefault(); setError(''); setInfo('');
@@ -160,19 +162,40 @@ function BasicRecruitment({ compact }) {
     } catch (err) { setError(err.response?.data?.error || 'Could not submit referral.'); }
   }
 
+  async function handleResignLetterFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const dataUrl = await readFileAsDataUrl(file);
+    setResignForm((f) => ({ ...f, resignation_letter_data_url: dataUrl, resignation_letter_name: file.name }));
+  }
+
   async function submitResign(e) {
     e.preventDefault(); setError(''); setInfo('');
     if (!window.confirm('Submit your resignation? HR will be notified and offboarding will begin.')) return;
+    setResignSubmitting(true);
     try {
       await api.post('/recruitment/resign', resignForm);
-      setResignForm({ last_working_day: '', reason: '' }); setShowResignForm(false); setInfo('Resignation submitted to HR.'); load();
+      setResignForm({ last_working_day: addDaysIso(noticeDays), reason: '', resignation_letter_data_url: '', resignation_letter_name: '' });
+      setInfo('Resignation submitted to HR.'); load();
     } catch (err) { setError(err.response?.data?.error || 'Could not submit resignation.'); }
+    finally { setResignSubmitting(false); }
+  }
+
+  function openMyOfferLetterDoc() {
+    const win = window.open('', '_blank');
+    if (win) { win.document.write('<p style="font-family: sans-serif; padding: 24px;">Loading offer letter…</p>'); win.document.close(); }
+    api.get('/recruitment/my/offer-letter').then((r) => {
+      if (!win) return;
+      win.document.open();
+      win.document.write(offerLetterHtml(r.data));
+      win.document.close();
+    }).catch((err) => { if (win) win.document.body.innerHTML = `<p style="font-family: sans-serif; padding: 24px;">${esc(err.response?.data?.error || 'Could not load your offer letter.')}</p>`; });
   }
 
   return (
     <div>
       {compact ? <div className="section-label" style={{ paddingLeft: 0 }}>My Recruitment</div> : <h1>Recruitment</h1>}
-      {!compact && <div className="subtitle">Refer a candidate for an open position, or submit your resignation.</div>}
+      {!compact && <div className="subtitle">Refer a candidate for an open position, submit your resignation, or download your own documents.</div>}
       {error && <div className="banner error">{error}</div>}
       {info && <div className="banner info">{info}</div>}
 
@@ -192,6 +215,7 @@ function BasicRecruitment({ compact }) {
             ? ` (${resignation.notice_days_remaining} day(s) left)`
             : ` (${-resignation.notice_days_remaining} day(s) overdue)`)}
           {' · '}Clearance {resignation.clearance_current}/{resignation.clearance_total}
+          {' · '}Your login stays active through and after your last working day — you can still use everything below (including Payslips and your Offer Letter) until HR pauses your account.
         </div>
       )}
 
@@ -221,10 +245,10 @@ function BasicRecruitment({ compact }) {
       <div className="dashboard-grid">
         <div className="card">
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
-            <div className="feature-name"><span className="widget-badge">1</span>Quick Actions</div>
+            <div className="feature-name"><span className="widget-badge">1</span>Refer a Candidate</div>
           </div>
           {showReferForm ? (
-            <form onSubmit={submitRefer} className="row" style={{ flexWrap: 'wrap', marginBottom: 8 }}>
+            <form onSubmit={submitRefer} className="row" style={{ flexWrap: 'wrap' }}>
               <input placeholder="Candidate name" value={referForm.name} onChange={(e) => setReferForm({ ...referForm, name: e.target.value })} required style={{ flex: '1 1 160px' }} />
               <select value={referForm.position_id} onChange={(e) => setReferForm({ ...referForm, position_id: e.target.value })} style={{ flex: '1 1 160px' }}>
                 <option value="">Applying for… (optional)</option>
@@ -235,21 +259,8 @@ function BasicRecruitment({ compact }) {
               <button type="button" onClick={() => setShowReferForm(false)}>Cancel</button>
             </form>
           ) : (
-            <button className="pill" style={{ width: '100%', textAlign: 'left', marginBottom: 6 }} onClick={() => setShowReferForm(true)}>+ Refer Candidate</button>
+            <button className="pill" style={{ width: '100%', textAlign: 'left' }} onClick={() => setShowReferForm(true)}>+ Refer Candidate</button>
           )}
-          {!resignation && (showResignForm ? (
-            <form onSubmit={submitResign}>
-              <div className="feature-meta" style={{ marginBottom: 6 }}>Notice period is {noticeDays} days — Last Working Day is suggested below, but you can change it.</div>
-              <div className="row" style={{ flexWrap: 'wrap' }}>
-                <input type="date" value={resignForm.last_working_day} onChange={(e) => setResignForm({ ...resignForm, last_working_day: e.target.value })} required style={{ flex: '1 1 160px' }} />
-                <input placeholder="Reason (optional)" value={resignForm.reason} onChange={(e) => setResignForm({ ...resignForm, reason: e.target.value })} style={{ flex: '2 1 200px' }} />
-                <button className="primary" type="submit">Submit Resignation</button>
-                <button type="button" onClick={() => setShowResignForm(false)}>Cancel</button>
-              </div>
-            </form>
-          ) : (
-            <button className="pill" style={{ width: '100%', textAlign: 'left' }} onClick={openResignForm}>+ Submit Resignation</button>
-          ))}
         </div>
 
         <div className="card">
@@ -261,6 +272,53 @@ function BasicRecruitment({ compact }) {
               <span className="status-tag info">{r.stage || '—'}</span>
             </div>
           ))}
+        </div>
+      </div>
+
+      {!resignation && (
+        <div className="card" style={{ borderLeft: '4px solid #B3401E' }}>
+          <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">3</span>Submit Resignation</div>
+          <div className="feature-meta" style={{ marginBottom: 12 }}>
+            Notice period is {noticeDays} days — your Last Working Day is pre-filled below, but you can change it.
+            Submitting this does not disable your login: you can keep using the app, including downloading your payslips
+            and offer letter, right through your Last Working Day and after — until HR pauses your account from their side.
+          </div>
+          <form onSubmit={submitResign}>
+            <div className="grid2">
+              <div>
+                <label className="field-label">Last working day</label>
+                <input type="date" value={resignForm.last_working_day} onChange={(e) => setResignForm({ ...resignForm, last_working_day: e.target.value })} required />
+              </div>
+              <div>
+                <label className="field-label">Resignation letter <span className="note">(optional)</span></label>
+                <input type="file" accept=".pdf,.doc,.docx,image/*" onChange={handleResignLetterFile} />
+                {resignForm.resignation_letter_name && <div className="note" style={{ marginTop: 4 }}>📎 {resignForm.resignation_letter_name}</div>}
+              </div>
+            </div>
+            <label className="field-label" style={{ marginTop: 10 }}>Reason <span className="note">(optional)</span></label>
+            <textarea rows={3} style={{ width: '100%' }} value={resignForm.reason}
+              onChange={(e) => setResignForm({ ...resignForm, reason: e.target.value })}
+              placeholder="Let HR know why you're resigning (optional)" />
+            <div className="row" style={{ marginTop: 12 }}>
+              <button className="primary" type="submit" disabled={resignSubmitting}>{resignSubmitting ? 'Submitting…' : 'Submit Resignation'}</button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">4</span>My Documents</div>
+        <div className="feature-meta" style={{ marginBottom: 10 }}>Always available here — including after you've resigned or exited.</div>
+        <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+          {hasOfferLetter
+            ? <button type="button" onClick={openMyOfferLetterDoc}>📄 Download Offer Letter</button>
+            : <span className="feature-meta">No offer letter on file.</span>}
+          <Link to="/payroll"><button type="button">💰 My Payslips</button></Link>
+          {resignation?.resignation_letter_data_url && (
+            <a href={resignation.resignation_letter_data_url} download={resignation.resignation_letter_name || 'resignation-letter'} className="pill">
+              📎 My Resignation Letter
+            </a>
+          )}
         </div>
       </div>
     </div>
@@ -892,6 +950,14 @@ function HRRecruitment({ compact, sectionLabel }) {
               </div>
               {expandedExit === x.id && (
                 <div style={{ marginTop: 8, paddingLeft: 8 }}>
+                  {x.reason && <div className="feature-meta" style={{ marginBottom: 6 }}><strong>Reason given:</strong> {x.reason}</div>}
+                  {x.resignation_letter_data_url && (
+                    <div style={{ marginBottom: 6 }}>
+                      <a href={x.resignation_letter_data_url} download={x.resignation_letter_name || 'resignation-letter'} className="pill">
+                        📎 {x.resignation_letter_name || 'Resignation Letter'}
+                      </a>
+                    </div>
+                  )}
                   <div className="feature-meta" style={{ marginBottom: 4 }}>Offboarding responsibilities:</div>
                   {x.tasks.map((t) => (
                     <label key={t.id} className="row" style={{ alignItems: 'center', gap: 6, marginBottom: 4 }}>

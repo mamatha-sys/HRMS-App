@@ -31,7 +31,7 @@ const EMPTY_FORM = {
   address_type: '', address_line1: '', address_line2: '',
   address_city: '', address_district: '', address_state: '', address_country: '', address_pincode: '',
   department: '', branch: '', team_id: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
-  shift: 'General (9:00 AM – 6:00 PM)', employment_type: '',
+  shift: 'General (9:00 AM – 6:00 PM)', employment_type: '', ctc: '',
   bank_name: '', bank_account_number: '', ifsc_code: '',
   pan_number: '', aadhaar_number: '', uan_number: '', pf_number: '', esi_number: '',
   education: '', experience: '', skills: '', documents: [], custom_fields: {}
@@ -47,7 +47,7 @@ const FIELD_KIND = {
   address_city: 'text', address_district: 'text', address_state: 'text', address_country: 'text',
   bank_name: 'text', reporting_manager: 'text',
   emergency_contact_number: 'number', address_pincode: 'number', bank_account_number: 'number',
-  aadhaar_number: 'number', uan_number: 'number', esi_number: 'number',
+  aadhaar_number: 'number', uan_number: 'number', esi_number: 'number', ctc: 'number',
   pan_number: 'alphanumeric', ifsc_code: 'alphanumeric', pf_number: 'alphanumeric'
 };
 const FIELD_MAXLEN = {
@@ -648,6 +648,39 @@ export default function Employees() {
     a.href = url; a.download = `${emp.employee_code || emp.name}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
+  // The plain CSV export above can't carry a photo (data URL) or documents ({name,dataUrl}[]) —
+  // this hits the JSON twin of that same endpoint instead, and the file re-imports cleanly via
+  // Bulk Import's "Full Import (JSON)" since it's already shaped as {rows: [...]}.
+  async function downloadFullJson() {
+    const res = await api.get('/reports/employees.json', { responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'employees-full.json'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  async function downloadOneFullJson(emp) {
+    const res = await api.get('/reports/employees.json', { params: { id: emp.id }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${emp.employee_code || emp.name}-full.json`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  // An actual Excel workbook — same fields as the plain CSV, plus a clickable "View Photo" link
+  // and one link per document (opens/downloads it), instead of embedding the raw file data.
+  async function downloadExcel() {
+    const res = await api.get('/reports/employees.xlsx', { responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'employees-full.xlsx'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  async function downloadOneExcel(emp) {
+    const res = await api.get('/reports/employees.xlsx', { params: { id: emp.id }, responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a');
+    a.href = url; a.download = `${emp.employee_code || emp.name}-full.xlsx`; a.click();
+    URL.revokeObjectURL(url);
+  }
 
   async function addCustomField(newField) {
     setError('');
@@ -833,6 +866,8 @@ export default function Employees() {
         <div style={{ flex: 1 }} />
         {isSuperAdmin && <button onClick={() => setShowFieldManager((v) => !v)}>{showFieldManager ? 'Close Field Manager' : 'Manage Fields'}</button>}
         {canExport && <button onClick={downloadCsv}>Export</button>}
+        {canExport && <button onClick={downloadFullJson} title="Includes photos and documents">Export (Full)</button>}
+        {canExport && <button onClick={downloadExcel} title="Excel — photo and documents as clickable links">Export (Excel)</button>}
         {canManageEmployees && <button className="primary" onClick={startCreate}>+ Add Employee</button>}
       </div>
 
@@ -872,6 +907,7 @@ export default function Employees() {
                     </select>
                   </div>
                   {field('email', 'Email (used to log in)', 'email')}
+                  {field('ctc', 'CTC (annual, ₹)')}
                   <div>
                     <label className="field-label">Password <span className="note">(for their login)</span></label>
                     <div className="row" style={{ gap: 6 }}>
@@ -955,6 +991,8 @@ export default function Employees() {
                       )}
                       {canTransferEmployee && <button style={{ marginLeft: 6 }} onClick={() => (transferFor === emp.id ? setTransferFor(null) : startTransfer(emp))}>{transferFor === emp.id ? 'Cancel' : 'Transfer'}</button>}
                       {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneCsv(emp)}>Export</button>}
+                      {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneFullJson(emp)} title="Includes photo and documents">Export (Full)</button>}
+                      {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneExcel(emp)} title="Excel — photo and documents as clickable links">Export (Excel)</button>}
                     </td>
                   </tr>
                   {transferFor === emp.id && (

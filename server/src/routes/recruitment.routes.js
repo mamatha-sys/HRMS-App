@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
-import { recomputeOffboardingClearance, autoCompleteOffboardingTask } from '../utils/offboarding.js';
+import { recomputeOffboardingClearance } from '../utils/offboarding.js';
 import { sendEmail, sendWhatsapp } from '../utils/channels.js';
 import { generateInterviewQuestions, generateOfferLetter } from '../utils/aiAssist.js';
 import { extractResumeText, screenResume } from '../utils/resumeScreen.js';
@@ -135,34 +135,31 @@ function taskProgress(rows) {
   return { total, completed, pct: total > 0 ? Math.round((completed / total) * 100) : 0 };
 }
 
-// Auto-disables (never deletes) an exiting employee's login the moment their Last Working Day
-// arrives — access stays live through the notice period (so they can still do handover work),
-// then gets cut on/after LWD regardless of whether the rest of the offboarding checklist (asset
-// return, finance clearance, etc.) is finished, since login access is a security concern that
-// shouldn't wait on paperwork. Same "lazy check at the top of a list endpoint" idiom as
+// Marks an employee Exited the moment their Last Working Day arrives — login is deliberately
+// NOT touched here. Access stays fully live past LWD (so they can still download their own
+// payslips/offer letter, or finish handover work) until HR explicitly pauses the account from
+// Employee Management, same as any other employee's login is revoked — LWD alone is not treated
+// as an automatic security cutoff. Same "lazy check at the top of a list endpoint" idiom as
 // sendPendingLeaveReminders/sendSlaBreachReminders — no cron/scheduler, just re-runs (cheaply,
 // since the WHERE clause only matches rows that still need it) every time /overview loads.
-function autoDisableExitedLogins() {
+function autoMarkExitedEmployees() {
   const due = db.prepare(`
-    SELECT x.id AS exit_id, e.id AS employee_id, e.name, u.id AS user_id
+    SELECT x.id AS exit_id, e.id AS employee_id, e.name
     FROM exits x
     JOIN employees e ON e.id = x.employee_id
-    JOIN users u ON u.id = e.user_id
     WHERE x.status = 'Serving Notice' AND x.last_working_day IS NOT NULL
-      AND date(x.last_working_day) <= date('now') AND u.active = 1
+      AND date(x.last_working_day) <= date('now') AND e.status != 'Exited'
   `).all();
   due.forEach((row) => {
-    db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(row.user_id);
     db.prepare("UPDATE employees SET status = 'Exited' WHERE id = ?").run(row.employee_id);
-    autoCompleteOffboardingTask(row.employee_id, 'Revoke system login access');
     db.prepare('INSERT INTO notifications (title, message, target_role) VALUES (?, ?, ?)')
-      .run('Employee Login Auto-Disabled', `${row.name}'s login was automatically disabled — their Last Working Day has arrived. The account still exists (not deleted) and can be reactivated from Employee Management if needed.`, 'staff');
+      .run('Employee Exited', `${row.name}'s Last Working Day has arrived and they're now marked Exited. Their login stays active until you pause it from Employee Management.`, 'staff');
   });
 }
 
 router.get('/overview', (req, res) => {
   if (!canViewRecruitment(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  autoDisableExitedLogins();
+  autoMarkExitedEmployees();
   const scoped = isScopedRole(req.user.role);
   const scope = scoped ? getSupervisorScope(myEmployee(req.user.sub)?.id) : null;
   const scopeDeptNames = scoped ? new Set(scopeDepartmentNames(scope)) : null;
@@ -746,7 +743,11 @@ router.get('/my', (req, res) => {
     resignation.notice_days_remaining = db.prepare("SELECT CAST(julianday(?) - julianday(date('now')) AS INTEGER) AS d").get(resignation.last_working_day).d;
   }
 
-  res.json({ referrals, openPositions, resignation, onboarding });
+  const hasOfferLetter = !!(me.email && db.prepare(
+    'SELECT 1 FROM candidates WHERE email = ? AND offer_letter_text IS NOT NULL'
+  ).get(me.email));
+
+  res.json({ referrals, openPositions, resignation, onboarding, hasOfferLetter });
 });
 
 router.post('/refer', (req, res) => {
@@ -760,21 +761,44 @@ router.post('/refer', (req, res) => {
   res.status(201).json({ candidate: db.prepare('SELECT * FROM candidates WHERE id = ?').get(info.lastInsertRowid) });
 });
 
-// Creates the same kind of record HR's own "Add Exit" does — just self-initiated, with a reason.
+// Creates the same kind of record HR's own "Add Exit" does — just self-initiated, with a reason
+// and an optional signed resignation letter attached.
 router.post('/resign', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
-  const { last_working_day, reason } = req.body || {};
+  const { last_working_day, reason, resignation_letter_data_url, resignation_letter_name } = req.body || {};
   if (!last_working_day) return res.status(400).json({ error: 'Last working day is required' });
   if (db.prepare("SELECT id FROM exits WHERE employee_id = ? AND status = 'Serving Notice'").get(me.id)) {
     return res.status(400).json({ error: 'You already have a resignation in progress.' });
   }
   const total = OFFBOARDING_TASK_DEFAULTS.length;
-  const info = db.prepare('INSERT INTO exits (employee_id, name, department, last_working_day, clearance_total, reason) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(me.id, me.name, me.department, last_working_day, total, reason?.trim() || null);
+  const info = db.prepare(`
+    INSERT INTO exits (employee_id, name, department, last_working_day, clearance_total, reason, resignation_letter_data_url, resignation_letter_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(me.id, me.name, me.department, last_working_day, total, reason?.trim() || null,
+    resignation_letter_data_url || null, resignation_letter_data_url ? (resignation_letter_name || 'Resignation Letter') : null);
   const insTask = db.prepare('INSERT INTO offboarding_tasks (exit_id, task_name, sort_order) VALUES (?, ?, ?)');
   OFFBOARDING_TASK_DEFAULTS.forEach((t, i) => insTask.run(info.lastInsertRowid, t, i));
   res.status(201).json({ exit: db.prepare('SELECT * FROM exits WHERE id = ?').get(info.lastInsertRowid) });
+});
+
+// Self-service mirror of GET /candidates/:id/offer-letter, for an employee wanting their own
+// original hiring offer letter — including after they've exited, since login/access isn't cut
+// at Last Working Day (see autoMarkExitedEmployees above). There's no direct candidate->employee
+// link in the schema, so this matches by email — the one field both records always share.
+router.get('/my/offer-letter', (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me?.email) return res.status(404).json({ error: 'No offer letter found for your account.' });
+  const candidate = db.prepare(`
+    SELECT * FROM candidates WHERE email = ? AND offer_letter_text IS NOT NULL ORDER BY created_at DESC LIMIT 1
+  `).get(me.email);
+  if (!candidate) return res.status(404).json({ error: 'No offer letter found for your account.' });
+  const position = candidate.position_id ? db.prepare('SELECT title, department_id FROM positions WHERE id = ?').get(candidate.position_id) : null;
+  const department = position?.department_id ? db.prepare('SELECT name FROM departments WHERE id = ?').get(position.department_id)?.name : null;
+  res.json({
+    candidate: { name: candidate.name, position_title: position?.title, position_department: department, offered_ctc: candidate.offered_ctc, joining_date: candidate.joining_date, offer_letter_text: candidate.offer_letter_text },
+    company: getSettings(['company_name', 'company_logo', 'company_address'])
+  });
 });
 
 export default router;

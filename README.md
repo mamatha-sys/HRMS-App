@@ -30,25 +30,18 @@ The SQLite database (`server/data/hrms.db`) is created and seeded automatically 
 | Manager | manager@hrms.com | Manager@123 |
 | Employee | employee@hrms.com | Employee@123 |
 
-## Login & face verification
+## Login
 
-Login requires email + password **and** a webcam face capture:
-
-- **First successful login** for an account auto-enrolls the captured face as that account's reference (no separate enrollment step).
-- **Every login after that** is rejected if the captured face doesn't match the enrolled one (Euclidean distance over a 128-point face descriptor, threshold 0.6 — the standard face-api.js recommendation).
-- Deactivated accounts (see Role & User Management) are blocked before the face check even runs.
-
-**This is a demo-grade feature, not hardened biometric security** — there's no liveness detection, so a photo or video of the enrolled user's face could potentially pass. The face descriptor comparison happens server-side (the client only extracts and sends the numeric descriptor), which prevents casual client-side bypass, but this should not be treated as production-grade auth without additional anti-spoofing work.
+Login is plain email + password — no webcam or biometric step. Deactivated accounts (see Role & User Management) are rejected at login. Face verification exists elsewhere in the app, on Attendance check-in — see that module below.
 
 ## Modules (sidebar)
 
 - **Dashboard** — role-scoped. KPI cards (Total Employees, Active / Inactive, New Hires (90d), Open Positions, Present Today, Absent Today, Pending Approvals, Payroll Status), Employee/Organization Growth line chart, New Hires bar chart, Department Strength bar chart, and numbered widgets: Pending Approvals (with Approve/Reject), Tasks, Alerts & Notifications, Calendar & Events, Quick Actions, Department-wise Vacancies, and a Role & User summary. A department/branch/status filter bar re-computes the KPIs and charts. Which widgets appear is controlled by **Configurations**.
-- **Employee Management** — its own KPI cards (Total Employees, Active, On Probation, Exited), quick-action links (Bulk Import, Add Departments, Add Branch, Configuration Policies), and a **5-stage onboarding workflow** per record:
-  1. **HR creates a draft** — Employee ID + Name + Department + Designation.
-  2. **HR assigns** the draft to an employee-role user so they can fill it in.
-  3. **Employee fills** their own details (photo, address — street/city/state/country/pincode, emergency contact, bank, education, documents) and **Submits**. Employees can't change their department/designation/status.
-  4. **HR reviews** and **Approves** (the profile **locks**) or **Rejects** (back to the employee).
-  5. Once locked, nobody can edit until the **employee raises an edit request** and **HR approves** it, which unlocks the profile for re-filling → back to step 3/4.
+- **Employee Management** — its own KPI cards (Total Employees, Active, On Probation, Exited), quick-action links (Bulk Import, Add Departments, Add Branch, Configuration Policies), and an onboarding workflow per record:
+  1. **HR clicks + Add Employee** and fills in the full profile in one step — name, email, password, department, designation, CTC and the rest — creating the employee record and its login account together. There is no separate no-login "draft" stage; the account is usable immediately.
+  2. **Employee fills** the remaining details (photo, address — street/city/state/country/pincode, emergency contact, bank, education, documents) and **Submits**. Employees can't change their department/designation/status.
+  3. **HR reviews** and **Approves** (the profile **locks**) or **Rejects** (back to the employee).
+  4. Once locked, nobody can edit until the **employee raises an edit request** and **HR approves** it, which unlocks the profile for re-filling → back to step 2/3.
 
   Each record shows a Stage badge (Draft / Assigned / Submitted / Locked). The **Documents** section takes any number of files each with an **editable label name**. Bank fields are masked for managers viewing others' records. Status is Active / On Probation / Exited. HR also assigns a **Shift** (currently one option: General, 9:00 AM – 6:00 PM).
 
@@ -58,6 +51,12 @@ Login requires email + password **and** a webcam face capture:
   - **Reports (Monthly)** — a month picker showing present/absent/leave/late/half-day-cut counts and attendance % per employee, with CSV export.
 
   Employee check-in optionally captures **GPS location** (browser geolocation, graceful fallback if denied/unsupported) alongside a selectable method (Web/Mobile/Biometric/Face); locations are shown as map links to both the employee and HR. 30-day history includes a Regularize button, and a **My Regularization Requests** card shows the employee's own past requests with the same visual chain stepper HR sees, so they can track approval progress instead of just fire-and-forgetting the request.
+
+  **Face verification on check-in:** Web/Mobile check-in requires a live webcam face capture (not Login — see the Login section above).
+  - **First successful check-in** for an account auto-enrolls the captured face as that account's reference (no separate enrollment step).
+  - **Every check-in after that** is rejected if the captured face doesn't match the enrolled one (Euclidean distance over a 128-point face descriptor, threshold 0.6 — the standard face-api.js recommendation).
+
+  **This is a demo-grade feature, not hardened biometric security** — there's no liveness detection, so a photo or video of the enrolled user's face could potentially pass. The face descriptor comparison happens server-side (the client only extracts and sends the numeric descriptor), which prevents casual client-side bypass, but this should not be treated as production-grade auth without additional anti-spoofing work.
 
   **Company rule — late arrivals:** the General shift is 9:00 AM – 6:00 PM with a grace period until **9:15 AM**. Checking in after 9:15 marks the day Late. Each employee gets a configurable number of free late arrivals per month (default **2**, editable via **Configuration Policies** → "Free late arrivals per month"); every late day beyond that is flagged (`½-day cut` badge, visible on the daily grid, biometric list and monthly report) and automatically deducted as **half a day's pay** the next time payroll is run for that month.
 
