@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
-import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
+import { isScopedRole, filterToScopeOrOwnDepartment, scopeDepartmentNamesOrOwn } from '../utils/scope.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -16,17 +16,18 @@ router.get('/summary', (req, res) => {
 
   const { department, branch, status } = req.query;
   const scoped = isScopedRole(req.user.role);
-  const scope = scoped ? getSupervisorScope(myEmployee(req.user.sub)?.id) : null;
+  const myEmployeeId = myEmployee(req.user.sub)?.id;
 
   // STL/TL only ever see their own supervisor-assigned departments/teams here — every KPI,
   // chart, and count below is derived from this one already-scoped employee list, the same
   // fetch-then-filter pattern Attendance/Leave overview endpoints use, rather than company-wide
-  // SQL aggregates.
+  // SQL aggregates. Falls back to their own department when Super Admin hasn't configured an
+  // explicit supervisor scope yet, same precedent as Employee Management's "My Team".
   let employees = db.prepare('SELECT * FROM employees').all();
   if (department) employees = employees.filter((e) => e.department === department);
   if (branch) employees = employees.filter((e) => e.branch === branch);
   if (status) employees = employees.filter((e) => e.status === status);
-  if (scoped) employees = filterToScope(employees, req.user.role, myEmployee(req.user.sub)?.id);
+  if (scoped) employees = filterToScopeOrOwnDepartment(employees, req.user.role, myEmployeeId);
 
   const total = employees.length;
   const active = employees.filter((e) => e.status === 'Active').length;
@@ -48,7 +49,7 @@ router.get('/summary', (req, res) => {
     SELECT p.target_headcount, d.name AS department FROM positions p JOIN departments d ON d.id = p.department_id WHERE p.status = 'Open'
   `).all();
   const openPositions = scoped
-    ? openPositionRows.filter((p) => scopeDepartmentNames(scope).includes(p.department)).reduce((sum, p) => sum + p.target_headcount, 0)
+    ? openPositionRows.filter((p) => scopeDepartmentNamesOrOwn(req.user.role, myEmployeeId).includes(p.department)).reduce((sum, p) => sum + p.target_headcount, 0)
     : openPositionRows.reduce((sum, p) => sum + p.target_headcount, 0);
 
   // The `approvals` table records the requester by name only (no employee_id/department column)
@@ -58,7 +59,7 @@ router.get('/summary', (req, res) => {
   const employeeByName = (name) => db.prepare('SELECT department, team_id FROM employees WHERE name = ?').get(name);
   const pendingApprovalRows = db.prepare("SELECT requester FROM approvals WHERE status = 'Pending'")
     .all().map((r) => ({ ...r, ...(employeeByName(r.requester) || {}) }));
-  const pendingApprovals = filterToScope(pendingApprovalRows, req.user.role, myEmployee(req.user.sub)?.id).length;
+  const pendingApprovals = filterToScopeOrOwnDepartment(pendingApprovalRows, req.user.role, myEmployeeId).length;
 
   const kpis = [
     { label: 'Total Employees', value: total, color: 'blue' },

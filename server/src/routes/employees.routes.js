@@ -2,10 +2,10 @@ import { Router } from 'express';
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import db from '../db.js';
-import { requireAuth, requireAuthFromHeaderOrQuery } from '../middleware/auth.middleware.js';
+import { requireAuth, requireAuthOrFileToken } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { sendSms, sendEmail } from '../utils/channels.js';
-import { filterToScope, getSupervisorScope, isEmployeeInScope } from '../utils/scope.js';
+import { filterToScopeOrOwnDepartment } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { autoCompleteOffboardingTask } from '../utils/offboarding.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
@@ -28,21 +28,28 @@ function serveDataUrlOrRedirect(res, value, { download } = {}) {
   res.send(Buffer.from(m[2], 'base64'));
 }
 
-// Registered before requireAuth below (and using requireAuthFromHeaderOrQuery, not requireAuth)
-// so these can work as a plain clickable link opened straight from an exported Excel file — see
-// GET /reports/employees.xlsx, which builds hyperlinks pointing here with the exporting user's
-// own token as ?token=. Same viewing rule as everywhere else: HR, or the employee's own record.
-router.get('/:id/photo', requireAuthFromHeaderOrQuery, (req, res) => {
+// Registered before requireAuth below so these can work as a plain clickable link opened
+// straight from an exported Excel file — see GET /reports/employees.xlsx, which builds
+// hyperlinks pointing here with a short file-access token as ?token= (not the exporting user's
+// full session token — that made the URL long enough that Excel's Windows hyperlink handler
+// silently fails to open it). A file-token request is already authorized by construction; a
+// normal session-token request (the in-app photo/document viewers) still gets the usual
+// HR-or-own-record check.
+router.get('/:id/photo', requireAuthOrFileToken('photo'), (req, res) => {
   const emp = db.prepare('SELECT id, photo, user_id FROM employees WHERE id = ?').get(req.params.id);
   if (!emp?.photo) return res.status(404).json({ error: 'No photo on file for this employee.' });
-  if (!canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!req.fileTokenAuthorized && !canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  }
   serveDataUrlOrRedirect(res, emp.photo);
 });
 
-router.get('/:id/documents/:index', requireAuthFromHeaderOrQuery, (req, res) => {
+router.get('/:id/documents/:index', requireAuthOrFileToken('doc', 'index'), (req, res) => {
   const emp = db.prepare('SELECT id, documents, user_id FROM employees WHERE id = ?').get(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
-  if (!canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!req.fileTokenAuthorized && !canModuleAdmin(req.user.role, '02') && emp.user_id !== req.user.sub) {
+    return res.status(403).json({ error: 'Insufficient permissions' });
+  }
   let docs = [];
   try { docs = emp.documents ? JSON.parse(emp.documents) : []; } catch { docs = []; }
   const doc = docs[Number(req.params.index)];
@@ -103,6 +110,20 @@ function nextEmployeeCode() {
     return Number.isFinite(n) && n > max ? n : max;
   }, 0);
   return `EMP-${String(maxNum + 1).padStart(3, '0')}`;
+}
+
+// Designation is drawn from the same roles catalog that decides real RBAC permissions (see
+// systemRoles in the client) — POST / (create) already requires a matching role and creates the
+// login with it, but PUT /:id (edit) and /:id/transfer only ever touched employees.designation,
+// never the linked users.role, so someone's shown Role/Designation could silently drift away from
+// what they can actually do (e.g. promoted to "Team Lead (TL)" on their profile while their login
+// stayed on Employee-tier access). Call this everywhere designation can change after creation, so
+// the two can never drift apart again — safe to call even when the designation didn't actually
+// change, since re-applying the same, already-correct role is a no-op.
+function syncUserRoleToDesignation(userId, designation) {
+  if (!userId || !designation) return;
+  const roleKey = db.prepare('SELECT key FROM roles WHERE name = ?').get(designation)?.key;
+  if (roleKey) db.prepare('UPDATE users SET role = ? WHERE id = ?').run(roleKey, userId);
 }
 
 function serializeField(field, value) {
@@ -263,22 +284,6 @@ router.post('/verify-document', async (req, res) => {
 // predict). Never called on the self-view branch below, so an employee never sees their own flag.
 const withAttritionRisk = (rows) => rows.map((r) => (r.status !== 'Exited' ? { ...r, attrition_risk: attritionRiskFor(r.id) } : r));
 
-// Team status for a TL/STL's "My Team" summary: a single at-a-glance bucket per member, distinct
-// from the employment `status` column (Active/On Probation/Exited) — someone who's employment
-// -Active can still show as On Leave or Absent for today specifically. Anyone not employment
-// -Active is always "Inactive" regardless of today's attendance row, since there's nothing to
-// check them in/out of. `attendance_pct` is this month's attendance %, the same figure used for
-// Attrition Risk and Performance's Progress Score elsewhere in the app.
-function withTeamStatus(rows) {
-  const today = new Date().toISOString().slice(0, 10);
-  return rows.map((r) => {
-    if (r.status !== 'Active') return { ...r, team_status: 'Inactive', attendance_pct: null };
-    const todays = db.prepare('SELECT status FROM attendance WHERE employee_id = ? AND date = ?').get(r.id, today);
-    const team_status = todays?.status === 'Leave' ? 'On Leave' : todays?.status === 'Absent' ? 'Absent' : 'Active';
-    return { ...r, team_status, attendance_pct: monthlyAttendanceSummary(r.id).attendancePct };
-  });
-}
-
 // STL/TL visibility, department-based by default: if Super Admin has explicitly configured a
 // supervisor scope for this person (User Management → team or department grants — e.g. Sirisha
 // scoped to just Team-A, or an STL spanning multiple teams/departments), that explicit
@@ -291,10 +296,7 @@ function withTeamStatus(rows) {
 function scopedTeamRows(req, allRows) {
   const me = myEmployee(req.user.sub);
   if (!me) return [];
-  const hasExplicitScope = !!db.prepare('SELECT 1 FROM supervisor_scopes WHERE employee_id = ?').get(me.id);
-  return hasExplicitScope
-    ? filterToScope(allRows, req.user.role, me.id)
-    : allRows.filter((r) => r.department === me.department);
+  return filterToScopeOrOwnDepartment(allRows, req.user.role, me.id);
 }
 
 router.get('/', (req, res) => {
@@ -317,7 +319,7 @@ router.get('/', (req, res) => {
       const own = rows.find((r) => r.user_id === req.user.sub);
       if (own) scoped.push(own);
     }
-    return res.json({ employees: withTeamStatus(withAttritionRisk(scoped)).map((r) => present(r, req.user)) });
+    return res.json({ employees: withAttritionRisk(scoped).map((r) => present(r, req.user)) });
   }
   if (isHR(req.user.role)) {
     const rows = db.prepare(`${EMP_WITH_TEAM} ORDER BY e.id`).all();
@@ -668,6 +670,11 @@ router.put('/:id/assign', requireHR, (req, res) => {
   }
 
   db.prepare('UPDATE employees SET user_id = ?, stage = ?, edit_requested = 0 WHERE id = ?').run(user.id, 'assigned', req.params.id);
+  // The account being linked here was created independently in Role & User Management, often
+  // with a default/placeholder role — without this, it can permanently disagree with this
+  // employee's actual designation (e.g. profile says "Team Lead (TL)" but the login stays on
+  // Employee-tier access) since nothing else ever re-visits an already-linked account's role.
+  syncUserRoleToDesignation(user.id, emp.designation);
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
@@ -690,23 +697,14 @@ router.put('/:id/account-status', requireHR, (req, res) => {
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
-// Senior Team Lead/Team Lead may also transfer — but only an employee within their own assigned
-// department(s)/team(s), same scoped reach as everywhere else STL/TL get a write action in this
-// app (Timesheet Approval, etc.). Not extended to Assistant Manager, which — unlike STL/TL — is
-// granted full company-wide access here once given real permissions, same tier as Manager/HR
-// Admin (see STL_TL_ROLES's own definition near the top of this file).
-
 // Transfer: department/designation/team change with an effective date, kept as its own dated
 // history (employee_transfers) instead of a plain field edit that would silently overwrite the
 // old value — so the profile can show what changed and when, not just the current designation.
+// STL/TL do not get this action — same tier as full Edit, Super Admin/HR Admin only.
 router.post('/:id/transfer', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
-  if (!isHR(req.user.role)) {
-    if (!STL_TL_ROLES.includes(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-    const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-    if (!isEmployeeInScope(scope, emp)) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
-  }
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { department, designation, team_id, transfer_date, reason } = req.body || {};
   if (!transfer_date) return res.status(400).json({ error: 'transfer_date is required' });
   const toDepartment = department?.trim() || emp.department;
@@ -720,6 +718,25 @@ router.post('/:id/transfer', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(emp.id, emp.department, toDepartment, emp.designation, toDesignation, emp.team_id, toTeamId, transfer_date, reason?.trim() || null, req.user.name || null);
   db.prepare('UPDATE employees SET department = ?, designation = ?, team_id = ? WHERE id = ?').run(toDepartment, toDesignation, toTeamId, emp.id);
+  syncUserRoleToDesignation(emp.user_id, toDesignation);
+
+  // If this person's own old department/team was itself one of their granted supervisor scopes
+  // (the common case for a TL/STL who supervises their own home team/department — see
+  // scopedTeamRows's same "no explicit scope → default to own department" precedent), move that
+  // specific grant along with them, so a transferred TL/STL sees their new team, not their old
+  // one. Any OTHER scope grant unrelated to their old assignment (e.g. an STL additionally scoped
+  // over a separate department) is left untouched — this transfer says nothing about that.
+  if (toDepartment !== emp.department) {
+    const oldDept = db.prepare('SELECT id FROM departments WHERE name = ?').get(emp.department);
+    const newDept = db.prepare('SELECT id FROM departments WHERE name = ?').get(toDepartment);
+    if (oldDept && newDept) {
+      db.prepare('UPDATE supervisor_scopes SET department_id = ? WHERE employee_id = ? AND department_id = ?').run(newDept.id, emp.id, oldDept.id);
+    }
+  }
+  if (emp.team_id && toTeamId && toTeamId !== emp.team_id) {
+    db.prepare('UPDATE supervisor_scopes SET team_id = ? WHERE employee_id = ? AND team_id = ?').run(toTeamId, emp.id, emp.team_id);
+  }
+
   res.status(201).json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
@@ -754,9 +771,24 @@ router.put('/:id', (req, res) => {
     return res.status(400).json({ error: 'Phone number must be a valid 10-digit Indian mobile number (starting with 6-9).' });
   }
 
+  // Employee ID is otherwise fixed for life once auto-assigned at creation — it's referenced by
+  // code (not just id) across Payroll/Attendance/Reports exports, so changing it is Super Admin
+  // only, not the general HR Admin edit tier.
+  let employeeCodeChanged = false;
+  if (req.user.role === 'super_admin' && req.body?.employee_code !== undefined) {
+    const newCode = req.body.employee_code?.trim();
+    if (!newCode) return res.status(400).json({ error: 'Employee ID cannot be blank' });
+    if (newCode !== emp.employee_code) {
+      const conflict = db.prepare('SELECT id FROM employees WHERE employee_code = ? AND id != ?').get(newCode, emp.id);
+      if (conflict) return res.status(409).json({ error: 'This Employee ID is already in use' });
+      employeeCodeChanged = true;
+    }
+  }
+
   const allowed = hr ? HR_EDITABLE_FIELDS : EMPLOYEE_EDITABLE_FIELDS;
   const updated = { ...emp };
   allowed.forEach((f) => { if (req.body?.[f] !== undefined) updated[f] = serializeField(f, req.body[f]); });
+  if (employeeCodeChanged) updated.employee_code = req.body.employee_code.trim();
 
   // Changing the phone number invalidates any earlier OTP verification of the old number; changing
   // the email does the same for email verification.
@@ -767,7 +799,8 @@ router.put('/:id', (req, res) => {
   const setCols = [
     ...allowed,
     ...(phoneChanged ? ['phone_verified', 'phone_otp_code', 'phone_otp_expires'] : []),
-    ...(emailChanged ? ['email_verified', 'email_otp_code', 'email_otp_expires'] : [])
+    ...(emailChanged ? ['email_verified', 'email_otp_code', 'email_otp_expires'] : []),
+    ...(employeeCodeChanged ? ['employee_code'] : [])
   ];
 
   // Keep the linked login (users.email) in sync whenever the employee's own email is edited —
@@ -781,6 +814,13 @@ router.put('/:id', (req, res) => {
 
   db.prepare(`UPDATE employees SET ${setCols.map((f) => `${f} = @${f}`).join(', ')} WHERE id = @id`).run(updated);
   saveCustomFieldValues(emp.id, req.body?.custom_fields);
+
+  // Keep the linked login's actual RBAC role in lockstep with the edited Role/Designation —
+  // allowed.includes('designation') is only true for the HR edit tier (HR_EDITABLE_FIELDS), never
+  // an employee's own self-edit, so this can't be used to self-promote.
+  if (allowed.includes('designation') && req.body?.designation !== undefined) {
+    syncUserRoleToDesignation(emp.user_id, updated.designation);
+  }
 
   // Cross-module onboarding automation: if this edit just set a reporting manager (was blank
   // before) or added the first onboarding document, auto-check the matching Recruitment

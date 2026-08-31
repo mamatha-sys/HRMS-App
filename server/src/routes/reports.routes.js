@@ -3,6 +3,7 @@ import ExcelJS from 'exceljs';
 import db from '../db.js';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
 import { CSV_FIELDS } from '../utils/employeeCsvFields.js';
+import { makeFileToken } from '../utils/fileAccessToken.js';
 
 const router = Router();
 router.use(requireAuth, requireRole('super_admin', 'manager', 'hr_admin'));
@@ -46,6 +47,9 @@ router.get('/employees.csv', (req, res) => {
 // {name, dataUrl} don't survive a CSV cell, so this is JSON instead. Shaped as {rows: [...]}, the
 // exact input POST /api/employees/bulk expects, so exporting here and re-importing there round-
 // trips an employee (or the whole roster) including their photo/documents without any conversion.
+// Alongside that embedded data, each photo/document also gets a plain clickable URL (same
+// authenticated endpoints the CSV/Excel exports use) so a document can be opened straight from
+// the file without needing to re-import it first.
 router.get('/employees.json', (req, res) => {
   const employeeId = req.query.id ? Number(req.query.id) : null;
   const rows = employeeId
@@ -54,13 +58,18 @@ router.get('/employees.json', (req, res) => {
   const customFields = db.prepare('SELECT * FROM employee_custom_fields WHERE active = 1 ORDER BY sort_order, id').all();
   const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
 
+  const origin = `${req.protocol}://${req.get('host')}`;
+
   const data = rows.map((r) => {
     const customValues = db.prepare('SELECT field_id, value FROM employee_custom_field_values WHERE employee_id = ?').all(r.id);
     const byFieldId = {}; customValues.forEach((v) => { byFieldId[v.field_id] = v.value; });
+    const docs = r.documents ? JSON.parse(r.documents) : [];
     const row = {};
     CSV_FIELDS.forEach((f) => { row[f.key] = f.key === 'team' ? teamNameOf(r.team_id) : r[f.key]; });
     row.photo = r.photo || null;
-    row.documents = r.documents ? JSON.parse(r.documents) : [];
+    row.photo_link = r.photo ? `${origin}/api/employees/${r.id}/photo?token=${makeFileToken(r.id, 'photo')}` : null;
+    row.documents = docs;
+    row.document_links = docs.map((d, i) => ({ name: d.name || `Document ${i + 1}`, url: `${origin}/api/employees/${r.id}/documents/${i}?token=${makeFileToken(r.id, 'doc', i)}` }));
     customFields.forEach((f) => { row[f.key] = byFieldId[f.id] ?? null; });
     return row;
   });
@@ -73,11 +82,12 @@ router.get('/employees.json', (req, res) => {
 // Same field set again, as an actual Excel workbook — a photo/document cell can't hold the real
 // image/file data (see /employees.json above for that), so instead each becomes a clickable
 // hyperlink cell pointing at the photo/document endpoints on this server (GET /api/employees/:id/
-// photo and /:id/documents/:index). Those endpoints accept the token as a query param specifically
-// so a link opened straight from Excel — no Authorization header attached — still works; it's the
-// exporting user's own current token, reused as-is, so it's valid for exactly as long as their
-// session already would be. Column headers are the same field keys as employees.csv/json, so a
-// downloaded copy re-imports through Bulk Import's Excel option with no relabeling.
+// photo and /:id/documents/:index). Those endpoints accept a short file-access token as a query
+// param specifically so a link opened straight from Excel — no Authorization header attached —
+// still works; NOT the exporting user's full session token (that made the URL long enough that
+// Excel's Windows hyperlink handler silently failed to open it — no error, just nothing happens).
+// Column headers are the same field keys as employees.csv/json, so a downloaded copy re-imports
+// through Bulk Import's Excel option with no relabeling.
 router.get('/employees.xlsx', async (req, res) => {
   const employeeId = req.query.id ? Number(req.query.id) : null;
   const rows = employeeId
@@ -86,8 +96,6 @@ router.get('/employees.xlsx', async (req, res) => {
   const customFields = db.prepare('SELECT * FROM employee_custom_fields WHERE active = 1 ORDER BY sort_order, id').all();
   const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
 
-  const authHeader = req.headers.authorization || '';
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
   const origin = `${req.protocol}://${req.get('host')}`;
 
   const parsedRows = rows.map((r) => {
@@ -115,12 +123,12 @@ router.get('/employees.xlsx', async (req, res) => {
       ...customFields.map((f) => byFieldId[f.id] ?? null)
     ]);
     if (r.photo) {
-      row.getCell(photoCol).value = { text: 'View Photo', hyperlink: `${origin}/api/employees/${r.id}/photo?token=${token}` };
+      row.getCell(photoCol).value = { text: 'View Photo', hyperlink: `${origin}/api/employees/${r.id}/photo?token=${makeFileToken(r.id, 'photo')}` };
       row.getCell(photoCol).font = linkStyle.font;
     }
     docs.forEach((d, i) => {
       const cell = row.getCell(photoCol + 1 + i);
-      cell.value = { text: d.name || `Document ${i + 1}`, hyperlink: `${origin}/api/employees/${r.id}/documents/${i}?token=${token}` };
+      cell.value = { text: d.name || `Document ${i + 1}`, hyperlink: `${origin}/api/employees/${r.id}/documents/${i}?token=${makeFileToken(r.id, 'doc', i)}` };
       cell.font = linkStyle.font;
     });
   });

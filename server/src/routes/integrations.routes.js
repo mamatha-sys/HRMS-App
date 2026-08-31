@@ -1,10 +1,14 @@
 import { Router } from 'express';
 import db from '../db.js';
+import ExcelJS from 'exceljs';
 import { requireAuth, requireRole } from '../middleware/auth.middleware.js';
+import { canModuleAdmin } from '../utils/rbac.js';
 import { getSetting, getSettings, setSetting } from '../utils/integrationSettings.js';
 import { notifyWebhooks, recentWebhookDeliveries } from '../utils/webhooks.js';
 import { recentDeliveries, sendEmail } from '../utils/channels.js';
-import { processPunchLine, mapPunch } from '../utils/biometricPunch.js';
+import { processPunchLine, mapPunch, employeeForDeviceUser } from '../utils/biometricPunch.js';
+import { runBiometricSync, recentSyncHistory, logBiometricError, recentErrorLog } from '../utils/biometricSync.js';
+import { logAudit, recentAuditLogs } from '../utils/auditLog.js';
 import * as googleCalendar from '../utils/googleCalendar.js';
 import { listJobBoards, connectJobBoard, disconnectJobBoard, addJobBoard, jobBoardKeys } from '../utils/jobBoards.js';
 
@@ -14,6 +18,19 @@ router.use(requireAuth);
 const HR_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 const isHR = (role) => HR_ROLES.includes(role);
 const isSuperAdmin = (role) => role === 'super_admin';
+// Biometric Device Integration is its own dynamic RBAC module ('24') — device/IP/serial
+// management is an infrastructure-config concern distinct from the rest of this file's
+// hardcoded-HR_ROLES sub-features (channels, webhooks, calendar, etc.), so Super Admin can grant
+// it independently via Manage Roles.
+const isBiometricAdmin = (role) => canModuleAdmin(role, '24');
+// A device hasn't been heard from (handshake or punch) in this long counts as Offline in the UI.
+const DEVICE_STALE_MINUTES = 10;
+function withOnlineStatus(devices) {
+  return devices.map((d) => {
+    const online = !!d.last_seen_at && (Date.now() - new Date(`${d.last_seen_at}Z`).getTime()) / 60000 < DEVICE_STALE_MINUTES;
+    return { ...d, online };
+  });
+}
 
 const KEY_FEATURES = [
   { key: 'channels', label: 'Email, SMS & WhatsApp', screen: 'channels' },
@@ -103,36 +120,112 @@ router.put('/channels/settings', (req, res) => {
 });
 
 // ---------- Biometric Device Integration (eSSL / ADMS-iClock protocol) ----------
+// Real hardware only ever pushes to HRMS (see biometricDevice.routes.js's unauthenticated
+// receiver) — there is no outbound pull protocol this app can use. So "Test Connection" below is
+// a plain TCP reachability check, not a protocol handshake, and "Sync Now"/background sync (see
+// biometricSync.js) are reconciliation of already-received punches, never a live device fetch.
+// That distinction is deliberately kept visible in the UI copy so it's never oversold.
+const DEVICE_TYPES = ['Fingerprint', 'Face', 'Card', 'Fingerprint + Face'];
+
 router.get('/biometric/devices', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ devices: db.prepare('SELECT * FROM biometric_devices ORDER BY created_at DESC').all() });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ devices: withOnlineStatus(db.prepare('SELECT * FROM biometric_devices ORDER BY created_at DESC').all()) });
 });
 
 router.post('/biometric/devices', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { name, serial_number, location } = req.body || {};
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { name, model, serial_number, ip_address, port, location, timezone, comm_mode, device_type, zone } = req.body || {};
   if (!name?.trim() || !serial_number?.trim()) return res.status(400).json({ error: 'Device name and serial number are required' });
   if (db.prepare('SELECT 1 FROM biometric_devices WHERE serial_number = ?').get(serial_number.trim())) {
     return res.status(400).json({ error: 'A device with this serial number is already registered' });
   }
-  const info = db.prepare("INSERT INTO biometric_devices (name, vendor, serial_number, location) VALUES (?, 'eSSL', ?, ?)")
-    .run(name.trim(), serial_number.trim(), location?.trim() || null);
+  if (comm_mode && !['ADMS', 'HTTP', 'API'].includes(comm_mode)) return res.status(400).json({ error: 'Invalid communication mode' });
+  if (device_type && !DEVICE_TYPES.includes(device_type)) return res.status(400).json({ error: 'Invalid device type' });
+  const info = db.prepare(`
+    INSERT INTO biometric_devices (name, vendor, serial_number, model, ip_address, port, location, timezone, comm_mode, device_type, zone)
+    VALUES (?, 'eSSL', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(name.trim(), serial_number.trim(), model?.trim() || null, ip_address?.trim() || null, port ? Number(port) : null,
+    location?.trim() || null, timezone?.trim() || 'Asia/Kolkata', comm_mode || 'ADMS', device_type || 'Fingerprint', zone?.trim() || null);
+  logAudit(req.user.sub, 'device.create', 'biometric_device', info.lastInsertRowid, `Registered "${name.trim()}" (${serial_number.trim()})`);
   res.status(201).json({ device: db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(info.lastInsertRowid) });
 });
 
+// Status-only toggle (Enable/Disable) and a full field edit share this route — the body shape
+// tells them apart: {status} alone vs. the full form.
 router.put('/biometric/devices/:id', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { status } = req.body || {};
-  if (!['Active', 'Paused'].includes(status)) return res.status(400).json({ error: 'A valid status is required' });
-  db.prepare('UPDATE biometric_devices SET status = ? WHERE id = ?').run(status, req.params.id);
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const device = db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  const { status, name, model, ip_address, port, location, timezone, comm_mode, device_type, zone } = req.body || {};
+  if (status !== undefined && Object.keys(req.body).length === 1) {
+    if (!['Active', 'Paused'].includes(status)) return res.status(400).json({ error: 'A valid status is required' });
+    db.prepare('UPDATE biometric_devices SET status = ? WHERE id = ?').run(status, req.params.id);
+    logAudit(req.user.sub, status === 'Active' ? 'device.enable' : 'device.disable', 'biometric_device', device.id, device.name);
+    return res.json({ device: db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id) });
+  }
+  if (comm_mode && !['ADMS', 'HTTP', 'API'].includes(comm_mode)) return res.status(400).json({ error: 'Invalid communication mode' });
+  if (device_type && !DEVICE_TYPES.includes(device_type)) return res.status(400).json({ error: 'Invalid device type' });
+  db.prepare(`
+    UPDATE biometric_devices SET
+      name = COALESCE(?, name), model = COALESCE(?, model), ip_address = COALESCE(?, ip_address), port = COALESCE(?, port),
+      location = COALESCE(?, location), timezone = COALESCE(?, timezone), comm_mode = COALESCE(?, comm_mode),
+      device_type = COALESCE(?, device_type), zone = COALESCE(?, zone)
+    WHERE id = ?
+  `).run(name?.trim() || null, model?.trim() || null, ip_address?.trim() || null, port ? Number(port) : null,
+    location?.trim() || null, timezone?.trim() || null, comm_mode || null, device_type || null, zone?.trim() || null, req.params.id);
+  logAudit(req.user.sub, 'device.edit', 'biometric_device', device.id, device.name);
   res.json({ device: db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id) });
 });
 
+router.delete('/biometric/devices/:id', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const device = db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  logAudit(req.user.sub, 'device.delete', 'biometric_device', device.id, `${device.name} (${device.serial_number})`);
+  db.prepare('DELETE FROM biometric_devices WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Honest scope: a plain TCP reachability check to the stored IP:port, not a protocol handshake —
+// see the section-level comment above.
+router.post('/biometric/devices/:id/test-connection', async (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const device = db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  if (!device.ip_address || !device.port) {
+    logAudit(req.user.sub, 'device.test_connection', 'biometric_device', device.id, 'No IP/port configured');
+    return res.json({ reachable: false, caveat: 'No IP address/port configured for this device.' });
+  }
+  const net = await import('node:net');
+  const reachable = await new Promise((resolve) => {
+    const socket = net.createConnection({ host: device.ip_address, port: device.port, timeout: 3000 });
+    socket.on('connect', () => { socket.destroy(); resolve(true); });
+    socket.on('error', () => resolve(false));
+    socket.on('timeout', () => { socket.destroy(); resolve(false); });
+  });
+  logAudit(req.user.sub, 'device.test_connection', 'biometric_device', device.id, reachable ? 'Reachable' : 'Unreachable');
+  res.json({ reachable, caveat: 'This only confirms the network address is reachable — it does not verify the eSSL/ADMS protocol itself, since this hardware only ever pushes data to HRMS, never accepts an inbound handshake from it.' });
+});
+
+router.post('/biometric/devices/:id/sync-now', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const device = db.prepare('SELECT * FROM biometric_devices WHERE id = ?').get(req.params.id);
+  if (!device) return res.status(404).json({ error: 'Device not found' });
+  try {
+    const result = runBiometricSync(device.id, req.user.sub, 'manual');
+    logAudit(req.user.sub, 'device.sync_now', 'biometric_device', device.id, `Scanned ${result.scanned}, mapped ${result.mapped}`);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.get('/biometric/mappings', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const mappings = db.prepare(`
-    SELECT m.*, e.name AS employee_name, e.employee_code
+    SELECT m.*, e.name AS employee_name, e.employee_code, bd.name AS device_name
     FROM employee_biometric_ids m JOIN employees e ON e.id = m.employee_id
+    LEFT JOIN biometric_devices bd ON bd.id = m.device_id
     ORDER BY e.name
   `).all();
   const unmapped = db.prepare(`
@@ -140,31 +233,44 @@ router.get('/biometric/mappings', (req, res) => {
     WHERE id NOT IN (SELECT employee_id FROM employee_biometric_ids) AND status = 'Active'
     ORDER BY name
   `).all();
-  res.json({ mappings, unmappedEmployees: unmapped });
+  // Distinct device_user_ids that have punched at least once but have no mapping row — the
+  // mirror image of unmappedEmployees, so HR can see raw device activity waiting to be claimed.
+  const unmappedBiometricUsers = db.prepare(`
+    SELECT DISTINCT p.device_user_id, p.device_serial, bd.name AS device_name
+    FROM biometric_punches p
+    LEFT JOIN biometric_devices bd ON bd.serial_number = p.device_serial
+    WHERE p.device_user_id NOT IN (SELECT device_user_id FROM employee_biometric_ids)
+    ORDER BY p.device_user_id
+  `).all();
+  res.json({ mappings, unmappedEmployees: unmapped, unmappedBiometricUsers });
 });
 
 router.post('/biometric/mappings', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { employee_id, device_user_id } = req.body || {};
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { employee_id, device_user_id, device_id } = req.body || {};
   if (!employee_id || !device_user_id?.toString().trim()) return res.status(400).json({ error: 'Employee and device user ID are required' });
   if (db.prepare('SELECT 1 FROM employee_biometric_ids WHERE device_user_id = ?').get(device_user_id.toString().trim())) {
     return res.status(400).json({ error: 'That device user ID is already mapped to another employee' });
   }
   db.prepare(`
-    INSERT INTO employee_biometric_ids (employee_id, device_user_id) VALUES (?, ?)
-    ON CONFLICT(employee_id) DO UPDATE SET device_user_id = excluded.device_user_id, mapped_at = datetime('now')
-  `).run(employee_id, device_user_id.toString().trim());
+    INSERT INTO employee_biometric_ids (employee_id, device_user_id, device_id) VALUES (?, ?, ?)
+    ON CONFLICT(employee_id) DO UPDATE SET device_user_id = excluded.device_user_id, device_id = excluded.device_id, mapped_at = datetime('now')
+  `).run(employee_id, device_user_id.toString().trim(), device_id || null);
+  const emp = db.prepare('SELECT name FROM employees WHERE id = ?').get(employee_id);
+  logAudit(req.user.sub, 'mapping.create', 'employee_biometric_id', employee_id, `${emp?.name || employee_id} → ${device_user_id}`);
   res.status(201).json({ ok: true });
 });
 
 router.delete('/biometric/mappings/:employeeId', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const emp = db.prepare('SELECT name FROM employees WHERE id = ?').get(req.params.employeeId);
   db.prepare('DELETE FROM employee_biometric_ids WHERE employee_id = ?').run(req.params.employeeId);
+  logAudit(req.user.sub, 'mapping.delete', 'employee_biometric_id', req.params.employeeId, emp?.name || req.params.employeeId);
   res.json({ ok: true });
 });
 
 router.get('/biometric/punches', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const punches = db.prepare(`
     SELECT p.*, e.name AS employee_name
     FROM biometric_punches p LEFT JOIN employees e ON e.id = p.employee_id
@@ -174,7 +280,7 @@ router.get('/biometric/punches', (req, res) => {
 });
 
 router.post('/biometric/punches/:id/map', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { employee_id } = req.body || {};
   if (!employee_id) return res.status(400).json({ error: 'employee_id is required' });
   try {
@@ -185,10 +291,89 @@ router.post('/biometric/punches/:id/map', (req, res) => {
   }
 });
 
+// ---------- Monitoring ----------
+router.get('/biometric/sync-history', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ history: recentSyncHistory(30) });
+});
+
+router.get('/biometric/error-log', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ errors: recentErrorLog(30, req.query.source) });
+});
+
+router.get('/biometric/audit-log', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ logs: recentAuditLogs(50, { entityType: req.query.entityType }) });
+});
+
+// ---------- Export ----------
+router.get('/biometric/mappings/export.csv', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT e.employee_code, e.name, m.device_user_id, bd.name AS device_name, m.mapped_at
+    FROM employee_biometric_ids m JOIN employees e ON e.id = m.employee_id
+    LEFT JOIN biometric_devices bd ON bd.id = m.device_id ORDER BY e.name
+  `).all();
+  const csv = ['code,name,device_user_id,device,mapped_at', ...rows.map((r) => `${r.employee_code},${r.name},${r.device_user_id},${r.device_name || ''},${r.mapped_at}`)].join('\n');
+  logAudit(req.user.sub, 'export.mappings_csv', 'biometric', null, `${rows.length} rows`);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="biometric-mappings.csv"');
+  res.send(csv);
+});
+
+router.get('/biometric/mappings/export.xlsx', async (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT e.employee_code, e.name, m.device_user_id, bd.name AS device_name, m.mapped_at
+    FROM employee_biometric_ids m JOIN employees e ON e.id = m.employee_id
+    LEFT JOIN biometric_devices bd ON bd.id = m.device_id ORDER BY e.name
+  `).all();
+  logAudit(req.user.sub, 'export.mappings_xlsx', 'biometric', null, `${rows.length} rows`);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Mappings');
+  sheet.addRow(['code', 'name', 'device_user_id', 'device', 'mapped_at']).font = { bold: true };
+  rows.forEach((r) => sheet.addRow([r.employee_code, r.name, r.device_user_id, r.device_name || '', r.mapped_at]));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="biometric-mappings.xlsx"');
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
+router.get('/biometric/punches/export.csv', (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT p.device_serial, p.device_user_id, e.name AS employee_name, p.punch_time, p.punch_type, p.processed
+    FROM biometric_punches p LEFT JOIN employees e ON e.id = p.employee_id ORDER BY p.punch_time DESC LIMIT 1000
+  `).all();
+  const csv = ['device_serial,device_user_id,employee_name,punch_time,punch_type,processed', ...rows.map((r) => `${r.device_serial},${r.device_user_id},${r.employee_name || ''},${r.punch_time},${r.punch_type},${r.processed}`)].join('\n');
+  logAudit(req.user.sub, 'export.punches_csv', 'biometric', null, `${rows.length} rows`);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="biometric-punches.csv"');
+  res.send(csv);
+});
+
+router.get('/biometric/punches/export.xlsx', async (req, res) => {
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = db.prepare(`
+    SELECT p.device_serial, p.device_user_id, e.name AS employee_name, p.punch_time, p.punch_type, p.processed
+    FROM biometric_punches p LEFT JOIN employees e ON e.id = p.employee_id ORDER BY p.punch_time DESC LIMIT 1000
+  `).all();
+  logAudit(req.user.sub, 'export.punches_xlsx', 'biometric', null, `${rows.length} rows`);
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Punches');
+  sheet.addRow(['device_serial', 'device_user_id', 'employee_name', 'punch_time', 'punch_type', 'processed']).font = { bold: true };
+  rows.forEach((r) => sheet.addRow([r.device_serial, r.device_user_id, r.employee_name || '', r.punch_time, r.punch_type, r.processed]));
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="biometric-punches.xlsx"');
+  await workbook.xlsx.write(res);
+  res.end();
+});
+
 // Test tool: simulate a real device sending a punch, so the whole receive -> map -> attendance
 // pipeline is verifiable without physical hardware on hand.
 router.post('/biometric/simulate', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (!isBiometricAdmin(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { device_serial, device_user_id, punch_type } = req.body || {};
   const device = db.prepare('SELECT * FROM biometric_devices WHERE serial_number = ?').get(device_serial);
   if (!device) return res.status(400).json({ error: 'Unknown device serial number' });
@@ -196,6 +381,7 @@ router.post('/biometric/simulate', (req, res) => {
   const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
   const line = `${device_user_id}\t${timestamp}\t${statusCode}\t1`;
   const punchId = processPunchLine(device.serial_number, line);
+  if (!employeeForDeviceUser(device_user_id)) logBiometricError('simulate', `Unmapped device user "${device_user_id}"`, null, device.serial_number);
   res.status(201).json({ punch: db.prepare('SELECT * FROM biometric_punches WHERE id = ?').get(punchId) });
 });
 

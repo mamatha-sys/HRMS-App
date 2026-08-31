@@ -10,3 +10,14 @@ server/data/
 *.db-*
 .DS_Store
 server/eng.traineddata
+
+# Local scratch/safety-backup artifacts — never meant for version control (some contain real
+# secrets or full DB dumps, e.g. server-bc/.env, server/data_backups/*.bak.*).
+*-bc/
+server/data_backups/
+*.backup
+*.backup2
+*.before-*
+*.bak
+*.bak.*
+*.swp

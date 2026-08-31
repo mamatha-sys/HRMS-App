@@ -1,10 +1,11 @@
 import { Router } from 'express';
+import ExcelJS from 'exceljs';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
-import { isScopedRole, filterToScope } from '../utils/scope.js';
+import { isScopedRole, filterToScopeOrOwnDepartment } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
-import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate, enabledMethods, isMethodEnabled, setMethodEnabled, notifyIfLate, notifyIfEarlyLogout, notifyAttendanceGaps } from '../utils/attendanceCore.js';
+import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate, enabledMethods, isMethodEnabled, setMethodEnabled, employeeCheckinMethods, setEmployeeCheckinMethods, effectiveMethodsFor, notifyIfLate, notifyIfEarlyLogout, notifyAttendanceGaps, effectiveShiftFor, computeWorkStats } from '../utils/attendanceCore.js';
 import { isValidDescriptor, euclideanDistance, FACE_MATCH_THRESHOLD } from '../utils/face.js';
 
 const router = Router();
@@ -12,11 +13,44 @@ router.use(requireAuth);
 
 // Dynamic RBAC via Manage Roles — module '07' (Attendance & Time Tracking). A Senior Team
 // Lead/Team Lead/Assistant Manager also passes: every READ route below already fetches-then-
-// filters via filterToScope, so admitting them here only ever narrows to their assigned
-// departments/teams, never widens to company-wide. Write actions (e.g. /mark) intentionally
-// check canModuleAdmin directly instead of this isHR, so scoped roles stay view/approval-only.
+// filters via filterToScopeOrOwnDepartment, so admitting them here only ever narrows to their
+// assigned departments/teams, never widens to company-wide. Write actions (e.g. /mark)
+// intentionally check canModuleAdmin directly instead of this isHR, so scoped roles stay
+// view/approval-only.
 const isHR = (role) => canModuleAdmin(role, '07') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
+
+// Shared by /biometric-list, /monthly-report, /punch-log and all their /export twins — same
+// employee_code/name-contains/exact-department/exact-designation filter shape everywhere, so a
+// report and its export always agree on what "filtered" means.
+function applyEmployeeFilters(employees, query) {
+  let rows = employees;
+  if (query.employeeCode) {
+    const q = String(query.employeeCode).toLowerCase();
+    rows = rows.filter((e) => e.employee_code?.toLowerCase().includes(q));
+  }
+  if (query.name) {
+    const q = String(query.name).toLowerCase();
+    rows = rows.filter((e) => e.name?.toLowerCase().includes(q));
+  }
+  if (query.department) rows = rows.filter((e) => e.department === query.department);
+  if (query.designation) rows = rows.filter((e) => e.designation === query.designation);
+  return rows;
+}
+
+// One small workbook, one sheet, a bold header row — shared by every .xlsx export below so each
+// just supplies its own headers/rows/filename instead of repeating the workbook boilerplate.
+async function sendXlsx(res, sheetName, headers, rows, filename) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet(sheetName);
+  sheet.addRow(headers).font = { bold: true };
+  rows.forEach((r) => sheet.addRow(r));
+  sheet.columns.forEach((col) => { col.width = 18; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  await workbook.xlsx.write(res);
+  res.end();
+}
 
 const SCOPE_BANNER = {
   super_admin: 'Full, unrestricted access — configures the escalation window itself, organization-wide.',
@@ -32,16 +66,16 @@ router.get('/overview', (req, res) => {
   const dept = req.query.department || null;
 
   let rows = db.prepare(`
-    SELECT e.department, e.team_id, a.status, a.check_in_time, a.check_out_time, a.method, a.half_day_flag
+    SELECT e.department, e.team_id, a.status, a.check_in_time, a.check_out_time, a.method, a.half_day_flag, a.late_minutes
     FROM employees e
     LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = @date
     WHERE (@dept IS NULL OR e.department = @dept)
   `).all({ date, dept });
-  rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+  rows = filterToScopeOrOwnDepartment(rows, req.user.role, myEmployee(req.user.sub)?.id);
 
   const present = rows.filter((r) => r.status === 'Present').length;
   const absent = rows.filter((r) => r.status === 'Absent').length;
-  const late = rows.filter((r) => r.check_in_time && r.check_in_time > LATE_AFTER).length;
+  const late = rows.filter((r) => r.late_minutes > 0).length;
   const halfDayCut = rows.filter((r) => r.half_day_flag).length;
   const missingPunch = rows.filter((r) => r.status === 'Present' && !r.check_in_time).length;
   const checkedIn = rows.filter((r) => r.check_in_time).length;
@@ -65,7 +99,7 @@ router.get('/overview', (req, res) => {
   const teamNameOf = (id) => (id ? db.prepare('SELECT name FROM teams WHERE id = ?').get(id)?.name : null);
   let regularizations = db.prepare("SELECT * FROM approvals WHERE type = 'Regularization' ORDER BY (status='Pending') DESC, created_at DESC")
     .all().map((r) => ({ ...r, ...(employeeByName(r.requester) || {}) }));
-  regularizations = filterToScope(regularizations, req.user.role, myEmployee(req.user.sub)?.id)
+  regularizations = filterToScopeOrOwnDepartment(regularizations, req.user.role, myEmployee(req.user.sub)?.id)
     .slice(0, 10)
     .map((r) => ({ ...r, team_name: teamNameOf(r.team_id), current_stage_name: roleNameOf(r.current_stage_role_id) }));
 
@@ -85,30 +119,102 @@ router.get('/overview', (req, res) => {
   });
 });
 
-// HR: per-employee biometric/device attendance list — last check-in method/time/location
-// plus this month's present & late counts, so HR can see who's on which device.
-router.get('/biometric-list', (req, res) => {
-  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const monthPrefix = db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+// Shared by /biometric-list and its export twins — an optional ?date=YYYY-MM-DD narrows the
+// report to that one day's punches/attendance (falling back to "last ever" when omitted, the
+// original behavior), and always drives the month-count columns off that date's own month, so
+// picking a date in a past month reports that month's counts, not the current one.
+function biometricListRows(req) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : null;
+  const monthPrefix = date ? date.slice(0, 7) : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
 
-  const employees = filterToScope(
-    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+  const employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
+    db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
-  );
+  ), req.query);
+
   const rows = employees.map((e) => {
-    const last = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND check_in_time IS NOT NULL ORDER BY date DESC LIMIT 1').get(e.id);
-    const monthRows = db.prepare("SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?").all(e.id, monthPrefix + '%');
+    const lastAttendance = date
+      ? db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(e.id, date)
+      : db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND check_in_time IS NOT NULL ORDER BY date DESC, id DESC LIMIT 1').get(e.id);
+
+    const dayPunches = date
+      ? db.prepare('SELECT * FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time DESC, id DESC').all(e.id, date + '%')
+      : [];
+    const lastPunch = date
+      ? (dayPunches[0] || null)
+      : db.prepare('SELECT * FROM biometric_punches WHERE employee_id = ? ORDER BY punch_time DESC, id DESC LIMIT 1').get(e.id);
+
+    const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, monthPrefix + '%');
     const presentDays = monthRows.filter((r) => r.status === 'Present').length;
-    const lateDays = monthRows.filter((r) => r.check_in_time && r.check_in_time > LATE_AFTER).length;
+    const lateDays = monthRows.filter((r) => r.late_minutes > 0).length;
     const halfDayCutDays = monthRows.filter((r) => r.half_day_flag).length;
+
     return {
-      employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department,
-      last_method: last?.method || null, last_check_in: last ? `${last.date} ${last.check_in_time}` : null,
-      last_location: last?.latitude != null ? { lat: last.latitude, lng: last.longitude } : null,
-      present_days_month: presentDays, late_days_month: lateDays, half_day_cut_days_month: halfDayCutDays
+      employee_id: e.id,
+      employee_code: e.employee_code,
+      name: e.name,
+      department: e.department,
+      designation: e.designation,
+
+      last_method: lastPunch ? 'Biometric (Fingerprint)' : (lastAttendance?.method || null),
+      last_punch: lastPunch?.punch_time ? lastPunch.punch_time.slice(0, 16) : null,
+      punch_count: date ? dayPunches.length : null,
+
+      check_in: lastAttendance?.check_in_time
+        ? `${lastAttendance.date} ${lastAttendance.check_in_time}`
+        : null,
+
+      check_out: lastAttendance?.check_out_time
+        ? `${lastAttendance.date} ${lastAttendance.check_out_time}`
+        : null,
+
+      last_check_in: lastPunch
+        ? lastPunch.punch_time.slice(0, 16)
+        : (lastAttendance ? `${lastAttendance.date} ${lastAttendance.check_in_time}` : null),
+
+      last_location: lastAttendance?.latitude != null
+        ? { lat: lastAttendance.latitude, lng: lastAttendance.longitude }
+        : null,
+
+      present_days_month: presentDays,
+      late_days_month: lateDays,
+      half_day_cut_days_month: halfDayCutDays
     };
   });
-  res.json({ month: monthPrefix, rows });
+  return { date, month: monthPrefix, rows };
+}
+
+// HR: per-employee biometric/device attendance list — last check-in method/time/location
+// plus this month's present & late counts, so HR can see who's on which device. An optional
+// ?date= narrows it to one specific day — see biometricListRows above.
+router.get('/biometric-list', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json(biometricListRows(req));
+});
+
+// CSV/Excel twins of /biometric-list — same filters (including ?date=), same columns as the
+// on-screen table.
+router.get('/biometric-list/export', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { date, month, rows } = biometricListRows(req);
+  const csv = [
+    'code,name,department,designation,last_method,last_check_in,punch_count,present_days_month,late_days_month,half_day_cut_days_month',
+    ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.designation || ''},${r.last_method || ''},${r.last_check_in || ''},${r.punch_count ?? ''},${r.present_days_month},${r.late_days_month},${r.half_day_cut_days_month}`)
+  ].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="attendance-biometric-${date || month}.csv"`);
+  res.send(csv);
+});
+
+router.get('/biometric-list/export.xlsx', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { date, month, rows } = biometricListRows(req);
+  const excelRows = rows.map((r) => [
+    r.employee_code, r.name, r.department, r.designation || '',
+    r.last_method || '', r.last_check_in || '', r.punch_count ?? '',
+    r.present_days_month, r.late_days_month, r.half_day_cut_days_month
+  ]);
+  await sendXlsx(res, 'Biometric Attendance', ['code', 'name', 'department', 'designation', 'last_method', 'last_check_in', 'punch_count', 'present_days_month', 'late_days_month', 'half_day_cut_days_month'], excelRows, `attendance-biometric-${date || month}.xlsx`);
 });
 
 // HR monthly attendance report — present/absent/leave/late counts + attendance % per employee.
@@ -117,16 +223,16 @@ router.get('/monthly-report', (req, res) => {
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
   const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(?  || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
 
-  const employees = filterToScope(
-    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+  const employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
+    db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
-  );
+  ), req.query);
   const rows = employees.map((e) => {
-    const marks = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    const marks = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     const present = marks.filter((m) => m.status === 'Present').length;
     const absent = marks.filter((m) => m.status === 'Absent').length;
     const leave = marks.filter((m) => m.status === 'Leave').length;
-    const late = marks.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length;
+    const late = marks.filter((m) => m.late_minutes > 0).length;
     const halfDayCut = marks.filter((m) => m.half_day_flag).length;
     const attendancePct = daysInMonth > 0 ? Math.round((present / daysInMonth) * 100) : 0;
     return { ...e, present, absent, leave, late, halfDayCut, attendancePct };
@@ -136,32 +242,56 @@ router.get('/monthly-report', (req, res) => {
 
 // ?id=<employee id> narrows this to a single employee's monthly summary — same columns, one row
 // — rather than a separate endpoint, matching /reports/employees.csv's pattern. Filtered through
-// filterToScope FIRST so a scoped role can't export someone outside their department/team just by
-// passing an arbitrary id.
+// filterToScopeOrOwnDepartment FIRST so a scoped role can't export someone outside their
+// department/team just by passing an arbitrary id.
 router.get('/monthly-report/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
   const employeeId = req.query.id ? Number(req.query.id) : null;
-  let employees = filterToScope(
-    db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
+  let employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
+    db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
-  );
+  ), req.query);
   if (employeeId) employees = employees.filter((e) => e.id === employeeId);
   const rows = employees.map((e) => {
-    const marks = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    const marks = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     return {
       ...e,
       present: marks.filter((m) => m.status === 'Present').length,
       absent: marks.filter((m) => m.status === 'Absent').length,
       leave: marks.filter((m) => m.status === 'Leave').length,
-      late: marks.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length,
+      late: marks.filter((m) => m.late_minutes > 0).length,
       halfDayCut: marks.filter((m) => m.half_day_flag).length
     };
   });
-  const csv = ['code,name,department,present,absent,leave,late,half_day_cut', ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.present},${r.absent},${r.leave},${r.late},${r.halfDayCut}`)].join('\n');
+  const csv = [
+    'code,name,department,designation,present,absent,leave,late,half_day_cut',
+    ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.designation || ''},${r.present},${r.absent},${r.leave},${r.late},${r.halfDayCut}`)
+  ].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${employeeId ? `attendance-monthly-${month}-${rows[0]?.employee_code || employeeId}` : `attendance-monthly-${month}`}.csv"`);
   res.send(csv);
+});
+
+router.get('/monthly-report/export.xlsx', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : db.prepare("SELECT strftime('%Y-%m','now') AS m").get().m;
+  const employeeId = req.query.id ? Number(req.query.id) : null;
+  let employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
+    db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  ), req.query);
+  if (employeeId) employees = employees.filter((e) => e.id === employeeId);
+  const rows = employees.map((e) => {
+    const marks = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    return [
+      e.employee_code, e.name, e.department, e.designation || '',
+      marks.filter((m) => m.status === 'Present').length, marks.filter((m) => m.status === 'Absent').length, marks.filter((m) => m.status === 'Leave').length,
+      marks.filter((m) => m.late_minutes > 0).length, marks.filter((m) => m.half_day_flag).length
+    ];
+  });
+  const filename = employeeId ? `attendance-monthly-${month}-${rows[0]?.[0] || employeeId}.xlsx` : `attendance-monthly-${month}.xlsx`;
+  await sendXlsx(res, 'Monthly Report', ['code', 'name', 'department', 'designation', 'present', 'absent', 'leave', 'late', 'half_day_cut'], rows, filename);
 });
 
 // HR: everyone's attendance for a date. Employee: own recent history.
@@ -175,7 +305,7 @@ router.get('/', (req, res) => {
       LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ?
       ORDER BY e.id
     `).all(date);
-    rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+    rows = filterToScopeOrOwnDepartment(rows, req.user.role, myEmployee(req.user.sub)?.id);
     const present = rows.filter((r) => r.status === 'Present').length;
     const absent = rows.filter((r) => r.status === 'Absent').length;
     const onLeave = rows.filter((r) => r.status === 'Leave').length;
@@ -211,18 +341,94 @@ router.get('/mine', (req, res) => {
   // as the HR-only monthly report (present ÷ days in month), just scoped to the calling employee.
   const month = today().slice(0, 7);
   const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(? || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
-  const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(me.id, month + '%');
+  const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(me.id, month + '%');
   const summary = {
     month,
     present: monthRows.filter((m) => m.status === 'Present').length,
     absent: monthRows.filter((m) => m.status === 'Absent').length,
-    late: monthRows.filter((m) => m.check_in_time && m.check_in_time > LATE_AFTER).length,
+    late: monthRows.filter((m) => m.late_minutes > 0).length,
     halfDayCut: monthRows.filter((m) => m.half_day_flag).length,
     missingPunch: monthRows.filter((m) => m.status === 'Present' && !m.check_in_time).length,
     attendancePct: daysInMonth > 0 ? Math.round((monthRows.filter((m) => m.status === 'Present').length / daysInMonth) * 100) : 0
   };
 
   res.json({ rows, today: todays, me: { id: me.id, name: me.name, employee_code: me.employee_code }, regularizations, chainLabel: approvalChainLabel(), summary });
+});
+
+function hmsToSeconds(t) {
+  const [h, m, s = 0] = t.split(':').map(Number);
+  return h * 3600 + m * 60 + s;
+}
+function secondsToHms(total) {
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+// Shared by /mine/report and its export twins — same per-day punch-time resolution as
+// punchLogRows (raw biometric punches when present, else the attendance row's own
+// check-in/check-out), just scoped to the caller instead of HR's company-wide view, and
+// spanning a range instead of one date. Only days with at least a check-in are returned — an
+// unmarked/absent day has no punches to report.
+function myReportRows(req) {
+  const me = myEmployee(req.user.sub);
+  if (!me) return { from: null, to: null, branch: null, rows: [] };
+
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : null;
+  let from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : null;
+  let to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : null;
+  if (month) {
+    from = `${month}-01`;
+    to = db.prepare("SELECT date(? || '-01', '+1 month', '-1 day') AS d").get(month).d;
+  } else if (!from || !to) {
+    const m = today().slice(0, 7);
+    from = `${m}-01`;
+    to = today();
+  }
+
+  const attRows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date BETWEEN ? AND ? AND check_in_time IS NOT NULL ORDER BY date').all(me.id, from, to);
+  const rows = attRows.map((att) => {
+    const punches = db.prepare('SELECT punch_time FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time ASC').all(me.id, att.date + '%');
+    let times = punches.map((p) => p.punch_time.slice(11, 19));
+    if (times.length === 0) {
+      if (att.check_in_time) times.push(att.check_in_time.length === 5 ? `${att.check_in_time}:00` : att.check_in_time);
+      if (att.check_out_time) times.push(att.check_out_time.length === 5 ? `${att.check_out_time}:00` : att.check_out_time);
+    }
+    const first = times[0] || null;
+    const last = times.length > 1 ? times[times.length - 1] : null;
+    const totalSeconds = first && last ? Math.max(0, hmsToSeconds(last) - hmsToSeconds(first)) : null;
+    return {
+      date: att.date,
+      first_check_in: first,
+      last_check_out: last,
+      total_hours: totalSeconds != null ? secondsToHms(totalSeconds) : null,
+      method: punches.length > 0 ? 'Biometric (Fingerprint)' : (att.method || null),
+      status: att.check_out_time ? 'Checked Out' : 'Checked In',
+      latitude: att.latitude,
+      longitude: att.longitude,
+      logs: times
+    };
+  });
+  return { from, to, branch: me.branch || null, rows };
+}
+
+router.get('/mine/report', (req, res) => {
+  res.json(myReportRows(req));
+});
+
+// Excel twin of /mine/report — same filters/columns as the on-screen table, plus a Logs column
+// (every raw punch time for that day) since there's no click-to-expand in a spreadsheet — this is
+// what "View Logs" downloads as.
+router.get('/mine/report/export.xlsx', async (req, res) => {
+  const { from, to, rows } = myReportRows(req);
+  const excelRows = rows.map((r) => [
+    r.date, r.first_check_in || '', r.last_check_out || '', r.method || '',
+    r.latitude != null ? `${r.latitude}, ${r.longitude}` : '', r.total_hours || '', r.status, r.logs.join(' | ')
+  ]);
+  await sendXlsx(res, 'My Attendance',
+    ['date', 'first_check_in', 'last_check_out', 'method', 'location', 'total_hours', 'status', 'logs'],
+    excelRows, `my-attendance-${from}-to-${to}.xlsx`);
 });
 
 // Calendar view — every day of one calendar month for one employee (self by default; HR/scoped
@@ -236,7 +442,7 @@ router.get('/calendar', (req, res) => {
   let employee;
   if (employeeId) {
     if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-    const scoped = filterToScope(
+    const scoped = filterToScopeOrOwnDepartment(
       db.prepare('SELECT id, employee_code, name, department, team_id FROM employees WHERE id = ?').all(employeeId),
       req.user.role, myEmployee(req.user.sub)?.id
     );
@@ -279,14 +485,23 @@ function validCoord(v) { return typeof v === 'number' && Number.isFinite(v); }
 // first successful check-in enrolls the employee's face on their login account (same account
 // doing the check-in), every check-in after that must match it. This is a separate enrollment
 // from anything login-related; it just happens to reuse the same users.face_descriptor column.
+// Biometric (Fingerprint) is never a choice here — it only ever means a real device punch,
+// applied directly by biometricPunch.js's own write path (bypassing this route entirely). Letting
+// someone self-select it from this dropdown would mislabel an ordinary face-verified web/mobile
+// check-in as a device punch, undermining the Biometric Attendance List/Punch Log as a genuine
+// device-sourced record. Falls back to Web Check-in exactly like an unrecognized/disabled method
+// already did.
+const SELF_CHECKIN_METHODS = METHODS.filter((m) => m !== 'Biometric (Fingerprint)');
+
 router.post('/check-in', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, today());
   if (existing?.check_in_time) return res.status(400).json({ error: 'Already checked in today at ' + existing.check_in_time });
 
-  const method = METHODS.includes(req.body?.method) ? req.body.method : METHODS[0];
+  const method = SELF_CHECKIN_METHODS.includes(req.body?.method) ? req.body.method : SELF_CHECKIN_METHODS[0];
   if (!isMethodEnabled(method)) return res.status(400).json({ error: `${method} has been disabled by your administrator.` });
+  if (!effectiveMethodsFor(me.id).includes(method)) return res.status(403).json({ error: `${method} has not been assigned to you by your administrator.` });
 
   const faceDescriptor = req.body?.faceDescriptor;
   if (!isValidDescriptor(faceDescriptor)) return res.status(400).json({ error: 'Face verification is required to check in.' });
@@ -302,16 +517,23 @@ router.post('/check-in', (req, res) => {
 
   const latitude = validCoord(req.body?.latitude) ? req.body.latitude : null;
   const longitude = validCoord(req.body?.longitude) ? req.body.longitude : null;
-  const attendance = upsertToday(me.id, { status: 'Present', check_in_time: nowTime(), method, latitude, longitude });
+  const checkInTime = nowTime();
+  const shift = effectiveShiftFor(me.id, today());
+  const stats = computeWorkStats(checkInTime, null, shift);
+  const attendance = upsertToday(me.id, { status: 'Present', check_in_time: checkInTime, method, latitude, longitude, shift_id: shift.shiftId, ...stats });
   recomputeLateFlags(me.id, today().slice(0, 7));
-  notifyIfLate(me.id, attendance);
+  notifyIfLate(me.id, attendance, shift);
   notifyAttendanceGaps(me.id); // e.g. yesterday's missed checkout, surfaced right when they check in again
   res.json({ attendance: db.prepare('SELECT * FROM attendance WHERE id = ?').get(attendance.id), faceJustEnrolled });
 });
 
-// The check-in dropdown's options — only methods Super Admin has left enabled.
+// The check-in dropdown's options — company-enabled methods, further narrowed to this specific
+// employee's personal assignment (if Super Admin has set one), minus Biometric (Fingerprint),
+// which is never a self-selectable option — see SELF_CHECKIN_METHODS above.
 router.get('/methods', (req, res) => {
-  res.json({ methods: enabledMethods() });
+  const me = myEmployee(req.user.sub);
+  const methods = me ? effectiveMethodsFor(me.id) : enabledMethods();
+  res.json({ methods: methods.filter((m) => m !== 'Biometric (Fingerprint)') });
 });
 
 // Super Admin: every method with its enabled state, for the admin toggle screen.
@@ -328,14 +550,43 @@ router.put('/methods/:method', (req, res) => {
   res.json({ methods: METHODS.map((m) => ({ method: m, enabled: isMethodEnabled(m) })) });
 });
 
+// Super Admin: per-employee check-in method assignment — restrict a specific employee to a
+// subset of the company-enabled methods (e.g. Mobile App only). No assignment row for an
+// employee = unrestricted, so this list is opt-in only, never opt-out-by-omission.
+router.get('/checkin-methods/employees', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Insufficient permissions' });
+  const employees = applyEmployeeFilters(
+    db.prepare("SELECT id, employee_code, name, department, designation FROM employees WHERE status = 'Active' ORDER BY name").all(),
+    req.query
+  );
+  const rows = employees.map((e) => ({ ...e, methods: employeeCheckinMethods(e.id) }));
+  res.json({ employees: rows, allMethods: METHODS });
+});
+
+router.put('/checkin-methods/:employeeId', (req, res) => {
+  if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Insufficient permissions' });
+  const employee = db.prepare('SELECT id FROM employees WHERE id = ?').get(req.params.employeeId);
+  if (!employee) return res.status(404).json({ error: 'Employee not found' });
+  const methods = Array.isArray(req.body?.methods) ? req.body.methods : [];
+  try {
+    setEmployeeCheckinMethods(employee.id, methods);
+    res.json({ employeeId: employee.id, methods: employeeCheckinMethods(employee.id) });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 router.post('/check-out', (req, res) => {
   const me = myEmployee(req.user.sub);
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, today());
   if (!existing?.check_in_time) return res.status(400).json({ error: 'Check in first.' });
   if (existing.check_out_time) return res.status(400).json({ error: 'Already checked out at ' + existing.check_out_time });
-  const attendance = upsertToday(me.id, { check_out_time: nowTime() });
-  notifyIfEarlyLogout(me.id, attendance);
+  const checkOutTime = nowTime();
+  const shift = effectiveShiftFor(me.id, today());
+  const stats = computeWorkStats(existing.check_in_time, checkOutTime, shift);
+  const attendance = upsertToday(me.id, { check_out_time: checkOutTime, shift_id: shift.shiftId, ...stats });
+  notifyIfEarlyLogout(me.id, attendance, shift);
   res.json({ attendance });
 });
 
@@ -363,13 +614,95 @@ router.get('/export', (req, res) => {
     SELECT e.id, e.employee_code, e.name, e.department, e.team_id, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
     FROM employees e LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ? ORDER BY e.id
   `).all(date);
-  rows = filterToScope(rows, req.user.role, myEmployee(req.user.sub)?.id);
+  rows = filterToScopeOrOwnDepartment(rows, req.user.role, myEmployee(req.user.sub)?.id);
   if (employeeId) rows = rows.filter((r) => r.id === employeeId);
   const csv = ['code,name,department,status,check_in,check_out,method,half_day_cut',
     ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.status},${r.check_in},${r.check_out},${r.method},${r.half_day_flag ? 1 : 0}`)].join('\n');
   res.setHeader('Content-Type', 'text/csv');
   res.setHeader('Content-Disposition', `attachment; filename="${employeeId ? `attendance-${date}-${rows[0]?.employee_code || employeeId}` : `attendance-${date}`}.csv"`);
   res.send(csv);
+});
+
+router.get('/export.xlsx', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const date = req.query.date || today();
+  const employeeId = req.query.id ? Number(req.query.id) : null;
+  let rows = db.prepare(`
+    SELECT e.id, e.employee_code, e.name, e.department, e.team_id, COALESCE(a.status,'Not marked') status, COALESCE(a.check_in_time,'') check_in, COALESCE(a.check_out_time,'') check_out, COALESCE(a.method,'') method, COALESCE(a.half_day_flag,0) half_day_flag
+    FROM employees e LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ? ORDER BY e.id
+  `).all(date);
+  rows = filterToScopeOrOwnDepartment(rows, req.user.role, myEmployee(req.user.sub)?.id);
+  if (employeeId) rows = rows.filter((r) => r.id === employeeId);
+  await sendXlsx(res, 'Attendance',
+    ['code', 'name', 'department', 'status', 'check_in', 'check_out', 'method', 'half_day_cut'],
+    rows.map((r) => [r.employee_code, r.name, r.department, r.status, r.check_in, r.check_out, r.method, r.half_day_flag ? 1 : 0]),
+    `attendance-${date}.xlsx`);
+});
+
+// HR: one row per employee per day, every punch that day — not just first-in/last-out, and not
+// just device punches. A biometric-sourced day reads its full raw punch history from
+// biometric_punches (mirroring the device's own log, break-in/break-out included); a Web
+// Check-in/Mobile App day has no rows there at all (no device involved), so it falls back to that
+// day's plain check-in/check-out times from attendance — otherwise a manually checked-in
+// employee would never show up here at all. Only employees with at least one punch/check-in on
+// the given date are included — an all-zero grid of everyone else isn't useful here.
+function punchLogRows(req) {
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
+  const employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
+    db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
+    req.user.role, myEmployee(req.user.sub)?.id
+  ), req.query);
+  let rows = employees.map((e) => {
+    const punches = db.prepare('SELECT punch_time FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time ASC').all(e.id, date + '%');
+    let times = punches.map((p) => p.punch_time.slice(11, 19));
+    const att = db.prepare('SELECT check_in_time, check_out_time, method FROM attendance WHERE employee_id = ? AND date = ?').get(e.id, date);
+    if (times.length === 0) {
+      if (att?.check_in_time) times.push(att.check_in_time.length === 5 ? `${att.check_in_time}:00` : att.check_in_time);
+      if (att?.check_out_time) times.push(att.check_out_time.length === 5 ? `${att.check_out_time}:00` : att.check_out_time);
+    }
+    if (times.length === 0) return null;
+    // The authoritative in/out status always comes from the attendance row (set the same way
+    // regardless of source), not from guessing at raw punch types — so it stays correct even for
+    // a biometric day with an odd number of punches (e.g. a missed final check-out punch).
+    const status = att?.check_out_time ? 'Checked Out' : 'Checked In';
+    // Method follows the same source-of-truth rule as the times themselves: raw device punches
+    // present means Biometric, regardless of what the (possibly stale) attendance.method column
+    // says; otherwise it's whatever the manual check-in actually recorded.
+    const method = punches.length > 0 ? 'Biometric (Fingerprint)' : (att?.method || 'Web Check-in');
+    return {
+      employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department, designation: e.designation,
+      date, status, method, punch_count: times.length, time_interval: times.join('|')
+    };
+  }).filter(Boolean);
+  if (req.query.status === 'checked_in') rows = rows.filter((r) => r.status === 'Checked In');
+  if (req.query.status === 'checked_out') rows = rows.filter((r) => r.status === 'Checked Out');
+  return { date, rows };
+}
+
+router.get('/punch-log', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json(punchLogRows(req));
+});
+
+router.get('/punch-log/export', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { date, rows } = punchLogRows(req);
+  const csv = [
+    'code,name,department,designation,date,method,status,punch_count,time_interval',
+    ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.designation || ''},${r.date},${r.method},${r.status},${r.punch_count},${r.time_interval}`)
+  ].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="attendance-punch-log-${date}.csv"`);
+  res.send(csv);
+});
+
+router.get('/punch-log/export.xlsx', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const { date, rows } = punchLogRows(req);
+  await sendXlsx(res, 'Punch Log',
+    ['code', 'name', 'department', 'designation', 'date', 'method', 'status', 'punch_count', 'time_interval'],
+    rows.map((r) => [r.employee_code, r.name, r.department, r.designation || '', r.date, r.method, r.status, r.punch_count, r.time_interval]),
+    `attendance-punch-log-${date}.xlsx`);
 });
 
 // Employee raises a regularization request (routed through the shared approvals queue).

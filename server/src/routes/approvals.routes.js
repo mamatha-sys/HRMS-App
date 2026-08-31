@@ -71,7 +71,7 @@ function decide(finalStatus) {
         const requesterEmp = employeeByName(approval.requester);
         if (requesterEmp) {
           notifyEmployee(requesterEmp.id, `Regularization ${finalStatus}`,
-            `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
+            `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`, { email: true });
         }
       }
       // A hierarchy-approved profile edit request unlocks the employee's record back to

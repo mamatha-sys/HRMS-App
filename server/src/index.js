@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
+import { startBackgroundSync } from './utils/biometricSync.js';
 import authRoutes from './routes/auth.routes.js';
 import employeeRoutes from './routes/employees.routes.js';
 import dashboardRoutes from './routes/dashboard.routes.js';
@@ -112,3 +113,4 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => console.log(`HRMS API listening on http://localhost:${PORT}`));
+startBackgroundSync();

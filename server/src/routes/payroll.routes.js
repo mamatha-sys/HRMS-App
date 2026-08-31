@@ -118,10 +118,11 @@ export function applyCtcSplit(employeeId, ctc) {
   db.prepare('UPDATE employees SET ctc = ? WHERE id = ?').run(ctc, employeeId);
 }
 
-// Full breakdown for one employee: only active components, split by type, with totals.
-// A 'withheld' earning (e.g. Bonus) counts toward Gross AND is shown again as its own line in
-// Deductions with the same amount — part of the package, but not paid out this cycle — so it
-// nets to zero effect on take-home while staying visible on the payslip.
+// Full breakdown for one employee: only active components, split by type, with totals. A
+// 'withheld' earning would count toward Gross AND be cloned into Deductions at the same amount
+// (net zero effect on take-home) — no active component uses this currently (Bonus is a plain,
+// paid-out earning), but the mechanism stays available for a future component that genuinely
+// needs it.
 function breakdownFor(employeeId) {
   const emp = db.prepare('SELECT pay_type, ctc FROM employees WHERE id = ?').get(employeeId);
   if (emp?.pay_type === 'Stipend') {

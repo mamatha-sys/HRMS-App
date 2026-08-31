@@ -198,6 +198,36 @@ function MyAttendance({ compact }) {
   const [showReg, setShowReg] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
 
+  // First Check-In / Last Check-Out report: filter by Month OR a Start/End Date range.
+  const [reportMonth, setReportMonth] = useState('');
+  const [reportFrom, setReportFrom] = useState('');
+  const [reportTo, setReportTo] = useState('');
+  const [reportData, setReportData] = useState(null);
+  const [reportError, setReportError] = useState('');
+  const [expandedDate, setExpandedDate] = useState(null);
+
+  function reportParams() {
+    if (reportMonth) return { month: reportMonth };
+    if (reportFrom && reportTo) return { from: reportFrom, to: reportTo };
+    return undefined;
+  }
+  function loadReport(params) {
+    setReportError('');
+    api.get('/attendance/mine/report', { params }).then((r) => setReportData(r.data)).catch(() => setReportError('Could not load report.'));
+  }
+  useEffect(() => { loadReport(); }, []);
+  function searchReport() {
+    if (reportMonth) { loadReport({ month: reportMonth }); return; }
+    if (reportFrom && reportTo) { loadReport({ from: reportFrom, to: reportTo }); return; }
+    setReportError('Choose either Month, or both a Start Date and End Date.');
+  }
+  function resetReportFilters() { setReportMonth(''); setReportFrom(''); setReportTo(''); setExpandedDate(null); loadReport(); }
+  async function exportReportExcel() {
+    const res = await api.get('/attendance/mine/report/export.xlsx', { params: reportParams(), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `my-attendance-${reportData?.from || 'export'}-to-${reportData?.to || ''}.xlsx`; a.click(); URL.revokeObjectURL(url);
+  }
+
   function load() { api.get('/attendance/mine').then((r) => setData(r.data)).catch(() => setError('Could not load attendance.')); }
   useEffect(load, []);
   useEffect(() => {
@@ -310,18 +340,48 @@ function MyAttendance({ compact }) {
       </div>
 
       <div className="card">
-        <div className="feature-name" style={{ marginBottom: 8 }}>Recent (last 30 days)</div>
-        {(!data || data.rows.length === 0) && <div className="empty">No attendance records yet.</div>}
-        {data && data.rows.length > 0 && (
+        <div className="row" style={{ alignItems: 'center' }}>
+          <div className="feature-name">First Check-In &amp; Last Check-Out</div>
+          <div style={{ flex: 1 }} />
+          <button className="primary" onClick={exportReportExcel}>Export (Excel)</button>
+        </div>
+        <div className="feature-meta" style={{ margin: '8px 0 10px' }}>Choose either <strong>Month</strong> OR (<strong>Start Date</strong> and <strong>End Date</strong>)</div>
+        <div className="filter-bar" style={{ marginBottom: 8 }}>
+          <input type="month" placeholder="Month" value={reportMonth} onChange={(e) => { setReportMonth(e.target.value); if (e.target.value) { setReportFrom(''); setReportTo(''); } }} style={{ width: 'auto' }} />
+          <input type="date" placeholder="Start Date" value={reportFrom} onChange={(e) => { setReportFrom(e.target.value); if (e.target.value) setReportMonth(''); }} style={{ width: 'auto' }} />
+          <input type="date" placeholder="End Date" value={reportTo} onChange={(e) => { setReportTo(e.target.value); if (e.target.value) setReportMonth(''); }} style={{ width: 'auto' }} />
+          <button className="primary" onClick={searchReport}>Search</button>
+          <button onClick={resetReportFilters}>Reset Filters</button>
+        </div>
+        {reportError && <div className="banner error">{reportError}</div>}
+        {reportData?.branch && <div className="feature-meta" style={{ marginBottom: 8 }}>Work Location: {reportData.branch}</div>}
+        {!reportData && !reportError && <div className="empty">Loading…</div>}
+        {reportData && reportData.rows.length === 0 && <div className="empty">No check-ins in this range.</div>}
+        {reportData && reportData.rows.length > 0 && (
           <table>
-            <thead><tr><th>Date</th><th>Status</th><th>In</th><th>Out</th><th>Method</th><th>Location</th></tr></thead>
-            <tbody>{data.rows.map((r) => (
-              <tr key={r.id}>
-                <td>{r.date}</td><td><span className={'status-tag ' + tag(r.status)}>{r.status}</span></td><td>{r.check_in_time || '—'}</td><td>{r.check_out_time || '—'}</td><td>{r.method || '—'}</td>
-                <td>{r.latitude != null ? (
-                  <span className="feature-meta">{r.latitude.toFixed(5)}, {r.longitude.toFixed(5)} <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">map</a></span>
-                ) : '—'}</td>
-              </tr>
+            <thead><tr><th>Date</th><th>First Check-In</th><th>Last Check-Out</th><th>Method</th><th>Location</th><th>Total Hours</th><th>Status</th><th>Logs</th></tr></thead>
+            <tbody>{reportData.rows.map((r) => (
+              <Fragment key={r.date}>
+                <tr>
+                  <td>{r.date}</td>
+                  <td>{r.first_check_in || '—'}</td>
+                  <td>{r.last_check_out || '—'}</td>
+                  <td>{r.method || '—'}</td>
+                  <td>{r.latitude != null ? (
+                    <span className="feature-meta">{r.latitude.toFixed(5)}, {r.longitude.toFixed(5)} <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">map</a></span>
+                  ) : '—'}</td>
+                  <td>{r.total_hours || '—'}</td>
+                  <td><span className={'status-tag ' + (r.status === 'Checked Out' ? 'present' : 'pending')}>{r.status}</span></td>
+                  <td><button onClick={() => setExpandedDate(expandedDate === r.date ? null : r.date)}>{expandedDate === r.date ? 'Hide' : 'View Logs'}</button></td>
+                </tr>
+                {expandedDate === r.date && (
+                  <tr>
+                    <td colSpan={8}>
+                      <div className="feature-meta">{r.logs.length} punch{r.logs.length === 1 ? '' : 'es'}: {r.logs.join(', ')}</div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}</tbody>
           </table>
         )}
@@ -343,6 +403,9 @@ function HRAttendance({ compact, sectionLabel }) {
   const [showGrid, setShowGrid] = useState(false);
   const [tab, setTab] = useState('dashboard'); // dashboard | biometric | reports | methods
   const [checkInMethods, setCheckInMethods] = useState(null);
+  const [empMethods, setEmpMethods] = useState(null);
+  const [empMethodFilters, setEmpMethodFilters] = useState({ name: '', department: '' });
+  const [allMethods, setAllMethods] = useState([]);
 
   function load(d, dp) {
     const params = {};
@@ -353,7 +416,20 @@ function HRAttendance({ compact, sectionLabel }) {
   }
   useEffect(() => { load(); api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
   function loadCheckInMethods() { api.get('/attendance/methods/all').then((r) => setCheckInMethods(r.data.methods)).catch(() => {}); }
-  useEffect(() => { if (tab === 'methods' && isSuperAdmin) loadCheckInMethods(); }, [tab, isSuperAdmin]);
+  function loadEmpMethods() {
+    const params = {};
+    if (empMethodFilters.name) params.name = empMethodFilters.name;
+    if (empMethodFilters.department) params.department = empMethodFilters.department;
+    api.get('/attendance/checkin-methods/employees', { params }).then((r) => { setEmpMethods(r.data.employees); setAllMethods(r.data.allMethods); }).catch(() => {});
+  }
+  useEffect(() => { if (tab === 'methods' && isSuperAdmin) { loadCheckInMethods(); loadEmpMethods(); } }, [tab, isSuperAdmin]);
+  async function toggleEmployeeMethod(emp, method) {
+    const has = emp.methods.includes(method);
+    const methods = has ? emp.methods.filter((m) => m !== method) : [...emp.methods, method];
+    setEmpMethods((prev) => prev.map((e) => (e.id === emp.id ? { ...e, methods } : e)));
+    try { await api.put(`/attendance/checkin-methods/${emp.id}`, { methods }); }
+    catch (err) { setError(err.response?.data?.error || 'Could not update assignment.'); loadEmpMethods(); }
+  }
 
   async function decide(id, verb) {
     try { await api.post(`/approvals/${id}/${verb}`); load(date, dept); } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
@@ -382,6 +458,7 @@ function HRAttendance({ compact, sectionLabel }) {
       <div className="row" style={{ marginBottom: 14 }}>
         <button className={tab === 'dashboard' ? 'primary' : ''} onClick={() => setTab('dashboard')}>Dashboard</button>
         <button className={tab === 'biometric' ? 'primary' : ''} onClick={() => setTab('biometric')}>Biometric Attendance List</button>
+        <button className={tab === 'punchlog' ? 'primary' : ''} onClick={() => setTab('punchlog')}>Punch Log (Detailed)</button>
         <button className={tab === 'reports' ? 'primary' : ''} onClick={() => setTab('reports')}>Reports (Monthly)</button>
         {isSuperAdmin && <button className={tab === 'methods' ? 'primary' : ''} onClick={() => setTab('methods')}>Check-in Methods</button>}
       </div>
@@ -399,6 +476,40 @@ function HRAttendance({ compact, sectionLabel }) {
               <span className="row" style={{ gap: 10, flexShrink: 0 }}>
                 <span className={'status-tag ' + (m.enabled ? 'present' : 'locked')}>{m.enabled ? 'Enabled' : 'Disabled'}</span>
                 <button onClick={() => toggleCheckInMethod(m)}>{m.enabled ? 'Disable' : 'Enable'}</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {tab === 'methods' && isSuperAdmin && (
+        <div className="card" style={{ marginTop: 14 }}>
+          <div className="feature-name" style={{ marginBottom: 8 }}>Per-employee assignment</div>
+          <div className="feature-meta" style={{ marginBottom: 8 }}>
+            Restrict a specific employee to a subset of the company-enabled methods above (e.g. Mobile App only). Leave every box for an employee unchecked/all-checked as-is to leave them unrestricted — an employee with no boxes checked can use any company-enabled method.
+          </div>
+          <div className="filter-bar" style={{ marginBottom: 10 }}>
+            <input placeholder="Search name…" value={empMethodFilters.name} onChange={(e) => setEmpMethodFilters({ ...empMethodFilters, name: e.target.value })} />
+            <select value={empMethodFilters.department} onChange={(e) => setEmpMethodFilters({ ...empMethodFilters, department: e.target.value })}>
+              <option value="">All Departments</option>
+              {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+            </select>
+            <button onClick={loadEmpMethods}>Apply</button>
+          </div>
+          {!empMethods && <div className="empty">Loading…</div>}
+          {empMethods && empMethods.length === 0 && <div className="empty">No employees match this filter.</div>}
+          {empMethods && empMethods.map((e) => (
+            <div key={e.id} className="rec-row">
+              <span>{e.name} ({e.employee_code}) — {e.department}
+                <div className="feature-meta">{e.methods.length ? `Restricted to: ${e.methods.join(', ')}` : 'Unrestricted (all company-enabled methods)'}</div>
+              </span>
+              <span className="row" style={{ gap: 10, flexShrink: 0, flexWrap: 'wrap' }}>
+                {allMethods.map((m) => (
+                  <label key={m} className="row" style={{ gap: 4, alignItems: 'center' }}>
+                    <input type="checkbox" checked={e.methods.includes(m)} onChange={() => toggleEmployeeMethod(e, m)} />
+                    {m}
+                  </label>
+                ))}
               </span>
             </div>
           ))}
@@ -495,28 +606,84 @@ function HRAttendance({ compact, sectionLabel }) {
       )}
 
       {tab === 'biometric' && <BiometricList />}
+      {tab === 'punchlog' && <PunchLog />}
       {tab === 'reports' && <MonthlyReports />}
     </div>
   );
 }
 
 function BiometricList() {
+  const [date, setDate] = useState('');
+  const [empId, setEmpId] = useState('');
+  const [name, setName] = useState('');
+  const [dept, setDept] = useState('');
+  const [designation, setDesignation] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [roles, setRoles] = useState([]);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
-  useEffect(() => { api.get('/attendance/biometric-list').then((r) => setData(r.data)).catch(() => setError('Could not load biometric list.')); }, []);
+
+  function filterParams(f) {
+    const { date: d = date, employeeCode = empId, name: n = name, department = dept, designation: r = designation } = f || {};
+    return { date: d || undefined, employeeCode: employeeCode || undefined, name: n || undefined, department: department || undefined, designation: r || undefined };
+  }
+  function load(f) { api.get('/attendance/biometric-list', { params: filterParams(f) }).then((r) => setData(r.data)).catch(() => setError('Could not load biometric list.')); }
+  useEffect(() => {
+    load();
+    api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {});
+    api.get('/org/roles').then((r) => setRoles(r.data.roles)).catch(() => {});
+  }, []);
+
+  function clearFilters() { setDate(''); setEmpId(''); setName(''); setDept(''); setDesignation(''); load({ date: '', employeeCode: '', name: '', department: '', designation: '' }); }
+
+  async function exportCsv() {
+    const res = await api.get('/attendance/biometric-list/export', { params: filterParams(), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-biometric-${data?.date || data?.month || 'export'}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+  async function exportExcel() {
+    const res = await api.get('/attendance/biometric-list/export.xlsx', { params: filterParams(), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-biometric-${data?.date || data?.month || 'export'}.xlsx`; a.click(); URL.revokeObjectURL(url);
+  }
 
   return (
     <div className="card">
-      <div className="feature-name" style={{ marginBottom: 8 }}>Biometric &amp; Device Attendance — Employee List {data && <span className="note">({data.month})</span>}</div>
+      <div className="row" style={{ alignItems: 'center' }}>
+        <div className="feature-name">Biometric &amp; Device Attendance — Employee List {data && <span className="note">({data.date || data.month})</span>}</div>
+        <div style={{ flex: 1 }} />
+        <button className="primary" onClick={exportCsv}>Export</button>
+        <button onClick={exportExcel}>Export (Excel)</button>
+      </div>
+      <div className="filter-bar" style={{ marginTop: 10, marginBottom: 8 }}>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: 'auto' }} />
+        <input placeholder="Employee ID" value={empId} onChange={(e) => setEmpId(e.target.value)} style={{ width: 140 }} />
+        <input placeholder="Employee name" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 180 }} />
+        <select value={dept} onChange={(e) => setDept(e.target.value)}>
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+        </select>
+        <select value={designation} onChange={(e) => setDesignation(e.target.value)}>
+          <option value="">All Roles</option>
+          {roles.map((r) => <option key={r.key} value={r.name}>{r.name}</option>)}
+        </select>
+        <button onClick={() => load()}>Filter</button>
+        {(date || empId || name || dept || designation) && <button onClick={clearFilters}>Clear</button>}
+      </div>
+      {!date && <div className="feature-meta" style={{ marginBottom: 8 }}>Showing each employee's last-ever punch. Pick a date above to see that specific day's biometric report instead.</div>}
       {error && <div className="banner error">{error}</div>}
       {!data && !error && <div className="empty">Loading...</div>}
       {data && (
         <table>
-          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Last method</th><th>Last check-in</th><th>Location</th><th>Present (month)</th><th>Late (month)</th><th>Half-day Cut (month)</th></tr></thead>
+          <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Role</th><th>Method</th><th>{date ? 'Last punch (day)' : 'Last punch (ever)'}</th>{date && <th>Punch Count</th>}<th>Check-in</th><th>Check-out</th><th>Location</th><th>Present (month)</th><th>Late (month)</th><th>Half-day Cut (month)</th></tr></thead>
           <tbody>{data.rows.map((r) => (
             <tr key={r.employee_id}>
-              <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
-              <td>{r.last_method || '—'}</td><td>{r.last_check_in || '—'}</td>
+              <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td><td>{r.designation || '—'}</td>
+              <td>{r.last_method || '—'}</td>
+              <td>{r.last_punch || '—'}</td>
+              {date && <td>{r.punch_count ?? 0}</td>}
+              <td>{r.check_in || '—'}</td>
+              <td>{r.check_out || '—'}</td>
               <td>{r.last_location ? <a className="crumb" href={mapLink(r.last_location.lat, r.last_location.lng)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
               <td>{r.present_days_month}</td><td>{r.late_days_month}</td>
               <td>{r.half_day_cut_days_month > 0 ? <span className="status-tag absent">{r.half_day_cut_days_month}</span> : 0}</td>
@@ -530,17 +697,38 @@ function BiometricList() {
 
 function MonthlyReports() {
   const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [empId, setEmpId] = useState('');
+  const [name, setName] = useState('');
+  const [dept, setDept] = useState('');
+  const [designation, setDesignation] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [roles, setRoles] = useState([]);
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [calendarFor, setCalendarFor] = useState(null); // the employee row currently showing its calendar
 
-  function load(m) { api.get('/attendance/monthly-report', { params: { month: m } }).then((r) => setData(r.data)).catch(() => setError('Could not load report.')); }
-  useEffect(() => load(month), []);
+  function filterParams(m, f) {
+    const { employeeCode = empId, name: n = name, department = dept, designation: r = designation } = f || {};
+    return { month: m, employeeCode: employeeCode || undefined, name: n || undefined, department: department || undefined, designation: r || undefined };
+  }
+  function load(m, f) { api.get('/attendance/monthly-report', { params: filterParams(m, f) }).then((r) => setData(r.data)).catch(() => setError('Could not load report.')); }
+  useEffect(() => {
+    load(month);
+    api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {});
+    api.get('/org/roles').then((r) => setRoles(r.data.roles)).catch(() => {});
+  }, []);
+
+  function clearFilters() { setEmpId(''); setName(''); setDept(''); setDesignation(''); load(month, { employeeCode: '', name: '', department: '', designation: '' }); }
 
   async function exportCsv() {
-    const res = await api.get('/attendance/monthly-report/export', { params: { month }, responseType: 'blob' });
+    const res = await api.get('/attendance/monthly-report/export', { params: filterParams(month), responseType: 'blob' });
     const url = URL.createObjectURL(res.data);
     const a = document.createElement('a'); a.href = url; a.download = `attendance-monthly-${month}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+  async function exportExcel() {
+    const res = await api.get('/attendance/monthly-report/export.xlsx', { params: filterParams(month), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-monthly-${month}.xlsx`; a.click(); URL.revokeObjectURL(url);
   }
   async function exportOneCsv(r) {
     const res = await api.get('/attendance/monthly-report/export', { params: { month, id: r.id }, responseType: 'blob' });
@@ -555,17 +743,32 @@ function MonthlyReports() {
         <div style={{ flex: 1 }} />
         <input type="month" value={month} onChange={(e) => { setMonth(e.target.value); load(e.target.value); }} style={{ width: 'auto' }} />
         <button className="primary" onClick={exportCsv}>Export</button>
+        <button onClick={exportExcel}>Export (Excel)</button>
+      </div>
+      <div className="filter-bar" style={{ marginTop: 10 }}>
+        <input placeholder="Employee ID" value={empId} onChange={(e) => setEmpId(e.target.value)} style={{ width: 140 }} />
+        <input placeholder="Employee name" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 180 }} />
+        <select value={dept} onChange={(e) => setDept(e.target.value)}>
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+        </select>
+        <select value={designation} onChange={(e) => setDesignation(e.target.value)}>
+          <option value="">All Roles</option>
+          {roles.map((r) => <option key={r.key} value={r.name}>{r.name}</option>)}
+        </select>
+        <button onClick={() => load(month)}>Filter</button>
+        {(empId || name || dept || designation) && <button onClick={clearFilters}>Clear</button>}
       </div>
       {error && <div className="banner error">{error}</div>}
       {data && (
         <>
           <div className="note" style={{ marginTop: 8 }}>Grace time 9:15 AM · {data.freeLateAllowance} free late arrival(s)/month, then each late day is flagged with an automatic half-day pay cut.</div>
           <table style={{ marginTop: 10 }}>
-            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th><th></th></tr></thead>
+            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Role</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th><th></th></tr></thead>
             <tbody>{data.rows.map((r) => (
               <Fragment key={r.id}>
                 <tr>
-                  <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
+                  <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td><td>{r.designation || '—'}</td>
                   <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
                   <td>{r.halfDayCut > 0 ? <span className="status-tag absent">{r.halfDayCut}</span> : 0}</td>
                   <td><strong>{r.attendancePct}%</strong></td>
@@ -576,13 +779,102 @@ function MonthlyReports() {
                 </tr>
                 {calendarFor === r.id && (
                   <tr>
-                    <td colSpan={10}><AttendanceCalendar employeeId={r.id} employeeLabel={r.name} /></td>
+                    <td colSpan={11}><AttendanceCalendar employeeId={r.id} employeeLabel={r.name} /></td>
                   </tr>
                 )}
               </Fragment>
             ))}</tbody>
           </table>
         </>
+      )}
+    </div>
+  );
+}
+
+function PunchLog() {
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [empId, setEmpId] = useState('');
+  const [name, setName] = useState('');
+  const [dept, setDept] = useState('');
+  const [designation, setDesignation] = useState('');
+  const [status, setStatus] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [roles, setRoles] = useState([]);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+
+  function filterParams(d, f) {
+    const { employeeCode = empId, name: n = name, department = dept, designation: r = designation, status: s = status } = f || {};
+    return { date: d, employeeCode: employeeCode || undefined, name: n || undefined, department: department || undefined, designation: r || undefined, status: s || undefined };
+  }
+  function load(d, f) { api.get('/attendance/punch-log', { params: filterParams(d, f) }).then((r) => setData(r.data)).catch(() => setError('Could not load punch log.')); }
+  useEffect(() => {
+    load(date);
+    api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {});
+    api.get('/org/roles').then((r) => setRoles(r.data.roles)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function clearFilters() { setEmpId(''); setName(''); setDept(''); setDesignation(''); setStatus(''); load(date, { employeeCode: '', name: '', department: '', designation: '', status: '' }); }
+
+  async function exportCsv() {
+    const res = await api.get('/attendance/punch-log/export', { params: filterParams(date), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${date}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+  async function exportExcel() {
+    const res = await api.get('/attendance/punch-log/export.xlsx', { params: filterParams(date), responseType: 'blob' });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${date}.xlsx`; a.click(); URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="card">
+      <div className="row" style={{ alignItems: 'center' }}>
+        <div className="feature-name">Punch Log — First/Last &amp; Every In-Between Punch</div>
+        <div style={{ flex: 1 }} />
+        <input type="date" value={date} onChange={(e) => { setDate(e.target.value); load(e.target.value); }} style={{ width: 'auto' }} />
+        <button className="primary" onClick={exportCsv}>Export</button>
+        <button onClick={exportExcel}>Export (Excel)</button>
+      </div>
+      <div className="filter-bar" style={{ marginTop: 10, marginBottom: 8 }}>
+        <input placeholder="Employee ID" value={empId} onChange={(e) => setEmpId(e.target.value)} style={{ width: 140 }} />
+        <input placeholder="Employee name" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 180 }} />
+        <select value={dept} onChange={(e) => setDept(e.target.value)}>
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+        </select>
+        <select value={designation} onChange={(e) => setDesignation(e.target.value)}>
+          <option value="">All Roles</option>
+          {roles.map((r) => <option key={r.key} value={r.name}>{r.name}</option>)}
+        </select>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="">Checked In &amp; Checked Out</option>
+          <option value="checked_in">Checked In only (no check-out yet)</option>
+          <option value="checked_out">Checked Out (complete)</option>
+        </select>
+        <button onClick={() => load(date)}>Filter</button>
+        {(empId || name || dept || designation || status) && <button onClick={clearFilters}>Clear</button>}
+      </div>
+      {error && <div className="banner error">{error}</div>}
+      {!data && !error && <div className="empty">Loading...</div>}
+      {data && data.rows.length === 0 && <div className="empty">No punches recorded for {data.date}.</div>}
+      {data && data.rows.length > 0 && (
+        <table>
+          <thead><tr><th>Employee</th><th>Department</th><th>Role</th><th>Date</th><th>Method</th><th>Status</th><th>Punch Count</th><th>Time Interval</th></tr></thead>
+          <tbody>{data.rows.map((r) => (
+            <tr key={r.employee_id}>
+              <td>{r.employee_code} - {r.name}</td>
+              <td>{r.department}</td>
+              <td>{r.designation || '—'}</td>
+              <td>{r.date}</td>
+              <td>{r.method}</td>
+              <td><span className={'status-tag ' + (r.status === 'Checked Out' ? 'present' : 'pending')}>{r.status}</span></td>
+              <td>{r.punch_count}</td>
+              <td style={{ fontFamily: 'monospace' }}>{r.time_interval}</td>
+            </tr>
+          ))}</tbody>
+        </table>
       )}
     </div>
   );

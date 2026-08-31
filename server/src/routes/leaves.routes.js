@@ -2,8 +2,8 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
-import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope, scopeDepartmentNames } from '../utils/scope.js';
-import { bottomRole, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
+import { isScopedRole, filterToScopeOrOwnDepartment, isEmployeeInScopeOrOwnDepartment, scopeDepartmentNamesOrOwn } from '../utils/scope.js';
+import { bottomRole, roleAbove, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
 import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
 
@@ -298,12 +298,12 @@ router.get('/overview', (req, res) => {
   // (not raw SQL COUNTs) so the numbers reflect only their assigned departments/teams.
   const withEmp = (rows) => rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
 
-  const pendingRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending'").all()), req.user.role, myEmpId);
-  const approvedMtdRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
-  const rejectedMtdRows = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Rejected' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
-  const onLeaveToday = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND cancelled = 0 AND date('now') BETWEEN from_date AND to_date").all()), req.user.role, myEmpId);
+  const pendingRows = filterToScopeOrOwnDepartment(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending'").all()), req.user.role, myEmpId);
+  const approvedMtdRows = filterToScopeOrOwnDepartment(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
+  const rejectedMtdRows = filterToScopeOrOwnDepartment(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Rejected' AND strftime('%Y-%m', created_at) = strftime('%Y-%m','now')").all()), req.user.role, myEmpId);
+  const onLeaveToday = filterToScopeOrOwnDepartment(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Approved' AND cancelled = 0 AND date('now') BETWEEN from_date AND to_date").all()), req.user.role, myEmpId);
 
-  const chainList = filterToScope(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC").all()), req.user.role, myEmpId)
+  const chainList = filterToScopeOrOwnDepartment(withEmp(db.prepare("SELECT * FROM leaves WHERE status = 'Pending' ORDER BY created_at DESC").all()), req.user.role, myEmpId)
     .slice(0, 8)
     .map((l) => ({ ...l, employee_name: empOf(l.employee_id).name, team_name: teamNameOf(l.team_id), current_stage_name: roleNameOf(l.current_stage_role_id) }))
     .map((l) => ({ ...l, waiting_on: l.current_stage_name || bottomRole()?.name }))
@@ -312,7 +312,7 @@ router.get('/overview', (req, res) => {
   const byDept = {};
   let deptNames = db.prepare('SELECT name FROM departments ORDER BY name').all().map((d) => d.name);
   if (isScopedRole(req.user.role)) {
-    const names = new Set(scopeDepartmentNames(getSupervisorScope(myEmpId)));
+    const names = new Set(scopeDepartmentNamesOrOwn(req.user.role, myEmpId));
     deptNames = deptNames.filter((n) => names.has(n));
   }
   deptNames.forEach((name) => { byDept[name] = []; });
@@ -322,7 +322,7 @@ router.get('/overview', (req, res) => {
     (byDept[dept] = byDept[dept] || []).push({ name: e.name, team_name: teamNameOf(e.team_id), type: l.type, from_date: l.from_date, to_date: l.to_date, reason: l.reason });
   });
 
-  const cancellationCount = filterToScope(
+  const cancellationCount = filterToScopeOrOwnDepartment(
     withEmp(db.prepare("SELECT lc.id, l.employee_id FROM leave_cancellations lc JOIN leaves l ON l.id = lc.leave_id WHERE lc.status = 'Pending'").all()),
     req.user.role, myEmpId
   ).length;
@@ -432,7 +432,7 @@ router.put('/approval-reasons/:id', (req, res) => {
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
-  const employees = filterToScope(
+  const employees = filterToScopeOrOwnDepartment(
     db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
   );
@@ -456,7 +456,7 @@ router.get('/reports/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
   const employeeId = req.query.id ? Number(req.query.id) : null;
-  let employees = filterToScope(
+  let employees = filterToScopeOrOwnDepartment(
     db.prepare('SELECT id, employee_code, name, department, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
   );
@@ -477,7 +477,7 @@ router.get('/balance-history', (req, res) => {
       ? db.prepare('SELECT * FROM leave_balance_history WHERE employee_id = ? ORDER BY created_at DESC').all(employeeId)
       : db.prepare('SELECT * FROM leave_balance_history ORDER BY created_at DESC LIMIT 100').all();
     const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
-    const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+    const scoped = filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
     return res.json({ history: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name })) });
   }
   const me = myEmployee(req.user.sub);
@@ -495,7 +495,7 @@ router.get('/cancellations', (req, res) => {
     WHERE lc.status = 'Pending' ORDER BY lc.created_at DESC
   `).all();
   const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
-  const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+  const scoped = filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ cancellations: scoped.map((r) => ({ ...r, employee_name: empOf(r.employee_id).name, team_name: teamNameOf(r.team_id) })) });
 });
 
@@ -518,9 +518,8 @@ function decideCancel(finalStatus) {
     if (!c) return res.status(404).json({ error: 'Cancellation request not found' });
     if (c.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
     const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(c.leave_id);
-    if (isScopedRole(req.user.role)) {
-      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-      if (!isEmployeeInScope(scope, empOf(leave.employee_id))) return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+    if (isScopedRole(req.user.role) && !isEmployeeInScopeOrOwnDepartment(req.user.role, myEmployee(req.user.sub)?.id, empOf(leave.employee_id))) {
+      return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
     }
 
     if (finalStatus === 'Approved') {
@@ -542,7 +541,7 @@ router.get('/', (req, res) => {
   if (isHR(req.user.role)) {
     const rows = db.prepare("SELECT * FROM leaves ORDER BY (status='Pending') DESC, created_at DESC").all();
     const enriched = rows.map((r) => ({ ...r, department: empOf(r.employee_id).department, team_id: empOf(r.employee_id).team_id }));
-    const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+    const scoped = filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
     const named = withName(scoped).map((l) => (l.status === 'Pending' ? { ...l, approvalSuggestion: approvalSuggestionFor(l) } : l));
     return res.json({ leaves: named });
   }
@@ -700,6 +699,13 @@ function decide(finalStatus) {
     if (!leave) return res.status(404).json({ error: 'Leave request not found' });
     if (leave.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
 
+    // A reason is required to reject (there's no checkbox catalog for rejections like Approve
+    // has below), optional for Approve — captured via the decision dialog on the client.
+    const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+    if (finalStatus === 'Rejected' && !note) {
+      return res.status(400).json({ error: 'A reason is required to reject a leave request.' });
+    }
+
     // Work Handover: a leave can't be approved until someone is named to cover the requester's
     // work — no gate on Reject, since a rejected request never goes out anyway.
     if (finalStatus === 'Approved' && !leave.handover_to_employee_id) {
@@ -709,11 +715,8 @@ function decide(finalStatus) {
     // A Senior Team Lead/Team Lead may only act on requests from employees within their
     // assigned departments/teams — even though the chain says it's their turn — unlike every
     // other HR-tier role in the chain, whose reach stays company-wide.
-    if (isScopedRole(req.user.role)) {
-      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-      if (!isEmployeeInScope(scope, empOf(leave.employee_id))) {
-        return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
-      }
+    if (isScopedRole(req.user.role) && !isEmployeeInScopeOrOwnDepartment(req.user.role, myEmployee(req.user.sub)?.id, empOf(leave.employee_id))) {
+      return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
     }
 
     const result = evaluateDecision(req.user.role, leave.current_stage_role_id, finalStatus === 'Rejected');
@@ -757,16 +760,16 @@ function decide(finalStatus) {
           setBalance(leave.employee_id, lt.id, newBal);
           logBalanceHistory(leave.employee_id, leave.type, -leave.days, newBal, `Leave approved (${leave.from_date} to ${leave.to_date})`, req.user.sub);
         }
-        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL, approval_reason_ids = ? WHERE id = ?')
-          .run('Approved', req.user.sub, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, leave.id);
-        notifyEmployee(leave.employee_id, 'Leave approved', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was approved.`);
+        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL, approval_reason_ids = ?, decision_note = ? WHERE id = ?')
+          .run('Approved', req.user.sub, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, note || null, leave.id);
+        notifyEmployee(leave.employee_id, 'Leave approved', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was approved.${note ? ` Note: ${note}` : ''}`, { email: true });
       } else {
-        db.prepare('UPDATE leaves SET status = ?, decided_by = ? WHERE id = ?').run('Rejected', req.user.sub, leave.id);
-        notifyEmployee(leave.employee_id, 'Leave rejected', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was rejected.`);
+        db.prepare('UPDATE leaves SET status = ?, decided_by = ?, decision_note = ? WHERE id = ?').run('Rejected', req.user.sub, note, leave.id);
+        notifyEmployee(leave.employee_id, 'Leave rejected', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was rejected. Reason: ${note}`, { email: true });
       }
     } else {
-      db.prepare('UPDATE leaves SET current_stage_role_id = ?, approval_reason_ids = ? WHERE id = ?')
-        .run(result.stageRoleId, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, leave.id);
+      db.prepare('UPDATE leaves SET current_stage_role_id = ?, approval_reason_ids = ?, decision_note = ? WHERE id = ?')
+        .run(result.stageRoleId, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, note || leave.decision_note || null, leave.id);
     }
     res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
   };
@@ -774,5 +777,45 @@ function decide(finalStatus) {
 
 router.post('/:id/approve', decide('Approved'));
 router.post('/:id/reject', decide('Rejected'));
+
+// Reassign: an actor whose turn it is (Team Lead, Senior Team Lead, Assistant Manager, Manager
+// — anyone below the very top of the chain) can push a still-pending request straight to the next
+// role up without deciding it either way, e.g. because the request exceeds their own
+// max_leave_approval_days limit, or they'd simply rather a more senior colleague weigh in — same
+// escalation the chain already does automatically on an Approve, just available on demand instead
+// of waiting for someone senior to happen to notice it. Reassigning doesn't count as either
+// approving or rejecting — no balance is touched, no notification goes to the employee (same as
+// every other in-chain stage move), it only changes who acts on it next.
+router.post('/:id/reassign', (req, res) => {
+  const leave = db.prepare('SELECT * FROM leaves WHERE id = ?').get(req.params.id);
+  if (!leave) return res.status(404).json({ error: 'Leave request not found' });
+  if (leave.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
+
+  // Same as Reject — no reason catalog for this, so a free-text reason is required, captured via
+  // the decision dialog on the client.
+  const note = typeof req.body?.note === 'string' ? req.body.note.trim() : '';
+  if (!note) return res.status(400).json({ error: 'A reason is required to reassign a leave request.' });
+
+  if (isScopedRole(req.user.role) && !isEmployeeInScopeOrOwnDepartment(req.user.role, myEmployee(req.user.sub)?.id, empOf(leave.employee_id))) {
+    return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
+  }
+
+  const actorRole = db.prepare('SELECT * FROM roles WHERE key = ?').get(req.user.role);
+  if (!actorRole || actorRole.key === 'employee') return res.status(403).json({ error: 'Insufficient permissions' });
+
+  if (req.user.role !== 'super_admin') {
+    let stage = leave.current_stage_role_id ? db.prepare('SELECT * FROM roles WHERE id = ?').get(leave.current_stage_role_id) : null;
+    if (!stage) stage = bottomRole();
+    if (actorRole.sort_order > stage.sort_order) {
+      return res.status(403).json({ error: `Waiting on ${stage.name} to act first.` });
+    }
+  }
+
+  const above = req.user.role === 'super_admin' ? null : roleAbove(actorRole.sort_order);
+  if (!above) return res.status(400).json({ error: 'There is no more senior role to reassign this to.' });
+
+  db.prepare('UPDATE leaves SET current_stage_role_id = ?, decision_note = ? WHERE id = ?').run(above.id, note, leave.id);
+  res.json({ leave: withName([db.prepare('SELECT * FROM leaves WHERE id = ?').get(leave.id)])[0] });
+});
 
 export default router;

@@ -218,35 +218,76 @@ function ChannelsScreen({ onBack }) {
 }
 
 // ---------- Biometric Device Integration (eSSL) ----------
+const EMPTY_DEVICE_FORM = { name: '', model: '', serial_number: '', ip_address: '', port: '', location: '', timezone: 'Asia/Kolkata', comm_mode: 'ADMS', device_type: 'Fingerprint', zone: '' };
+
 function BiometricScreen({ onBack }) {
   const [devices, setDevices] = useState([]);
   const [mappings, setMappings] = useState([]);
   const [unmapped, setUnmapped] = useState([]);
+  const [unmappedBiometricUsers, setUnmappedBiometricUsers] = useState([]);
   const [punches, setPunches] = useState([]);
+  const [syncHistory, setSyncHistory] = useState([]);
+  const [errorLog, setErrorLog] = useState([]);
+  const [auditLog, setAuditLog] = useState([]);
   const [error, setError] = useState('');
-  const [deviceForm, setDeviceForm] = useState({ name: '', serial_number: '', location: '' });
-  const [mapForm, setMapForm] = useState({ employee_id: '', device_user_id: '' });
+  const [notice, setNotice] = useState('');
+  const [deviceForm, setDeviceForm] = useState(EMPTY_DEVICE_FORM);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(EMPTY_DEVICE_FORM);
+  const [mapForm, setMapForm] = useState({ employee_id: '', device_user_id: '', device_id: '' });
   const [simForm, setSimForm] = useState({ device_serial: '', device_user_id: '', punch_type: 'check-in' });
+  const [busyId, setBusyId] = useState(null);
 
   function load() {
     api.get('/integrations/biometric/devices').then((r) => setDevices(r.data.devices)).catch(() => {});
-    api.get('/integrations/biometric/mappings').then((r) => { setMappings(r.data.mappings); setUnmapped(r.data.unmappedEmployees); }).catch(() => {});
+    api.get('/integrations/biometric/mappings').then((r) => { setMappings(r.data.mappings); setUnmapped(r.data.unmappedEmployees); setUnmappedBiometricUsers(r.data.unmappedBiometricUsers || []); }).catch(() => {});
     api.get('/integrations/biometric/punches').then((r) => setPunches(r.data.punches)).catch(() => {});
+    api.get('/integrations/biometric/sync-history').then((r) => setSyncHistory(r.data.history)).catch(() => {});
+    api.get('/integrations/biometric/error-log').then((r) => setErrorLog(r.data.errors)).catch(() => {});
+    api.get('/integrations/biometric/audit-log').then((r) => setAuditLog(r.data.logs)).catch(() => {});
   }
   useEffect(load, []);
 
+  function flash(msg) { setNotice(msg); setTimeout(() => setNotice(''), 4000); }
+
   async function addDevice(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/integrations/biometric/devices', deviceForm); setDeviceForm({ name: '', serial_number: '', location: '' }); load(); }
+    try { await api.post('/integrations/biometric/devices', deviceForm); setDeviceForm(EMPTY_DEVICE_FORM); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not add device.'); }
   }
   async function toggleDevice(d) {
     try { await api.put(`/integrations/biometric/devices/${d.id}`, { status: d.status === 'Active' ? 'Paused' : 'Active' }); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not update device.'); }
   }
+  function startEdit(d) {
+    setEditingId(d.id);
+    setEditForm({ name: d.name || '', model: d.model || '', serial_number: d.serial_number, ip_address: d.ip_address || '', port: d.port || '', location: d.location || '', timezone: d.timezone || 'Asia/Kolkata', comm_mode: d.comm_mode || 'ADMS', device_type: d.device_type || 'Fingerprint', zone: d.zone || '' });
+  }
+  async function saveEdit(e) {
+    e.preventDefault(); setError('');
+    try { await api.put(`/integrations/biometric/devices/${editingId}`, editForm); setEditingId(null); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not save device.'); }
+  }
+  async function deleteDevice(d) {
+    if (!window.confirm(`Remove "${d.name}"? Existing punches and mappings are kept, but this device will no longer be recognized.`)) return;
+    try { await api.delete(`/integrations/biometric/devices/${d.id}`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not remove device.'); }
+  }
+  async function testConnection(d) {
+    setBusyId(`test-${d.id}`); setError('');
+    try { const r = await api.post(`/integrations/biometric/devices/${d.id}/test-connection`); flash(`${d.name}: ${r.data.reachable ? 'Reachable ✓' : 'Not reachable ✗'} — ${r.data.caveat}`); }
+    catch (err) { setError(err.response?.data?.error || 'Could not test connection.'); }
+    finally { setBusyId(null); }
+  }
+  async function syncNow(d) {
+    setBusyId(`sync-${d.id}`); setError('');
+    try { const r = await api.post(`/integrations/biometric/devices/${d.id}/sync-now`); flash(`${d.name}: scanned ${r.data.scanned}, mapped ${r.data.mapped}, still unmapped ${r.data.stillUnmapped}.`); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not sync device.'); }
+    finally { setBusyId(null); }
+  }
   async function addMapping(e) {
     e.preventDefault(); setError('');
-    try { await api.post('/integrations/biometric/mappings', mapForm); setMapForm({ employee_id: '', device_user_id: '' }); load(); }
+    try { await api.post('/integrations/biometric/mappings', mapForm); setMapForm({ employee_id: '', device_user_id: '', device_id: '' }); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not save mapping.'); }
   }
   async function removeMapping(employeeId) {
@@ -263,6 +304,18 @@ function BiometricScreen({ onBack }) {
     try { await api.post(`/integrations/biometric/punches/${punchId}/map`, { employee_id: employeeId }); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not map punch.'); }
   }
+  async function quickMapDeviceUser(deviceUserId, employeeId) {
+    if (!employeeId) return;
+    try { await api.post('/integrations/biometric/mappings', { employee_id: employeeId, device_user_id: deviceUserId }); load(); }
+    catch (err) { setError(err.response?.data?.error || 'Could not map device user.'); }
+  }
+  async function downloadExport(path, filename) {
+    try {
+      const res = await api.get(`/integrations/biometric/${path}`, { responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+    } catch (err) { setError('Could not download export.'); }
+  }
 
   return (
     <div>
@@ -270,25 +323,64 @@ function BiometricScreen({ onBack }) {
       <h1>Biometric Device Integration (eSSL)</h1>
       <div className="subtitle">Real fingerprint/face terminals push attendance punches over HTTP to <code>/api/biometric-device/cdata</code> (the ADMS/iClock protocol — no vendor SDK required). Register your device's serial number below to accept its punches.</div>
       {error && <div className="banner error">{error}</div>}
+      {notice && <div className="banner" style={{ background: '#eef', borderColor: '#99f' }}>{notice}</div>}
 
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="feature-name" style={{ marginBottom: 8 }}>Registered devices</div>
         {devices.length === 0 && <div className="empty">No devices registered yet.</div>}
         {devices.map((d) => (
-          <div key={d.id} className="rec-row">
-            <span><strong>{d.name}</strong> — {d.vendor}, serial <code>{d.serial_number}</code>{d.location ? ` · ${d.location}` : ''}
-              <div className="feature-meta">Last seen: {d.last_seen_at || 'never'}</div>
-            </span>
-            <span className="row" style={{ gap: 6 }}>
-              <span className={'status-tag ' + (d.status === 'Active' ? 'present' : 'locked')}>{d.status}</span>
-              <button onClick={() => toggleDevice(d)}>{d.status === 'Active' ? 'Pause' : 'Resume'}</button>
-            </span>
+          <div key={d.id} style={{ borderBottom: '1px solid #eee', padding: '8px 0' }}>
+            {editingId === d.id ? (
+              <form onSubmit={saveEdit} className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+                <input placeholder="Device name" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} style={{ flex: '1 1 160px' }} />
+                <input placeholder="Model" value={editForm.model} onChange={(e) => setEditForm({ ...editForm, model: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <input placeholder="IP address" value={editForm.ip_address} onChange={(e) => setEditForm({ ...editForm, ip_address: e.target.value })} style={{ flex: '1 1 130px' }} />
+                <input placeholder="Port" value={editForm.port} onChange={(e) => setEditForm({ ...editForm, port: e.target.value })} style={{ flex: '1 1 80px' }} />
+                <input placeholder="Location" value={editForm.location} onChange={(e) => setEditForm({ ...editForm, location: e.target.value })} style={{ flex: '1 1 130px' }} />
+                <input placeholder="Zone" value={editForm.zone} onChange={(e) => setEditForm({ ...editForm, zone: e.target.value })} style={{ flex: '1 1 110px' }} />
+                <select value={editForm.device_type} onChange={(e) => setEditForm({ ...editForm, device_type: e.target.value })} style={{ flex: '1 1 140px' }}>
+                  {['Fingerprint', 'Face', 'Card', 'Fingerprint + Face'].map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+                <select value={editForm.comm_mode} onChange={(e) => setEditForm({ ...editForm, comm_mode: e.target.value })} style={{ flex: '1 1 100px' }}>
+                  {['ADMS', 'HTTP', 'API'].map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <input placeholder="Timezone" value={editForm.timezone} onChange={(e) => setEditForm({ ...editForm, timezone: e.target.value })} style={{ flex: '1 1 110px' }} />
+                <button className="primary" type="submit">Save</button>
+                <button type="button" onClick={() => setEditingId(null)}>Cancel</button>
+              </form>
+            ) : (
+              <div className="rec-row">
+                <span><strong>{d.name}</strong> — {d.vendor}{d.model ? ` ${d.model}` : ''}, serial <code>{d.serial_number}</code>{d.location ? ` · ${d.location}` : ''}{d.zone ? ` · Zone: ${d.zone}` : ''}
+                  <div className="feature-meta">{d.device_type} · {d.comm_mode}{d.ip_address ? ` · ${d.ip_address}${d.port ? ':' + d.port : ''}` : ''}</div>
+                  <div className="feature-meta">Last punch: {d.last_punch_at || 'never'} · Last sync: {d.last_sync_at || 'never'} · Last seen: {d.last_seen_at || 'never'}</div>
+                </span>
+                <span className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+                  <span className={'status-tag ' + (d.online ? 'present' : 'locked')}>{d.online ? 'Online' : 'Offline'}</span>
+                  <span className={'status-tag ' + (d.status === 'Active' ? 'present' : 'locked')}>{d.status}</span>
+                  <button onClick={() => testConnection(d)} disabled={busyId === `test-${d.id}`}>{busyId === `test-${d.id}` ? 'Testing…' : 'Test Connection'}</button>
+                  <button onClick={() => syncNow(d)} disabled={busyId === `sync-${d.id}`}>{busyId === `sync-${d.id}` ? 'Syncing…' : 'Sync Now'}</button>
+                  <button onClick={() => startEdit(d)}>Edit</button>
+                  <button onClick={() => toggleDevice(d)}>{d.status === 'Active' ? 'Pause' : 'Resume'}</button>
+                  <button onClick={() => deleteDevice(d)}>Delete</button>
+                </span>
+              </div>
+            )}
           </div>
         ))}
-        <form onSubmit={addDevice} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
+        <form onSubmit={addDevice} className="row" style={{ flexWrap: 'wrap', marginTop: 10, gap: 6 }}>
           <input placeholder="Device name (e.g. Main Gate eSSL)" value={deviceForm.name} onChange={(e) => setDeviceForm({ ...deviceForm, name: e.target.value })} required style={{ flex: '1 1 180px' }} />
+          <input placeholder="Model" value={deviceForm.model} onChange={(e) => setDeviceForm({ ...deviceForm, model: e.target.value })} style={{ flex: '1 1 120px' }} />
           <input placeholder="Serial number" value={deviceForm.serial_number} onChange={(e) => setDeviceForm({ ...deviceForm, serial_number: e.target.value })} required style={{ flex: '1 1 140px' }} />
+          <input placeholder="IP address (optional)" value={deviceForm.ip_address} onChange={(e) => setDeviceForm({ ...deviceForm, ip_address: e.target.value })} style={{ flex: '1 1 130px' }} />
+          <input placeholder="Port" value={deviceForm.port} onChange={(e) => setDeviceForm({ ...deviceForm, port: e.target.value })} style={{ flex: '1 1 80px' }} />
           <input placeholder="Location (optional)" value={deviceForm.location} onChange={(e) => setDeviceForm({ ...deviceForm, location: e.target.value })} style={{ flex: '1 1 140px' }} />
+          <input placeholder="Zone (optional)" value={deviceForm.zone} onChange={(e) => setDeviceForm({ ...deviceForm, zone: e.target.value })} style={{ flex: '1 1 110px' }} />
+          <select value={deviceForm.device_type} onChange={(e) => setDeviceForm({ ...deviceForm, device_type: e.target.value })} style={{ flex: '1 1 140px' }}>
+            {['Fingerprint', 'Face', 'Card', 'Fingerprint + Face'].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select value={deviceForm.comm_mode} onChange={(e) => setDeviceForm({ ...deviceForm, comm_mode: e.target.value })} style={{ flex: '1 1 100px' }}>
+            {['ADMS', 'HTTP', 'API'].map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
           <button className="primary" type="submit">+ Register Device</button>
         </form>
       </div>
@@ -297,7 +389,7 @@ function BiometricScreen({ onBack }) {
         <div className="feature-name" style={{ marginBottom: 8 }}>Employee ID mapping</div>
         {mappings.map((m) => (
           <div key={m.employee_id} className="rec-row">
-            <span>{m.employee_name} ({m.employee_code}) → device user ID <code>{m.device_user_id}</code></span>
+            <span>{m.employee_name} ({m.employee_code}) → device user ID <code>{m.device_user_id}</code>{m.device_name ? ` on ${m.device_name}` : ''}</span>
             <button onClick={() => removeMapping(m.employee_id)}>Remove</button>
           </div>
         ))}
@@ -307,8 +399,26 @@ function BiometricScreen({ onBack }) {
             {unmapped.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
           </select>
           <input placeholder="Device enrollment ID (e.g. 16)" value={mapForm.device_user_id} onChange={(e) => setMapForm({ ...mapForm, device_user_id: e.target.value })} required style={{ flex: '1 1 160px' }} />
+          <select value={mapForm.device_id} onChange={(e) => setMapForm({ ...mapForm, device_id: e.target.value })} style={{ flex: '1 1 160px' }}>
+            <option value="">Device (optional)…</option>
+            {devices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
           <button className="primary" type="submit">Map</button>
         </form>
+        {unmappedBiometricUsers.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div className="feature-meta" style={{ marginBottom: 6 }}>Device users who have punched but aren't mapped to any employee yet:</div>
+            {unmappedBiometricUsers.map((u) => (
+              <div key={u.device_user_id} className="rec-row">
+                <span>Device user <code>{u.device_user_id}</code>{u.device_name ? ` on ${u.device_name}` : ` (${u.device_serial})`}</span>
+                <select defaultValue="" onChange={(e) => quickMapDeviceUser(u.device_user_id, e.target.value)}>
+                  <option value="" disabled>Map to…</option>
+                  {unmapped.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card" style={{ marginBottom: 14 }}>
@@ -328,7 +438,7 @@ function BiometricScreen({ onBack }) {
         </form>
       </div>
 
-      <div className="card">
+      <div className="card" style={{ marginBottom: 14 }}>
         <div className="feature-name" style={{ marginBottom: 8 }}>Recent punches</div>
         {punches.length === 0 && <div className="empty">No punches received yet.</div>}
         {punches.map((p) => (
@@ -342,6 +452,48 @@ function BiometricScreen({ onBack }) {
                 {unmapped.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
               </select>
             )}
+          </div>
+        ))}
+      </div>
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="feature-name" style={{ marginBottom: 8 }}>Monitoring</div>
+        <div className="feature-meta" style={{ marginBottom: 6 }}>Sync history (manual + background reconciliation, every 15 min):</div>
+        {syncHistory.length === 0 && <div className="empty">No sync runs yet.</div>}
+        {syncHistory.map((s) => (
+          <div key={s.id} className="rec-row">
+            <span>{s.device_name || 'All devices'} — {s.trigger_type} · scanned {s.punches_scanned}, mapped {s.punches_mapped}, still unmapped {s.punches_still_unmapped}
+              <div className="feature-meta">{s.started_at} · {s.triggered_by_name ? `by ${s.triggered_by_name}` : 'automatic'}{s.error ? ` · Error: ${s.error}` : ''}</div>
+            </span>
+            <span className={'status-tag ' + (s.status === 'Success' ? 'present' : s.status === 'Failed' ? 'locked' : '')}>{s.status}</span>
+          </div>
+        ))}
+        <div className="feature-meta" style={{ margin: '10px 0 6px' }}>Error log:</div>
+        {errorLog.length === 0 && <div className="empty">No errors logged.</div>}
+        {errorLog.map((e) => (
+          <div key={e.id} className="rec-row">
+            <span>{e.message}{e.device_serial ? ` (device ${e.device_serial})` : ''}
+              <div className="feature-meta">{e.source} · {e.created_at}</div>
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="card">
+        <div className="feature-name" style={{ marginBottom: 8 }}>Export & audit log</div>
+        <div className="row" style={{ gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+          <button onClick={() => downloadExport('mappings/export.csv', 'biometric-mappings.csv')}>Export Mappings (CSV)</button>
+          <button onClick={() => downloadExport('mappings/export.xlsx', 'biometric-mappings.xlsx')}>Export Mappings (Excel)</button>
+          <button onClick={() => downloadExport('punches/export.csv', 'biometric-punches.csv')}>Export Punches (CSV)</button>
+          <button onClick={() => downloadExport('punches/export.xlsx', 'biometric-punches.xlsx')}>Export Punches (Excel)</button>
+        </div>
+        <div className="feature-meta" style={{ marginBottom: 6 }}>Recent admin actions:</div>
+        {auditLog.length === 0 && <div className="empty">No audit entries yet.</div>}
+        {auditLog.map((a) => (
+          <div key={a.id} className="rec-row">
+            <span>{a.action}{a.detail ? ` — ${a.detail}` : ''}
+              <div className="feature-meta">{a.user_name || 'System'} · {a.created_at}</div>
+            </span>
           </div>
         ))}
       </div>

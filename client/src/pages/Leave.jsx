@@ -20,6 +20,11 @@ const SCOPED_ROLES = ['stl', 'tl'];
 // balance/apply (MyLeave) AND the dashboard/reports below it (company-wide for the first three,
 // scoped to their assigned departments/teams for STL/TL), rather than one replacing the other.
 const SELF_AND_TEAM_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
+// Below the very top of the approval chain — these roles can push a pending request straight to
+// the next role up instead of deciding it themselves (e.g. it exceeds their own approval-days
+// limit, or they'd rather a senior colleague weigh in). HR Admin/Super Admin sit at the top and
+// have no one to reassign to.
+const REASSIGN_ROLES = ['tl', 'stl', 'assistant_manager', 'manager'];
 const tag = (s) => s === 'Approved' ? 'present' : s === 'Rejected' ? 'absent' : 'pending';
 
 // Approval Suggestion: advisory context for whoever is deciding a pending request — this
@@ -290,6 +295,7 @@ function MyLeave({ compact }) {
               <div className="feature-meta" style={{ marginBottom: 6 }}>
                 {l.status} by {l.decided_by_name}
                 {l.approval_reason_labels?.length ? ` — Reason: ${l.approval_reason_labels.join(', ')}` : ''}
+                {l.decision_note?.trim() ? ` — Note: ${l.decision_note}` : ''}
               </div>
             )}
             {l.status === 'Approved' && !l.cancelled && !l.cancel_requested && (
@@ -305,52 +311,103 @@ function MyLeave({ compact }) {
   );
 }
 
-// Approving a 4+ day leave request requires the approver to pick at least one reason from the
-// Super-Admin-managed catalog — Super Admin itself is exempt (system administrator, not a
-// workflow participant, mirrors the max_leave_approval_days exemption on the server). Owns its
-// whole row (header line + reason panel) so the checkbox panel always drops to its own full-width
-// line below the name/buttons instead of being squeezed into a narrow flex column beside them.
-function ApproveControl({ leave, header, reasons, isSuperAdmin, onDecide, onError, onReject }) {
-  const [open, setOpen] = useState(false);
+// Approve/Reject/Reassign all open this same popup dialog to capture a reason before the action
+// fires, instead of acting instantly or dropping an inline panel into the row: Approve keeps its
+// existing 4+ day reason-catalog requirement (Super Admin exempt, mirrors the
+// max_leave_approval_days exemption on the server), while Reject and Reassign — which never had
+// any reason capture before — now always require a free-text one, since there's no catalog for
+// either.
+function DecisionModal({ leave, verb, reasons, isSuperAdmin, onConfirm, onCancel }) {
   const [selected, setSelected] = useState([]);
-  const needsReason = !isSuperAdmin && leave.days >= 4;
+  const [note, setNote] = useState('');
+  const [localError, setLocalError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const needsReasonCatalog = verb === 'approve' && !isSuperAdmin && leave.days >= 4;
+  const noteRequired = verb !== 'approve';
   const activeReasons = reasons.filter((r) => r.active);
 
   function toggle(id) { setSelected((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]); }
-  function approveClick() { needsReason ? setOpen(true) : onDecide(leave.id, 'approve'); }
+
   async function confirm() {
-    if (!selected.length) { onError('Select at least one reason before approving.'); return; }
-    await onDecide(leave.id, 'approve', { reason_ids: selected });
-    setOpen(false); setSelected([]);
+    setLocalError('');
+    if (needsReasonCatalog && !selected.length) { setLocalError('Select at least one reason before approving.'); return; }
+    if (noteRequired && !note.trim()) { setLocalError(`A reason is required to ${verb} this request.`); return; }
+    setSubmitting(true);
+    const body = { note: note.trim() || undefined };
+    if (verb === 'approve' && selected.length) body.reason_ids = selected;
+    const err = await onConfirm(body);
+    setSubmitting(false);
+    if (err) setLocalError(err);
   }
+
+  const title = verb === 'approve' ? 'Approve leave request' : verb === 'reject' ? 'Reject leave request' : 'Reassign to next approver';
+  const confirmLabel = submitting ? 'Saving…' : verb === 'approve' ? 'Confirm approve' : verb === 'reject' ? 'Confirm reject' : 'Confirm reassign';
+  const confirmClass = verb === 'approve' ? 'btn-approve' : verb === 'reject' ? 'btn-reject' : '';
+  const notePlaceholder = verb === 'approve' ? 'Any note for the record…' : verb === 'reject' ? 'Required — this is shown to the employee' : 'Required — kept on the record for whoever this goes to next';
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(22,30,51,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={onCancel}>
+      <div className="card" style={{ width: 420, maxWidth: '92vw', maxHeight: '85vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div className="feature-name" style={{ marginBottom: 4 }}>{title}</div>
+        <div className="feature-meta" style={{ marginBottom: 10 }}>{leave.employee_name} — {leave.type}, {leave.from_date} to {leave.to_date} ({leave.days}d)</div>
+        {localError && <div className="banner error" style={{ marginBottom: 10 }}>{localError}</div>}
+        {needsReasonCatalog && (
+          <>
+            <div className="feature-meta" style={{ marginBottom: 6 }}>Reason for approving this {leave.days}-day request:</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 18px', marginBottom: 10 }}>
+              {activeReasons.map((r) => (
+                <label key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
+                  <input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} />
+                  {r.label}
+                </label>
+              ))}
+            </div>
+          </>
+        )}
+        <label className="field-label" htmlFor="decision-note">{verb === 'approve' ? 'Note (optional)' : `Reason for ${verb === 'reject' ? 'rejecting' : 'reassigning'} *`}</label>
+        <textarea
+          id="decision-note"
+          rows={3}
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder={notePlaceholder}
+          style={{ width: '100%', resize: 'vertical', fontFamily: 'inherit', fontSize: 13, padding: '8px 10px', borderRadius: 7, border: '1px solid #D7DBE2' }}
+        />
+        <div className="row" style={{ gap: 6, marginTop: 12, justifyContent: 'flex-end' }}>
+          <button onClick={onCancel} disabled={submitting}>Cancel</button>
+          <button className={confirmClass} onClick={confirm} disabled={submitting}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApproveControl({ leave, header, reasons, isSuperAdmin, canReassign, onDecide }) {
+  const [modalVerb, setModalVerb] = useState(null); // null | 'approve' | 'reject' | 'reassign'
 
   return (
     <div style={{ width: '100%' }}>
       <div className="row" style={{ justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
         {header}
-        {!open && (
-          <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-            <button className="btn-approve" onClick={approveClick}>Approve</button>
-            <button className="btn-reject" onClick={onReject}>Reject</button>
-          </span>
-        )}
+        <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+          <button className="btn-approve" onClick={() => setModalVerb('approve')}>Approve</button>
+          <button className="btn-reject" onClick={() => setModalVerb('reject')}>Reject</button>
+          {canReassign && <button onClick={() => setModalVerb('reassign')} title="Send this to the next role up without deciding it yourself">Reassign</button>}
+        </span>
       </div>
-      {open && (
-        <div style={{ background: '#F4F7FB', border: '1px solid #EEF0F3', borderRadius: 8, padding: 10, marginBottom: 8 }}>
-          <div className="feature-meta" style={{ marginBottom: 8 }}>Reason for approving this {leave.days}-day request:</div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 18px', marginBottom: 10 }}>
-            {activeReasons.map((r) => (
-              <label key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
-                <input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} />
-                {r.label}
-              </label>
-            ))}
-          </div>
-          <span style={{ display: 'flex', gap: 6 }}>
-            <button className="btn-approve" onClick={confirm}>Confirm approve</button>
-            <button onClick={() => setOpen(false)}>Cancel</button>
-          </span>
-        </div>
+      {modalVerb && (
+        <DecisionModal
+          leave={leave}
+          verb={modalVerb}
+          reasons={reasons}
+          isSuperAdmin={isSuperAdmin}
+          onCancel={() => setModalVerb(null)}
+          onConfirm={async (body) => {
+            const err = await onDecide(leave.id, modalVerb, body);
+            if (!err) setModalVerb(null);
+            return err;
+          }}
+        />
       )}
     </div>
   );
@@ -358,19 +415,8 @@ function ApproveControl({ leave, header, reasons, isSuperAdmin, onDecide, onErro
 
 // Table-row equivalent of ApproveControl — a <tr> can't host a block-level dropped panel inline,
 // so the reason checkboxes render as a second full-width (colSpan) row directly below instead.
-function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
-  const [open, setOpen] = useState(false);
-  const [selected, setSelected] = useState([]);
-  const needsReason = !isSuperAdmin && l.days >= 4;
-  const activeReasons = reasons.filter((r) => r.active);
-
-  function toggle(id) { setSelected((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]); }
-  function approveClick() { needsReason ? setOpen(true) : onDecide(l.id, 'approve'); }
-  async function confirm() {
-    if (!selected.length) { onError('Select at least one reason before approving.'); return; }
-    await onDecide(l.id, 'approve', { reason_ids: selected });
-    setOpen(false); setSelected([]);
-  }
+function LeaveTableRow({ l, reasons, isSuperAdmin, canReassign, onDecide }) {
+  const [modalVerb, setModalVerb] = useState(null); // null | 'approve' | 'reject' | 'reassign'
 
   return (
     <>
@@ -385,6 +431,7 @@ function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
         <td>
           <span className={'status-tag ' + tag(l.status)}>{l.cancelled ? 'Cancelled' : l.status}</span>
           {l.status !== 'Pending' && l.decided_by_name && <div className="feature-meta">by {l.decided_by_name}</div>}
+          {l.decision_note?.trim() && <div className="feature-meta">Note: {l.decision_note}</div>}
           {l.approvalSuggestion && (
             <div
               className="feature-meta"
@@ -395,34 +442,26 @@ function LeaveTableRow({ l, reasons, isSuperAdmin, onDecide, onError }) {
           )}
         </td>
         <td>{l.status === 'Pending' ? (
-          !open && (
-            <span style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
-              <button className="btn-approve" onClick={approveClick}>Approve</button>
-              <button className="btn-reject" onClick={() => onDecide(l.id, 'reject')}>Reject</button>
-            </span>
-          )
+          <span style={{ display: 'flex', gap: 6, justifyContent: 'center' }}>
+            <button className="btn-approve" onClick={() => setModalVerb('approve')}>Approve</button>
+            <button className="btn-reject" onClick={() => setModalVerb('reject')}>Reject</button>
+            {canReassign && <button onClick={() => setModalVerb('reassign')} title="Send this to the next role up without deciding it yourself">Reassign</button>}
+          </span>
         ) : <span className="note">decided</span>}</td>
       </tr>
-      {open && (
-        <tr>
-          <td colSpan={9}>
-            <div style={{ background: '#F4F7FB', border: '1px solid #EEF0F3', borderRadius: 8, padding: 10, textAlign: 'left' }}>
-              <div className="feature-meta" style={{ marginBottom: 8 }}>Reason for approving this {l.days}-day request:</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 18px', marginBottom: 10 }}>
-                {activeReasons.map((r) => (
-                  <label key={r.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5 }}>
-                    <input type="checkbox" checked={selected.includes(r.id)} onChange={() => toggle(r.id)} />
-                    {r.label}
-                  </label>
-                ))}
-              </div>
-              <span style={{ display: 'flex', gap: 6 }}>
-                <button className="btn-approve" onClick={confirm}>Confirm approve</button>
-                <button onClick={() => setOpen(false)}>Cancel</button>
-              </span>
-            </div>
-          </td>
-        </tr>
+      {modalVerb && (
+        <DecisionModal
+          leave={l}
+          verb={modalVerb}
+          reasons={reasons}
+          isSuperAdmin={isSuperAdmin}
+          onCancel={() => setModalVerb(null)}
+          onConfirm={async (body) => {
+            const err = await onDecide(l.id, modalVerb, body);
+            if (!err) setModalVerb(null);
+            return err;
+          }}
+        />
       )}
     </>
   );
@@ -480,7 +519,8 @@ function HRLeave({ compact, sectionLabel }) {
 
   async function decide(id, verb, body) {
     setError('');
-    try { await api.post(`/leaves/${id}/${verb}`, body); load(); } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
+    try { await api.post(`/leaves/${id}/${verb}`, body); load(); return null; }
+    catch (err) { const msg = err.response?.data?.error || 'Action failed.'; setError(msg); return msg; }
   }
   async function addReason(e) {
     e.preventDefault(); setError('');
@@ -567,9 +607,8 @@ function HRLeave({ compact, sectionLabel }) {
                       leave={l}
                       reasons={reasons}
                       isSuperAdmin={user?.role === 'super_admin'}
+                      canReassign={REASSIGN_ROLES.includes(user?.role)}
                       onDecide={decide}
-                      onError={setError}
-                      onReject={() => decide(l.id, 'reject')}
                       header={
                         <span>
                           <span>
@@ -586,6 +625,7 @@ function HRLeave({ compact, sectionLabel }) {
                               <a href={l.handover_attachment_data_url} download={l.handover_attachment_name || 'handover-file'} target="_blank" rel="noreferrer" style={{ marginLeft: 6 }}>📎 {l.handover_attachment_name || 'Handover file'}</a>
                             )}
                           </div>
+                          {l.decision_note?.trim() && <div className="feature-meta">Note from a previous stage: {l.decision_note}</div>}
                           <ApprovalSuggestion s={l.approvalSuggestion} />
                         </span>
                       }
@@ -758,7 +798,7 @@ function HRLeave({ compact, sectionLabel }) {
                 <table>
                   <thead><tr><th>Employee</th><th>Team</th><th>Type</th><th>Reason</th><th>From</th><th>To</th><th>Days</th><th>Status</th><th>Action</th></tr></thead>
                   <tbody>{filteredLeaves.map((l) => (
-                    <LeaveTableRow key={l.id} l={l} reasons={reasons} isSuperAdmin={user?.role === 'super_admin'} onDecide={decide} onError={setError} />
+                    <LeaveTableRow key={l.id} l={l} reasons={reasons} isSuperAdmin={user?.role === 'super_admin'} canReassign={REASSIGN_ROLES.includes(user?.role)} onDecide={decide} />
                   ))}</tbody>
                 </table>
               )

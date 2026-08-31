@@ -48,6 +48,28 @@ export function filterToScope(rows, role, employeeId) {
   return rows.filter((r) => isEmployeeInScope(scope, r));
 }
 
+// Same as filterToScope, but for a scoped employee with no explicit supervisor_scopes rows yet,
+// falls back to their own department instead of failing closed to nothing — lets a freshly
+// assigned STL/TL see useful data (their own department peers) before Super Admin has configured
+// User Management, matching Employee Management's own "My Team"/scopedTeamRows precedent.
+// Non-scoped roles (or a missing employee record) behave exactly like filterToScope.
+export function filterToScopeOrOwnDepartment(rows, role, employeeId) {
+  if (!isScopedRole(role)) return rows;
+  if (!employeeId) return [];
+  const hasExplicitScope = !!db.prepare('SELECT 1 FROM supervisor_scopes WHERE employee_id = ?').get(employeeId);
+  if (hasExplicitScope) return filterToScope(rows, role, employeeId);
+  const me = db.prepare('SELECT department FROM employees WHERE id = ?').get(employeeId);
+  return me ? rows.filter((r) => r.department === me.department) : [];
+}
+
+// Single-target convenience wrapper around filterToScopeOrOwnDepartment, for the many call sites
+// (Leave/Regularization approve/reject/reassign/cancel-decisions) that check one specific target
+// employee rather than filtering a list — e.g. "is this leave requester within my reach?"
+export function isEmployeeInScopeOrOwnDepartment(role, employeeId, targetEmployee) {
+  if (!targetEmployee) return false;
+  return filterToScopeOrOwnDepartment([targetEmployee], role, employeeId).length > 0;
+}
+
 // The full set of department NAMES this scope should be treated as covering — its direct
 // department-level grants, plus the parent department of every team-level grant. Needed for
 // content that's only ever targeted by department name (Notifications/Announcements have no
@@ -61,4 +83,14 @@ export function scopeDepartmentNames(scope) {
     rows.forEach((r) => names.add(r.name));
   }
   return [...names];
+}
+
+// Same own-department fallback as filterToScopeOrOwnDepartment, but for callers that need
+// department names rather than filtered rows (e.g. matching Open Positions by department).
+export function scopeDepartmentNamesOrOwn(role, employeeId) {
+  if (!isScopedRole(role) || !employeeId) return [];
+  const hasExplicitScope = !!db.prepare('SELECT 1 FROM supervisor_scopes WHERE employee_id = ?').get(employeeId);
+  if (hasExplicitScope) return scopeDepartmentNames(getSupervisorScope(employeeId));
+  const me = db.prepare('SELECT department FROM employees WHERE id = ?').get(employeeId);
+  return me ? [me.department] : [];
 }

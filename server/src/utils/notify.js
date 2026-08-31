@@ -2,12 +2,23 @@ import db from '../db.js';
 import { dispatchChannels } from './channels.js';
 
 // Send a notification to one specific employee (not a role broadcast) — e.g. "Your leave
-// request was approved". Shows up in that employee's own Notifications feed only. Internal
-// system-triggered notifications (approvals, resolutions, etc.) are always in-app only.
-export function notifyEmployee(employeeId, title, message, { priority, ticketId } = {}) {
+// request was approved". Always shows up in that employee's own Notifications feed; also emailed
+// when `email: true` is passed (attendance alerts, leave/regularization decisions — see call
+// sites) — everything else stays in-app only, so this doesn't turn every internal system event
+// (ticket updates, expense reimbursements, etc.) into an email. Fire-and-forget: this function
+// itself stays synchronous (called from plenty of sync code paths), and dispatchChannels already
+// logs its own per-recipient success/failure to channel_deliveries, so a bad/unconfigured email
+// setup here never blocks or breaks the calling flow.
+export function notifyEmployee(employeeId, title, message, { priority, ticketId, email } = {}) {
   if (!employeeId) return;
-  db.prepare('INSERT INTO notifications (title, message, target_role, employee_id, priority, ticket_id) VALUES (?, ?, ?, ?, ?, ?)')
+  const info = db.prepare('INSERT INTO notifications (title, message, target_role, employee_id, priority, ticket_id) VALUES (?, ?, ?, ?, ?, ?)')
     .run(title, message, 'employee', employeeId, priority || null, ticketId || null);
+  if (email) {
+    const emp = db.prepare('SELECT id, email FROM employees WHERE id = ?').get(employeeId);
+    if (emp?.email) {
+      dispatchChannels({ source: 'notification', sourceId: info.lastInsertRowid, employees: [emp], channels: ['email'], title, message }).catch(() => {});
+    }
+  }
 }
 
 // Broadcast to everyone — used for company-wide posts like meeting/event announcements.

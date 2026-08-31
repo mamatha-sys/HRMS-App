@@ -576,6 +576,19 @@ function migrate() {
   if (!att.includes('latitude')) db.exec('ALTER TABLE attendance ADD COLUMN latitude REAL');
   if (!att.includes('longitude')) db.exec('ALTER TABLE attendance ADD COLUMN longitude REAL');
 
+  // Per-employee-shift-aware attendance math (see attendanceCore.js's effectiveShiftFor):
+  // shift_id records which shift a day's late/early/overtime figures were actually computed
+  // against (falls back to the company default when the employee has no roster assignment for
+  // that day), so late/early/overtime always reflect the real shift in effect, not one hardcoded
+  // window for everyone. A forward reference to shifts(id) — created later in this same
+  // migrate() — is safe for ALTER TABLE ADD COLUMN under SQLite even with foreign_keys=ON,
+  // unlike a CREATE TABLE with a forward FK, which is not.
+  if (!att.includes('shift_id')) db.exec('ALTER TABLE attendance ADD COLUMN shift_id INTEGER REFERENCES shifts(id) ON DELETE SET NULL');
+  if (!att.includes('working_hours')) db.exec('ALTER TABLE attendance ADD COLUMN working_hours REAL');
+  if (!att.includes('late_minutes')) db.exec('ALTER TABLE attendance ADD COLUMN late_minutes INTEGER NOT NULL DEFAULT 0');
+  if (!att.includes('early_logout_minutes')) db.exec('ALTER TABLE attendance ADD COLUMN early_logout_minutes INTEGER NOT NULL DEFAULT 0');
+  if (!att.includes('overtime_minutes')) db.exec('ALTER TABLE attendance ADD COLUMN overtime_minutes INTEGER NOT NULL DEFAULT 0');
+
   // Detailed salary components (earnings + statutory deductions) — added with sensible defaults
   // so existing rows get a realistic structure without a reset.
   const sal = db.prepare('PRAGMA table_info(salary_structures)').all().map((c) => c.name);
@@ -683,6 +696,11 @@ function migrate() {
   // pattern as the leave's own supporting document above.
   if (!lv.includes('handover_attachment_data_url')) db.exec('ALTER TABLE leaves ADD COLUMN handover_attachment_data_url TEXT');
   if (!lv.includes('handover_attachment_name')) db.exec('ALTER TABLE leaves ADD COLUMN handover_attachment_name TEXT');
+  // Free-text note the approver/rejecter/reassigner typed in the decision dialog — required for
+  // Reject and Reassign (there's no reason catalog for those, unlike Approve's checkbox reasons
+  // above), optional for Approve. Only the latest decision's note is kept (matches this table's
+  // existing style of one current status per row, not a full per-stage audit trail).
+  if (!lv.includes('decision_note')) db.exec('ALTER TABLE leaves ADD COLUMN decision_note TEXT');
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS leave_cancellations (
@@ -1660,22 +1678,52 @@ function migrate() {
   migratePermissionCatalog();
   migrateTeamsAndScopes();
   migratePayrollFormula();
+  migrateBiometricIntegration();
+  migrateEmployeeCheckinMethods();
+  migrateSyncEmployeeRoles();
 }
 
-// Package formula: Gross = Basic + HRA + Bonus + Special Allowance; Deductions = PF + PT + Bonus
-// (Bonus is part of the package — counted in Gross — but withheld from this month's payout, so
-// it's shown again as its own line in Deductions; net effect on take-home is zero, purely for
-// payslip transparency). Also retires Conveyance/TDS and a stray test component ("eds") that
-// aren't part of that formula — safe because every employee's amount on all three is still 0.
+// Startup safety net: correct any users.role that has drifted from its linked employee's
+// designation. employees.routes.js's syncUserRoleToDesignation() is meant to be the single source
+// of truth for this, called from every place designation can change (edit, transfer, and linking
+// a bulk-imported draft to an existing login via PUT /:id/assign) — but PUT /:id/assign missed it
+// for a long time, silently leaving real accounts (e.g. a Team Lead whose login stayed on
+// Employee-tier access) stuck on the wrong role with no way to self-correct. Runs on every
+// startup and is a no-op once nothing has drifted, so a future gap like that one heals itself on
+// the next restart instead of requiring another manual data fix.
+function migrateSyncEmployeeRoles() {
+  const roleKeyByName = new Map(db.prepare('SELECT name, key FROM roles').all().map((r) => [r.name, r.key]));
+  const linked = db.prepare(`
+    SELECT e.user_id AS userId, e.designation AS designation, u.role AS currentRole
+    FROM employees e JOIN users u ON u.id = e.user_id
+    WHERE e.user_id IS NOT NULL AND e.designation IS NOT NULL AND e.designation != ''
+  `).all();
+  const update = db.prepare('UPDATE users SET role = ? WHERE id = ?');
+  linked.forEach((row) => {
+    const roleKey = roleKeyByName.get(row.designation);
+    if (roleKey && roleKey !== row.currentRole) update.run(roleKey, row.userId);
+  });
+}
+
+// Package formula: Gross = Basic + HRA + Bonus + Special Allowance; Deductions = PF + PT.
+// Bonus is a plain earning like Basic/HRA/Special Allowance — it's paid out and adds to net
+// take-home, not withheld/clawed back via a matching Deductions line. Also retires Conveyance/TDS
+// and a stray test component ("eds") that aren't part of that formula — safe because every
+// employee's amount on all three is still 0.
 function migratePayrollFormula() {
   const compCols = db.prepare('PRAGMA table_info(salary_components)').all().map((c) => c.name);
   if (!compCols.includes('withheld')) db.exec('ALTER TABLE salary_components ADD COLUMN withheld INTEGER NOT NULL DEFAULT 0');
 
   if (!db.prepare("SELECT 1 FROM salary_components WHERE key = 'bonus'").get()) {
-    const bonusId = db.prepare("INSERT INTO salary_components (key, label, type, withheld, sort_order) VALUES ('bonus', 'Bonus', 'earning', 1, 2)").run().lastInsertRowid;
+    const bonusId = db.prepare("INSERT INTO salary_components (key, label, type, withheld, sort_order) VALUES ('bonus', 'Bonus', 'earning', 0, 2)").run().lastInsertRowid;
     const ins = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, 0)');
     db.prepare('SELECT id FROM employees').all().forEach((e) => ins.run(e.id, bonusId));
   }
+  // Bonus was originally seeded as withheld (counted in Gross, then subtracted again in
+  // Deductions at the same amount, netting to zero effect on take-home) — it should be a real,
+  // paid-out earning instead, same as every other earning component. Unconditional/idempotent so
+  // it also corrects any database that already ran the old seed above with withheld = 1.
+  db.prepare("UPDATE salary_components SET withheld = 0 WHERE key = 'bonus' AND withheld = 1").run();
 
   db.prepare("UPDATE salary_components SET active = 0 WHERE key IN ('conveyance','tds','eds') AND active = 1").run();
 
@@ -1709,6 +1757,82 @@ function migratePayrollFormula() {
     const ins = db.prepare('INSERT INTO employee_salary_lines (employee_id, component_id, amount) VALUES (?, ?, 0)');
     db.prepare('SELECT id FROM employees').all().forEach((e) => { ins.run(e.id, employerPfId); ins.run(e.id, gratuityId); });
   }
+}
+
+// eSSL Biometric Integration admin feature (Device Management, Monitoring, Export & Audit) — the
+// device-facing receiver (biometricDevice.routes.js/biometricPunch.js) already works against the
+// minimal biometric_devices/employee_biometric_ids/biometric_punches shape; these are purely
+// additive columns/tables the admin screens need on top of that, none of them touched by the
+// receiver's own write path.
+function migrateBiometricIntegration() {
+  const devCols = db.prepare('PRAGMA table_info(biometric_devices)').all().map((c) => c.name);
+  if (!devCols.includes('model')) db.exec('ALTER TABLE biometric_devices ADD COLUMN model TEXT');
+  if (!devCols.includes('ip_address')) db.exec('ALTER TABLE biometric_devices ADD COLUMN ip_address TEXT');
+  if (!devCols.includes('port')) db.exec('ALTER TABLE biometric_devices ADD COLUMN port INTEGER');
+  if (!devCols.includes('timezone')) db.exec("ALTER TABLE biometric_devices ADD COLUMN timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata'");
+  if (!devCols.includes('comm_mode')) db.exec("ALTER TABLE biometric_devices ADD COLUMN comm_mode TEXT NOT NULL DEFAULT 'ADMS' CHECK (comm_mode IN ('ADMS','HTTP','API'))");
+  if (!devCols.includes('last_punch_at')) db.exec('ALTER TABLE biometric_devices ADD COLUMN last_punch_at TEXT');
+  if (!devCols.includes('last_sync_at')) db.exec('ALTER TABLE biometric_devices ADD COLUMN last_sync_at TEXT');
+  if (!devCols.includes('device_type')) db.exec("ALTER TABLE biometric_devices ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Fingerprint'");
+  if (!devCols.includes('zone')) db.exec('ALTER TABLE biometric_devices ADD COLUMN zone TEXT');
+
+  const mapCols = db.prepare('PRAGMA table_info(employee_biometric_ids)').all().map((c) => c.name);
+  if (!mapCols.includes('device_id')) db.exec('ALTER TABLE employee_biometric_ids ADD COLUMN device_id INTEGER REFERENCES biometric_devices(id) ON DELETE SET NULL');
+
+  db.exec(`
+    -- One row per "Sync Now" click or background reconciliation sweep — reprocesses
+    -- biometric_punches rows still unmapped/unprocessed. This app has no outbound pull protocol
+    -- to any real device, so a "sync" is always this reconciliation, never a live fetch from
+    -- hardware — see Integrations' Biometric screen.
+    CREATE TABLE IF NOT EXISTS biometric_sync_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER REFERENCES biometric_devices(id) ON DELETE SET NULL,
+      triggered_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      trigger_type TEXT NOT NULL DEFAULT 'manual' CHECK (trigger_type IN ('manual','background')),
+      punches_scanned INTEGER NOT NULL DEFAULT 0,
+      punches_mapped INTEGER NOT NULL DEFAULT 0,
+      punches_still_unmapped INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'Success' CHECK (status IN ('Success','Partial','Failed')),
+      error TEXT,
+      started_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS biometric_error_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_serial TEXT,
+      source TEXT NOT NULL,
+      message TEXT NOT NULL,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    -- Generic audit trail (not biometric-only, but only wired into biometric routes for now) —
+    -- device actions, mapping changes, sync runs, and exports all log here.
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      action TEXT NOT NULL,
+      entity_type TEXT,
+      entity_id TEXT,
+      detail TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+}
+
+// Per-employee override of which company-enabled self check-in methods (Web Check-in / Mobile
+// App) a specific employee may use — e.g. Super Admin restricts one employee to Mobile App only.
+// No rows for an employee = unrestricted (every company-enabled method is available), matching
+// the "missing row = allowed" default already used by isMethodEnabled() in attendanceCore.js.
+function migrateEmployeeCheckinMethods() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_checkin_methods (
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      method TEXT NOT NULL,
+      PRIMARY KEY (employee_id, method)
+    );
+  `);
 }
 
 // Sub-department "teams" (e.g. Education's Team-A/Team-B), an optional team_id on each
@@ -1980,6 +2104,7 @@ function migratePermissionCatalog() {
   migrateManagerFullAccess();
   migrateDocumentPublishFeature();
   migrateKnowledgeTransferModule();
+  migrateBiometricIntegrationModule();
   migrateFeaturesToModule(['Task Assignment (My Tasks)'], 'Timesheet');
   migrateFeaturesToModule(['Timesheet Approval', 'Timesheet Reports'], 'Project & Resource Management');
   migrateAssistantManagerScopeLabel();
@@ -2038,6 +2163,35 @@ function migrateKnowledgeTransferModule() {
     roles.forEach((r) => {
       if (FULL_ACCESS_ROLES.includes(r.key)) ACTIONS.forEach((a) => insertGrant.run(r.id, featureId, a));
       else insertGrant.run(r.id, featureId, 'View'); // everyone can still see the module + submit their own idea regardless (self-service, enforced in the route, not by this grant)
+    });
+  });
+}
+
+// Device/IP/serial management is an infrastructure-config concern distinct from both Attendance
+// ('07') and Shift & Roster — its own module, same precedent as Knowledge Transfer, so Super
+// Admin can tune biometric access without touching the other unrelated Integrations sub-features
+// (channels, webhooks, calendar, etc.) that share integrations.routes.js.
+function migrateBiometricIntegrationModule() {
+  if (db.prepare("SELECT 1 FROM perm_modules WHERE name = 'Biometric Device Integration'").get()) return;
+  const roles = db.prepare('SELECT id, key FROM roles').all();
+  if (!roles.length) return;
+
+  const FULL_ACCESS_ROLES = ['super_admin', 'hr_admin', 'manager'];
+  const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
+  const items = ['Device Configuration', 'Test Connection & Sync', 'Employee Mapping', 'Monitoring & Error Logs', 'Export & Audit Log'];
+
+  const maxSort = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM perm_modules').get().m;
+  const maxCode = db.prepare("SELECT MAX(CAST(code AS INTEGER)) AS m FROM perm_modules").get().m || 0;
+  const code = String(maxCode + 1).padStart(2, '0');
+  const moduleId = db.prepare('INSERT INTO perm_modules (code, name, sort_order) VALUES (?, ?, ?)').run(code, 'Biometric Device Integration', maxSort + 1).lastInsertRowid;
+
+  const insertFeature = db.prepare('INSERT INTO perm_features (module_id, category, name, sort_order) VALUES (?, ?, ?, ?)');
+  const insertGrant = db.prepare('INSERT OR IGNORE INTO role_permissions (role_id, feature_id, action) VALUES (?, ?, ?)');
+  items.forEach((item, fi) => {
+    const featureId = insertFeature.run(moduleId, 'Core Records & Day-to-Day Operations', item, fi).lastInsertRowid;
+    roles.forEach((r) => {
+      if (FULL_ACCESS_ROLES.includes(r.key)) ACTIONS.forEach((a) => insertGrant.run(r.id, featureId, a));
+      else insertGrant.run(r.id, featureId, 'View');
     });
   });
 }
