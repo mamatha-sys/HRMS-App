@@ -140,11 +140,13 @@ function biometricListRows(req) {
     const dayPunches = date
       ? db.prepare('SELECT * FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time DESC, id DESC').all(e.id, date + '%')
       : [];
+
     const lastPunch = date
       ? (dayPunches[0] || null)
       : db.prepare('SELECT * FROM biometric_punches WHERE employee_id = ? ORDER BY punch_time DESC, id DESC LIMIT 1').get(e.id);
 
     const monthRows = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, monthPrefix + '%');
+
     const presentDays = monthRows.filter((r) => r.status === 'Present').length;
     const lateDays = monthRows.filter((r) => r.late_minutes > 0).length;
     const halfDayCutDays = monthRows.filter((r) => r.half_day_flag).length;
@@ -156,8 +158,14 @@ function biometricListRows(req) {
       department: e.department,
       designation: e.designation,
 
-      last_method: lastPunch ? 'Biometric (Fingerprint)' : (lastAttendance?.method || null),
-      last_punch: lastPunch?.punch_time ? lastPunch.punch_time.slice(0, 16) : null,
+      last_method: lastPunch
+        ? 'Biometric (Fingerprint)'
+        : (lastAttendance?.method || null),
+
+      last_punch: lastPunch?.punch_time
+        ? lastPunch.punch_time.slice(0, 16)
+        : null,
+
       punch_count: date ? dayPunches.length : null,
 
       check_in: lastAttendance?.check_in_time
