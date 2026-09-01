@@ -2013,6 +2013,11 @@ function migrateTeamsAndScopes() {
     db.prepare('INSERT INTO dashboard_config (widget_key, label, visible, sort_order) VALUES (?, ?, ?, ?)')
       .run('idea_leaderboard', 'Weekly Idea Contribution Leaderboard', 1, maxSort2 + 1);
   }
+  if (!db.prepare("SELECT 1 FROM dashboard_config WHERE widget_key = 'celebrations'").get()) {
+    const maxSort3 = db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM dashboard_config').get().m;
+    db.prepare('INSERT INTO dashboard_config (widget_key, label, visible, sort_order) VALUES (?, ?, ?, ?)')
+      .run('celebrations', 'Upcoming Birthdays & Work Anniversaries', 1, maxSort3 + 1);
+  }
 
   // New Hires now link to a real employee record (nullable, for backward compat with any row
   // created before this migration) — required going forward so onboarding can be driven by real

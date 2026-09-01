@@ -62,12 +62,14 @@ export function computeWorkStats(checkIn, checkOut, shift) {
   const working_hours = checkIn && checkOut ? Math.round((diffMinutes(checkIn, checkOut) / 60) * 100) / 100 : null;
   return { working_hours, late_minutes, early_logout_minutes, overtime_minutes };
 }
-// The only two methods an employee can pick from the check-in dropdown — both require a live
-// face-verification capture before the check-in is accepted (see /check-in). 'Biometric
-// (Fingerprint)' is a real method too, but it's never picked here — it's written directly by the
-// hardware device receiver (biometricPunch.js) and shows up in Reports only, never as a manual
-// option, since nobody "selects" a fingerprint scan from a web dropdown.
-export const METHODS = ['Web Check-in', 'Mobile App'];
+// Every real attendance method, in the order they're offered to an administrator. This is the
+// admin-facing list — what Super Admin can enable/disable company-wide and assign per employee.
+// It is NOT the employee's own check-in dropdown: 'Biometric (Fingerprint)' is deliberately
+// filtered out of that (see SELF_CHECKIN_METHODS in attendance.routes.js and GET /methods),
+// because nobody "selects" a fingerprint scan from a web dropdown — it's written directly by the
+// hardware device receiver (biometricPunch.js). Web Check-in/Mobile App both additionally require
+// a live face-verification capture before the check-in is accepted (see /check-in).
+export const METHODS = ['Web Check-in', 'Mobile App', 'Biometric (Fingerprint)'];
 
 export function freeLateAllowance() {
   const row = db.prepare("SELECT value FROM policies WHERE name = 'Free late arrivals per month'").get();

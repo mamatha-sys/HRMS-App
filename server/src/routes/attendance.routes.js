@@ -501,7 +501,15 @@ router.post('/check-in', (req, res) => {
 
   const method = SELF_CHECKIN_METHODS.includes(req.body?.method) ? req.body.method : SELF_CHECKIN_METHODS[0];
   if (!isMethodEnabled(method)) return res.status(400).json({ error: `${method} has been disabled by your administrator.` });
-  if (!effectiveMethodsFor(me.id).includes(method)) return res.status(403).json({ error: `${method} has not been assigned to you by your administrator.` });
+  const myMethods = effectiveMethodsFor(me.id);
+  if (!myMethods.includes(method)) {
+    // Assigned Biometric only: there is nothing to self-select — they're expected to punch on the
+    // physical device, so say that rather than the generic "not assigned to you".
+    if (myMethods.length && myMethods.every((m) => !SELF_CHECKIN_METHODS.includes(m))) {
+      return res.status(403).json({ error: 'You are assigned to Biometric (Fingerprint) attendance — please punch on the biometric device instead of checking in here.' });
+    }
+    return res.status(403).json({ error: `${method} has not been assigned to you by your administrator.` });
+  }
 
   const faceDescriptor = req.body?.faceDescriptor;
   if (!isValidDescriptor(faceDescriptor)) return res.status(400).json({ error: 'Face verification is required to check in.' });

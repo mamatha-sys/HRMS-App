@@ -13,6 +13,7 @@ import ApprovalsWidget from '../components/ApprovalsWidget.jsx';
 import MyAttendanceLeaveWidget from '../components/MyAttendanceLeaveWidget.jsx';
 import AnnouncementsWidget from '../components/AnnouncementsWidget.jsx';
 import IdeaLeaderboardWidget from '../components/IdeaLeaderboardWidget.jsx';
+import CelebrationsWidget from '../components/CelebrationsWidget.jsx';
 
 const BANNERS = {
   super_admin: 'Full, unrestricted access — every widget below, organization-wide, no scope restriction.',
@@ -134,6 +135,7 @@ export default function Dashboard() {
               {show('notifications') && <NotificationsWidget key={'notifications' + refreshKey} badge={3} canCreate={canManage} />}
               {show('calendar') && <EventsWidget key={'calendar' + refreshKey} badge={4} canCreate={canManage} />}
               {show('announcements') && <AnnouncementsWidget key={'announcements' + refreshKey} badge={5} />}
+              {show('celebrations') && <CelebrationsWidget key={'celebrations' + refreshKey} badge={10} />}
             </div>
           </div>
 
@@ -172,6 +174,7 @@ export default function Dashboard() {
             <EventsWidget key={'calendar' + refreshKey} badge={3} canCreate={false} />
             <AnnouncementsWidget key={'announcements' + refreshKey} badge={4} />
             <IdeaLeaderboardWidget key={'idea_leaderboard' + refreshKey} badge={5} />
+            <CelebrationsWidget key={'celebrations' + refreshKey} badge={6} />
           </div>
         </>
       )}

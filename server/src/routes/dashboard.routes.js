@@ -8,6 +8,63 @@ router.use(requireAuth);
 
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
+// Upcoming birthdays and work anniversaries, company-wide — deliberately NOT scoped to STL/TL's
+// assigned departments or gated by role like the rest of this file, since these are a shared
+// team-morale feature everyone should see the same version of, not a data-access concern.
+function upcomingCelebrations(windowDays = 14) {
+  const rows = db.prepare(`
+    SELECT id, name, employee_code, department, date_of_birth, date_of_joining
+    FROM employees
+    WHERE status = 'Active'
+      AND ((date_of_birth IS NOT NULL AND date_of_birth != '') OR (date_of_joining IS NOT NULL AND date_of_joining != ''))
+  `).all();
+
+  const todayStr = db.prepare("SELECT date('now') AS d").get().d;
+  const today = new Date(`${todayStr}T00:00:00`);
+  const currentYear = today.getFullYear();
+
+  function nextOccurrence(dateStr) {
+    const [, mm, dd] = dateStr.split('-');
+    let candidate = new Date(`${currentYear}-${mm}-${dd}T00:00:00`);
+    if (candidate < today) candidate = new Date(`${currentYear + 1}-${mm}-${dd}T00:00:00`);
+    return candidate;
+  }
+  const daysAway = (d) => Math.round((d - today) / 86400000);
+  const mmdd = (d) => `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  const birthdays = [];
+  const anniversaries = [];
+  rows.forEach((e) => {
+    if (e.date_of_birth) {
+      const next = nextOccurrence(e.date_of_birth);
+      const away = daysAway(next);
+      if (away <= windowDays) {
+        birthdays.push({ id: e.id, name: e.name, employee_code: e.employee_code, department: e.department, date: mmdd(next), daysAway: away });
+      }
+    }
+    if (e.date_of_joining) {
+      const joinYear = Number(e.date_of_joining.slice(0, 4));
+      const next = nextOccurrence(e.date_of_joining);
+      const away = daysAway(next);
+      const years = next.getFullYear() - joinYear;
+      // Only a real anniversary (1+ full year completed) — a hire whose join date falls in this
+      // upcoming window during their own first year isn't "celebrating" yet.
+      if (away <= windowDays && years >= 1) {
+        anniversaries.push({ id: e.id, name: e.name, employee_code: e.employee_code, department: e.department, date: mmdd(next), daysAway: away, years });
+      }
+    }
+  });
+  birthdays.sort((a, b) => a.daysAway - b.daysAway);
+  anniversaries.sort((a, b) => a.daysAway - b.daysAway);
+  return { birthdays, anniversaries };
+}
+
+// Visible to every role, including plain 'employee' (whose /summary above returns only {role, me}
+// and skips all the HR-only aggregates) — no requireAuth gate beyond the router-wide one.
+router.get('/celebrations', (req, res) => {
+  res.json(upcomingCelebrations());
+});
+
 router.get('/summary', (req, res) => {
   if (req.user.role === 'employee') {
     const me = myEmployee(req.user.sub);

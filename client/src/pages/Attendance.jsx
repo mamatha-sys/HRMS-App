@@ -295,15 +295,20 @@ function MyAttendance({ compact }) {
             </span>
           )}
           <div style={{ flex: 1 }} />
-          <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time || showFaceCapture} style={{ width: 'auto' }}>
+          <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time || showFaceCapture || methods.length === 0} style={{ width: 'auto' }}>
             {methods.map((m) => <option key={m}>{m}</option>)}
           </select>
-          <button className="primary" onClick={startCheckIn} disabled={!!t?.check_in_time || showFaceCapture}>Check in</button>
+          <button className="primary" onClick={startCheckIn} disabled={!!t?.check_in_time || showFaceCapture || methods.length === 0}>Check in</button>
           <button onClick={checkOut} disabled={!t?.check_in_time || !!t?.check_out_time}>Check out</button>
           <button onClick={() => setShowReg((v) => !v)}>Regularize</button>
           <button onClick={() => setShowCalendar((v) => !v)}>{showCalendar ? 'Hide calendar' : 'Calendar view'}</button>
         </div>
-        <div className="note" style={{ marginTop: 6 }}>Check-in captures your GPS location (browser will ask permission) and requires a quick face verification.</div>
+        {methods.length === 0 ? (
+          // Assigned to Biometric (Fingerprint) only — nothing here is self-selectable for them.
+          <div className="note" style={{ marginTop: 6 }}>You're assigned to Biometric (Fingerprint) attendance — punch on the biometric device instead of checking in here. Your punches still appear below and in all reports.</div>
+        ) : (
+          <div className="note" style={{ marginTop: 6 }}>Check-in captures your GPS location (browser will ask permission) and requires a quick face verification.</div>
+        )}
         {showFaceCapture && (
           <FaceCheckInPanel onCapture={checkIn} onCancel={() => setShowFaceCapture(false)} submitting={locating || submitting} />
         )}
@@ -467,7 +472,7 @@ function HRAttendance({ compact, sectionLabel }) {
         <div className="card">
           <div className="feature-name" style={{ marginBottom: 8 }}>Check-in Methods</div>
           <div className="feature-meta" style={{ marginBottom: 8 }}>
-            Control which methods employees can pick when checking in. Both require a live face-verification capture. Biometric (Fingerprint) isn't listed here — it's pushed directly by registered devices (Integrations) and always shows up in the Biometric Attendance List / Reports.
+            Control which attendance methods are available company-wide. Web Check-in and Mobile App are self-service and require a live face-verification capture. Biometric (Fingerprint) is never self-selected from a dropdown — it's punched on a registered device (Integrations) — but it is listed here so you can turn it off company-wide or assign it to specific employees below.
           </div>
           {!checkInMethods && <div className="empty">Loading…</div>}
           {checkInMethods && checkInMethods.map((m) => (
@@ -486,7 +491,7 @@ function HRAttendance({ compact, sectionLabel }) {
         <div className="card" style={{ marginTop: 14 }}>
           <div className="feature-name" style={{ marginBottom: 8 }}>Per-employee assignment</div>
           <div className="feature-meta" style={{ marginBottom: 8 }}>
-            Restrict a specific employee to a subset of the company-enabled methods above (e.g. Mobile App only). Leave every box for an employee unchecked/all-checked as-is to leave them unrestricted — an employee with no boxes checked can use any company-enabled method.
+            Restrict a specific employee to a subset of the company-enabled methods above (e.g. Mobile App only, or Biometric only). An employee with no boxes checked is unrestricted and can use any company-enabled method. Checking <strong>only</strong> Biometric (Fingerprint) means they cannot self check-in at all — they must punch on the device.
           </div>
           <div className="filter-bar" style={{ marginBottom: 10 }}>
             <input placeholder="Search name…" value={empMethodFilters.name} onChange={(e) => setEmpMethodFilters({ ...empMethodFilters, name: e.target.value })} />

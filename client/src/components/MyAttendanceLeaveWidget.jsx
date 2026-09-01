@@ -22,6 +22,7 @@ export default function MyAttendanceLeaveWidget() {
   const [balances, setBalances] = useState([]);
   const [pendingLeaves, setPendingLeaves] = useState(0);
   const [method, setMethod] = useState('Web Check-in');
+  const [methods, setMethods] = useState([]);
   const [locating, setLocating] = useState(false);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -32,6 +33,17 @@ export default function MyAttendanceLeaveWidget() {
     api.get('/leaves').then((r) => setPendingLeaves(r.data.leaves.filter((l) => l.status === 'Pending').length)).catch(() => {});
   }
   useEffect(load, []);
+  // The methods this specific employee may actually self-select — company-enabled, narrowed to
+  // their own per-employee assignment, and always excluding Biometric (Fingerprint), which is
+  // punched on the device, never picked here. Comes back empty for someone assigned to Biometric
+  // only, which is what disables check-in below.
+  useEffect(() => {
+    api.get('/attendance/methods').then((r) => {
+      setMethods(r.data.methods);
+      if (r.data.methods.length && !r.data.methods.includes(method)) setMethod(r.data.methods[0]);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function checkIn() {
     setError(''); setInfo(''); setLocating(true);
@@ -75,12 +87,15 @@ export default function MyAttendanceLeaveWidget() {
         {t?.check_in_time && <span className="feature-meta">In: {t.check_in_time} ({t.method})</span>}
         {t?.check_out_time && <span className="feature-meta">Out: {t.check_out_time}</span>}
         <div style={{ flex: 1 }} />
-        <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time} style={{ width: 'auto' }}>
-          <option>Web Check-in</option><option>Mobile App</option><option>Biometric (Fingerprint)</option><option>Face Recognition</option>
+        <select value={method} onChange={(e) => setMethod(e.target.value)} disabled={!!t?.check_in_time || methods.length === 0} style={{ width: 'auto' }}>
+          {methods.map((m) => <option key={m}>{m}</option>)}
         </select>
-        <button className="primary" onClick={checkIn} disabled={!!t?.check_in_time || locating}>{locating ? 'Locating...' : 'Check in'}</button>
+        <button className="primary" onClick={checkIn} disabled={!!t?.check_in_time || locating || methods.length === 0}>{locating ? 'Locating...' : 'Check in'}</button>
         <button onClick={checkOut} disabled={!t?.check_in_time || !!t?.check_out_time}>Check out</button>
       </div>
+      {methods.length === 0 && !t?.check_in_time && (
+        <div className="note" style={{ marginTop: 6 }}>You're assigned to Biometric (Fingerprint) attendance — punch on the biometric device instead of checking in here.</div>
+      )}
 
       <div className="row" style={{ marginTop: 10 }}>
         <Link to="/attendance"><button>View Attendance →</button></Link>
