@@ -82,6 +82,7 @@ app.use('/api/documents', documentsRoutes);
 app.use('/api/integrations', integrationsRoutes);
 // Real biometric hardware calls this directly (no JWT) — see biometricDevice.routes.js.
 app.use('/api/biometric-device', biometricDeviceRoutes);
+app.use('/iclock', biometricDeviceRoutes);
 app.use('/api/branding', brandingRoutes);
 app.use('/api/shift-roster', shiftRosterRoutes);
 app.use('/api/recognition', recognitionRoutes);

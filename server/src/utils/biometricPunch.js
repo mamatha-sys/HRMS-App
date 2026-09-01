@@ -1,25 +1,27 @@
 import db from '../db.js';
-import { upsertAttendanceForDate, recomputeLateFlags, notifyIfLate, notifyIfEarlyLogout, effectiveShiftFor, computeWorkStats } from './attendanceCore.js';
+import {
+  upsertAttendanceForDate,
+  recomputeLateFlags,
+  notifyIfLate,
+  notifyIfEarlyLogout,
+  effectiveShiftFor,
+  computeWorkStats
+} from './attendanceCore.js';
 
 function normalizeBiometricId(value) {
   return String(value ?? '').trim().toUpperCase().replace(/[-\s]/g, '');
 }
 
-// Exported (not just used internally) so biometricSync.js's "Sync Now" reconciliation can resolve
-// a still-unmapped punch's employee the same way, without duplicating this lookup.
 export function employeeForDeviceUser(deviceUserId) {
   const id = String(deviceUserId ?? '').trim();
   if (!id) return null;
 
-  // 1) Use an explicit mapping when one already exists.
   const mapped = db
     .prepare('SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?')
     .get(id);
 
   if (mapped?.employee_id) return mapped.employee_id;
 
-  // 2) Fallback: automatically match the eSSL ID to employee_code,
-  //    ignoring hyphens and spaces and treating case as equivalent.
   const normalized = normalizeBiometricId(id);
   if (!normalized) return null;
 
@@ -30,27 +32,29 @@ export function employeeForDeviceUser(deviceUserId) {
       AND REPLACE(REPLACE(UPPER(employee_code), '-', ''), ' ', '') = ?
   `).all(normalized);
 
-  // Only auto-map when there is exactly one unambiguous employee.
   if (matches.length !== 1) return null;
 
   const employeeId = matches[0].id;
 
-  // If this device user ID is already assigned elsewhere, never overwrite it.
   const usedByOther = db
     .prepare('SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?')
     .get(id);
 
-  if (usedByOther?.employee_id && Number(usedByOther.employee_id) !== Number(employeeId)) {
+  if (
+    usedByOther?.employee_id &&
+    Number(usedByOther.employee_id) !== Number(employeeId)
+  ) {
     return null;
   }
 
-  // If this employee already has a different mapping, keep the explicit
-  // mapping rather than replacing it automatically.
   const employeeExisting = db
     .prepare('SELECT device_user_id FROM employee_biometric_ids WHERE employee_id = ?')
     .get(employeeId);
 
-  if (employeeExisting?.device_user_id && employeeExisting.device_user_id !== id) {
+  if (
+    employeeExisting?.device_user_id &&
+    employeeExisting.device_user_id !== id
+  ) {
     return null;
   }
 
@@ -66,63 +70,163 @@ export function employeeForDeviceUser(deviceUserId) {
 }
 
 function inferPunchType(statusCode) {
-  if (statusCode === '0') return 'check-in';
-  if (statusCode === '1') return 'check-out';
+  const code = String(statusCode ?? '').trim();
+
+  if (code === '0') return 'check-in';
+  if (code === '1') return 'check-out';
+
   return 'unknown';
 }
 
-function applyPunchToAttendance(employeeId, timestamp, punchType) {
-  const date = timestamp.slice(0, 10);
-  const time = timestamp.slice(11, 16);
-  const method = 'Biometric (Fingerprint)';
+/*
+ * Rebuild attendance for one employee/date from ALL raw biometric punches.
+ *
+ * Rules:
+ *   status=0 -> check-in
+ *   status=1 -> check-out
+ *
+ * Multiple check-ins:
+ *   earliest check-in wins.
+ *
+ * Multiple check-outs:
+ *   latest check-out wins.
+ *
+ * This prevents repeated device uploads from turning a later check-in
+ * into a false checkout.
+ */
+export function rebuildAttendanceFromPunches(employeeId, date) {
+  const punches = db.prepare(`
+    SELECT *
+    FROM biometric_punches
+    WHERE employee_id = ?
+      AND substr(punch_time, 1, 10) = ?
+      AND punch_type IN ('check-in', 'check-out')
+    ORDER BY punch_time ASC, id ASC
+  `).all(employeeId, date);
+
+  if (!punches.length) return null;
+
+  const checkIns = punches.filter((p) => p.punch_type === 'check-in');
+  const checkOuts = punches.filter((p) => p.punch_type === 'check-out');
+
+  const firstCheckIn = checkIns.length
+    ? checkIns[0].punch_time.slice(11, 16)
+    : null;
+
+  const lastCheckOut = checkOuts.length
+    ? checkOuts[checkOuts.length - 1].punch_time.slice(11, 16)
+    : null;
+
   const shift = effectiveShiftFor(employeeId, date);
-  if (punchType === 'check-out') {
-    const existing = db.prepare('SELECT check_in_time FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, date);
-    const stats = computeWorkStats(existing?.check_in_time || null, time, shift);
-    const row = upsertAttendanceForDate(employeeId, date, { check_out_time: time, method, shift_id: shift.shiftId, ...stats });
-    notifyIfEarlyLogout(employeeId, row, shift);
-  } else {
-    // Real devices often send an ambiguous status for the first punch of the day — treat it as
-    // check-in if there isn't one yet, otherwise as check-out. HR can correct a bad guess from
-    // the Recent Punches screen (it never touches the raw punch log, only the derived attendance
-    // row, so re-mapping/reprocessing is always safe).
-    const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employeeId, date);
-    if (!existing?.check_in_time) {
-      const stats = computeWorkStats(time, null, shift);
-      const row = upsertAttendanceForDate(employeeId, date, { status: 'Present', check_in_time: time, method, shift_id: shift.shiftId, ...stats });
-      notifyIfLate(employeeId, row, shift);
-    } else if (!existing.check_out_time) {
-      const stats = computeWorkStats(existing.check_in_time, time, shift);
-      const row = upsertAttendanceForDate(employeeId, date, { check_out_time: time, shift_id: shift.shiftId, ...stats });
-      notifyIfEarlyLogout(employeeId, row, shift);
+
+  const stats = computeWorkStats(
+    firstCheckIn,
+    lastCheckOut,
+    shift
+  );
+
+  const row = upsertAttendanceForDate(
+    employeeId,
+    date,
+    {
+      status: firstCheckIn ? 'Present' : 'Absent',
+      check_in_time: firstCheckIn,
+      check_out_time: lastCheckOut,
+      method: 'Biometric (Fingerprint)',
+      shift_id: shift.shiftId,
+      ...stats
     }
+  );
+
+  if (firstCheckIn) {
+    notifyIfLate(employeeId, row, shift);
   }
+
+  if (lastCheckOut) {
+    notifyIfEarlyLogout(employeeId, row, shift);
+  }
+
   recomputeLateFlags(employeeId, date.slice(0, 7));
+
+  return row;
 }
 
-// Parses one raw ADMS/iClock attendance-log line — "<device_user_id>\t<timestamp>\t<status>\t..."
-// — and applies it: the raw punch is always logged, and if the device_user_id is mapped to a
-// real employee, today's attendance row is updated through the exact same upsert/late-flag
-// logic as a manual web check-in, so a biometric punch is indistinguishable from one made
-// through the app.
+/*
+ * Process a raw device punch.
+ *
+ * Every raw punch is permanently recorded.
+ * Attendance is then rebuilt from the complete punch history for that
+ * employee/date, making duplicate/repeated device punches harmless.
+ */
 export function processPunchLine(deviceSerial, line) {
   const parts = line.split('\t').map((part) => part.trim());
-  const [deviceUserId, timestamp, statusCode, verifyType] = parts;
-  if (!deviceUserId || !timestamp) return null;
+
+  const [
+    deviceUserId,
+    timestamp,
+    statusCode,
+    verifyType
+  ] = parts;
+
+  if (!deviceUserId || !timestamp) {
+    return null;
+  }
+
   const punchType = inferPunchType(statusCode);
   const employeeId = employeeForDeviceUser(deviceUserId);
+
   const info = db.prepare(`
-    INSERT INTO biometric_punches (device_serial, device_user_id, employee_id, punch_time, punch_type, processed, raw_line)
+    INSERT INTO biometric_punches (
+      device_serial,
+      device_user_id,
+      employee_id,
+      punch_time,
+      punch_type,
+      processed,
+      raw_line
+    )
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(deviceSerial, deviceUserId, employeeId, timestamp, punchType, employeeId ? 1 : 0, line);
-  if (employeeId) applyPunchToAttendance(employeeId, timestamp, punchType);
+  `).run(
+    deviceSerial,
+    deviceUserId,
+    employeeId,
+    timestamp,
+    punchType,
+    employeeId ? 1 : 0,
+    line
+  );
+
+  if (employeeId && punchType !== 'unknown') {
+    rebuildAttendanceFromPunches(
+      employeeId,
+      timestamp.slice(0, 10)
+    );
+  }
+
   return info.lastInsertRowid;
 }
 
-// HR manually maps a previously-unmapped punch to an employee, retroactively processing it.
+/*
+ * HR manually maps a previously-unmapped punch to an employee,
+ * then rebuilds the complete attendance record from raw punches.
+ */
 export function mapPunch(punchId, employeeId) {
-  const punch = db.prepare('SELECT * FROM biometric_punches WHERE id = ?').get(punchId);
-  if (!punch) throw new Error('Punch not found');
-  db.prepare('UPDATE biometric_punches SET employee_id = ?, processed = 1 WHERE id = ?').run(employeeId, punchId);
-  applyPunchToAttendance(employeeId, punch.punch_time, punch.punch_type);
+  const punch = db
+    .prepare('SELECT * FROM biometric_punches WHERE id = ?')
+    .get(punchId);
+
+  if (!punch) {
+    throw new Error('Punch not found');
+  }
+
+  db.prepare(`
+    UPDATE biometric_punches
+    SET employee_id = ?, processed = 1
+    WHERE id = ?
+  `).run(employeeId, punchId);
+
+  rebuildAttendanceFromPunches(
+    employeeId,
+    punch.punch_time.slice(0, 10)
+  );
 }
