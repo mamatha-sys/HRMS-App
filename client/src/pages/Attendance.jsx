@@ -797,7 +797,10 @@ function MonthlyReports() {
 }
 
 function PunchLog() {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const todayStr = new Date().toISOString().slice(0, 10);
+  // From/To are the date filter — set both to the same day for a single-day log (the default).
+  const [from, setFrom] = useState(todayStr);
+  const [to, setTo] = useState(todayStr);
   const [empId, setEmpId] = useState('');
   const [name, setName] = useState('');
   const [dept, setDept] = useState('');
@@ -808,41 +811,50 @@ function PunchLog() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
 
-  function filterParams(d, f) {
-    const { employeeCode = empId, name: n = name, department = dept, designation: r = designation, status: s = status } = f || {};
-    return { date: d, employeeCode: employeeCode || undefined, name: n || undefined, department: department || undefined, designation: r || undefined, status: s || undefined };
+  function filterParams(f) {
+    const { from: fr = from, to: t = to, employeeCode = empId, name: n = name, department = dept, designation: r = designation, status: s = status } = f || {};
+    return { from: fr || undefined, to: t || undefined, employeeCode: employeeCode || undefined, name: n || undefined, department: department || undefined, designation: r || undefined, status: s || undefined };
   }
-  function load(d, f) { api.get('/attendance/punch-log', { params: filterParams(d, f) }).then((r) => setData(r.data)).catch(() => setError('Could not load punch log.')); }
+  function load(f) { api.get('/attendance/punch-log', { params: filterParams(f) }).then((r) => setData(r.data)).catch(() => setError('Could not load punch log.')); }
   useEffect(() => {
-    load(date);
+    load();
     api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {});
     api.get('/org/roles').then((r) => setRoles(r.data.roles)).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function clearFilters() { setEmpId(''); setName(''); setDept(''); setDesignation(''); setStatus(''); load(date, { employeeCode: '', name: '', department: '', designation: '', status: '' }); }
+  function clearFilters() {
+    setFrom(todayStr); setTo(todayStr); setEmpId(''); setName(''); setDept(''); setDesignation(''); setStatus('');
+    load({ from: todayStr, to: todayStr, employeeCode: '', name: '', department: '', designation: '', status: '' });
+  }
+
+  const rangeLabel = data ? (data.from === data.to ? data.from : `${data.from} to ${data.to}`) : '';
+  const fileLabel = data ? (data.from === data.to ? data.from : `${data.from}_to_${data.to}`) : 'export';
 
   async function exportCsv() {
-    const res = await api.get('/attendance/punch-log/export', { params: filterParams(date), responseType: 'blob' });
+    const res = await api.get('/attendance/punch-log/export', { params: filterParams(), responseType: 'blob' });
     const url = URL.createObjectURL(res.data);
-    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${date}.csv`; a.click(); URL.revokeObjectURL(url);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${fileLabel}.csv`; a.click(); URL.revokeObjectURL(url);
   }
   async function exportExcel() {
-    const res = await api.get('/attendance/punch-log/export.xlsx', { params: filterParams(date), responseType: 'blob' });
+    const res = await api.get('/attendance/punch-log/export.xlsx', { params: filterParams(), responseType: 'blob' });
     const url = URL.createObjectURL(res.data);
-    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${date}.xlsx`; a.click(); URL.revokeObjectURL(url);
+    const a = document.createElement('a'); a.href = url; a.download = `attendance-punch-log-${fileLabel}.xlsx`; a.click(); URL.revokeObjectURL(url);
   }
 
   return (
     <div className="card">
       <div className="row" style={{ alignItems: 'center' }}>
-        <div className="feature-name">Punch Log — First/Last &amp; Every In-Between Punch</div>
+        <div className="feature-name">Punch Log — Check-In / Check-Out Times {data && <span className="note">({rangeLabel})</span>}</div>
         <div style={{ flex: 1 }} />
-        <input type="date" value={date} onChange={(e) => { setDate(e.target.value); load(e.target.value); }} style={{ width: 'auto' }} />
         <button className="primary" onClick={exportCsv}>Export</button>
         <button onClick={exportExcel}>Export (Excel)</button>
       </div>
       <div className="filter-bar" style={{ marginTop: 10, marginBottom: 8 }}>
+        <label className="feature-meta" style={{ alignSelf: 'center' }}>From</label>
+        <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} style={{ width: 'auto' }} />
+        <label className="feature-meta" style={{ alignSelf: 'center' }}>To</label>
+        <input type="date" value={to} onChange={(e) => setTo(e.target.value)} style={{ width: 'auto' }} />
         <input placeholder="Employee ID" value={empId} onChange={(e) => setEmpId(e.target.value)} style={{ width: 140 }} />
         <input placeholder="Employee name" value={name} onChange={(e) => setName(e.target.value)} style={{ width: 180 }} />
         <select value={dept} onChange={(e) => setDept(e.target.value)}>
@@ -858,28 +870,47 @@ function PunchLog() {
           <option value="checked_in">Checked In only (no check-out yet)</option>
           <option value="checked_out">Checked Out (complete)</option>
         </select>
-        <button onClick={() => load(date)}>Filter</button>
-        {(empId || name || dept || designation || status) && <button onClick={clearFilters}>Clear</button>}
+        <button className="primary" onClick={() => load()}>Filter</button>
+        <button onClick={clearFilters}>Clear</button>
       </div>
       {error && <div className="banner error">{error}</div>}
       {!data && !error && <div className="empty">Loading...</div>}
-      {data && data.rows.length === 0 && <div className="empty">No punches recorded for {data.date}.</div>}
+      {data && data.rows.length === 0 && <div className="empty">No punches recorded for {rangeLabel}.</div>}
       {data && data.rows.length > 0 && (
+        <div className="table-scroll">
         <table>
-          <thead><tr><th>Employee</th><th>Department</th><th>Role</th><th>Date</th><th>Method</th><th>Status</th><th>Punch Count</th><th>Time Interval</th></tr></thead>
+          <thead>
+            <tr>
+              <th>Employee</th><th>Department</th><th>Role</th><th>Date</th><th>Method</th><th>Status</th>
+              <th>Check-In Times</th><th>Check-Out Times</th>
+              <th>First In</th><th>Last Out</th><th>Worked Span</th><th>Punches</th>
+            </tr>
+          </thead>
           <tbody>{data.rows.map((r) => (
-            <tr key={r.employee_id}>
+            <tr key={`${r.employee_id}-${r.date}`}>
               <td>{r.employee_code} - {r.name}</td>
               <td>{r.department}</td>
               <td>{r.designation || '—'}</td>
               <td>{r.date}</td>
               <td>{r.method}</td>
               <td><span className={'status-tag ' + (r.status === 'Checked Out' ? 'present' : 'pending')}>{r.status}</span></td>
+              <td style={{ fontFamily: 'monospace', textAlign: 'left' }}>
+                {r.check_ins.length ? r.check_ins.join(', ') : '—'}
+                {r.check_ins.length > 0 && <div className="feature-meta">{r.check_in_count} check-in{r.check_in_count === 1 ? '' : 's'}</div>}
+                {r.unclassified.length > 0 && <div className="feature-meta" style={{ color: '#B3401E' }}>Unclassified: {r.unclassified.join(', ')}</div>}
+              </td>
+              <td style={{ fontFamily: 'monospace', textAlign: 'left' }}>
+                {r.check_outs.length ? r.check_outs.join(', ') : '—'}
+                {r.check_outs.length > 0 && <div className="feature-meta">{r.check_out_count} check-out{r.check_out_count === 1 ? '' : 's'}</div>}
+              </td>
+              <td style={{ fontFamily: 'monospace' }}>{r.first_check_in || '—'}</td>
+              <td style={{ fontFamily: 'monospace' }}>{r.last_check_out || '—'}</td>
+              <td style={{ fontFamily: 'monospace' }}>{r.worked_span || '—'}</td>
               <td>{r.punch_count}</td>
-              <td style={{ fontFamily: 'monospace' }}>{r.time_interval}</td>
             </tr>
           ))}</tbody>
         </table>
+        </div>
       )}
     </div>
   );

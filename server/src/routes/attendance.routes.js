@@ -662,37 +662,91 @@ router.get('/export.xlsx', async (req, res) => {
 // day's plain check-in/check-out times from attendance — otherwise a manually checked-in
 // employee would never show up here at all. Only employees with at least one punch/check-in on
 // the given date are included — an all-zero grid of everyone else isn't useful here.
+// Punch log over a date RANGE (?from=&to=), or a single day (?date=, still accepted) — one row
+// per employee per day that actually had activity.
+//
+// Check-ins and check-outs are reported as two separate lists rather than one merged blob,
+// bucketed by the device's own punch_type. That type is trustworthy on real hardware and, just as
+// importantly, cannot be reconstructed by alternating in/out: genuine device data contains long
+// runs of the same type (e.g. eight consecutive check-ins), so a first-is-in/second-is-out guess
+// would mislabel most of a real day.
 function punchLogRows(req) {
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : today();
+  const single = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : null;
+  let from = /^\d{4}-\d{2}-\d{2}$/.test(req.query.from || '') ? req.query.from : null;
+  let to = /^\d{4}-\d{2}-\d{2}$/.test(req.query.to || '') ? req.query.to : null;
+  if (!from || !to) { from = single || today(); to = single || today(); }
+  if (from > to) { const swap = from; from = to; to = swap; }
+
   const employees = applyEmployeeFilters(filterToScopeOrOwnDepartment(
     db.prepare('SELECT id, employee_code, name, department, designation, team_id FROM employees ORDER BY id').all(),
     req.user.role, myEmployee(req.user.sub)?.id
   ), req.query);
-  let rows = employees.map((e) => {
-    const punches = db.prepare('SELECT punch_time FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time ASC').all(e.id, date + '%');
-    let times = punches.map((p) => p.punch_time.slice(11, 19));
-    const att = db.prepare('SELECT check_in_time, check_out_time, method FROM attendance WHERE employee_id = ? AND date = ?').get(e.id, date);
-    if (times.length === 0) {
-      if (att?.check_in_time) times.push(att.check_in_time.length === 5 ? `${att.check_in_time}:00` : att.check_in_time);
-      if (att?.check_out_time) times.push(att.check_out_time.length === 5 ? `${att.check_out_time}:00` : att.check_out_time);
-    }
-    if (times.length === 0) return null;
-    // The authoritative in/out status always comes from the attendance row (set the same way
-    // regardless of source), not from guessing at raw punch types — so it stays correct even for
-    // a biometric day with an odd number of punches (e.g. a missed final check-out punch).
-    const status = att?.check_out_time ? 'Checked Out' : 'Checked In';
-    // Method follows the same source-of-truth rule as the times themselves: raw device punches
-    // present means Biometric, regardless of what the (possibly stale) attendance.method column
-    // says; otherwise it's whatever the manual check-in actually recorded.
-    const method = punches.length > 0 ? 'Biometric (Fingerprint)' : (att?.method || 'Web Check-in');
-    return {
-      employee_id: e.id, employee_code: e.employee_code, name: e.name, department: e.department, designation: e.designation,
-      date, status, method, punch_count: times.length, time_interval: times.join('|')
+
+  const hms = (t) => (t && t.length === 5 ? `${t}:00` : t);
+
+  let rows = [];
+  employees.forEach((e) => {
+    const punches = db.prepare(
+      'SELECT punch_time, punch_type FROM biometric_punches WHERE employee_id = ? AND date(punch_time) BETWEEN ? AND ? ORDER BY punch_time ASC'
+    ).all(e.id, from, to);
+    const attRows = db.prepare(
+      'SELECT date, check_in_time, check_out_time, method FROM attendance WHERE employee_id = ? AND date BETWEEN ? AND ?'
+    ).all(e.id, from, to);
+
+    const byDate = new Map();
+    const bucket = (d) => {
+      if (!byDate.has(d)) byDate.set(d, { checkIns: [], checkOuts: [], unclassified: [], devicePunches: 0 });
+      return byDate.get(d);
     };
-  }).filter(Boolean);
+    punches.forEach((p) => {
+      const b = bucket(p.punch_time.slice(0, 10));
+      const time = p.punch_time.slice(11, 19);
+      b.devicePunches++;
+      if (p.punch_type === 'check-in') b.checkIns.push(time);
+      else if (p.punch_type === 'check-out') b.checkOuts.push(time);
+      else b.unclassified.push(time); // a status code we don't map — surfaced, never silently relabelled
+    });
+    // A manual web/mobile day has no raw punches; its single in/out pair is that day's whole log.
+    const methodByDate = {};
+    attRows.forEach((a) => {
+      methodByDate[a.date] = a.method;
+      const b = bucket(a.date);
+      if (b.devicePunches === 0) {
+        if (a.check_in_time) b.checkIns.push(hms(a.check_in_time));
+        if (a.check_out_time) b.checkOuts.push(hms(a.check_out_time));
+      }
+    });
+
+    [...byDate.entries()].forEach(([date, b]) => {
+      const total = b.checkIns.length + b.checkOuts.length + b.unclassified.length;
+      if (total === 0) return;
+      const firstIn = b.checkIns[0] || null;
+      const lastOut = b.checkOuts.length ? b.checkOuts[b.checkOuts.length - 1] : null;
+      const spanSeconds = firstIn && lastOut ? Math.max(0, hmsToSeconds(lastOut) - hmsToSeconds(firstIn)) : null;
+      rows.push({
+        employee_id: e.id, employee_code: e.employee_code, name: e.name,
+        department: e.department, designation: e.designation,
+        date,
+        method: b.devicePunches > 0 ? 'Biometric (Fingerprint)' : (methodByDate[date] || 'Web Check-in'),
+        // "Checked Out" only once a real check-out exists for that day; otherwise still in.
+        status: lastOut ? 'Checked Out' : 'Checked In',
+        punch_count: total,
+        check_in_count: b.checkIns.length,
+        check_out_count: b.checkOuts.length,
+        check_ins: b.checkIns,
+        check_outs: b.checkOuts,
+        unclassified: b.unclassified,
+        first_check_in: firstIn,
+        last_check_out: lastOut,
+        worked_span: spanSeconds != null ? secondsToHms(spanSeconds) : null
+      });
+    });
+  });
+
+  rows.sort((a, b) => (a.date === b.date ? a.employee_id - b.employee_id : a.date.localeCompare(b.date)));
   if (req.query.status === 'checked_in') rows = rows.filter((r) => r.status === 'Checked In');
   if (req.query.status === 'checked_out') rows = rows.filter((r) => r.status === 'Checked Out');
-  return { date, rows };
+  return { from, to, date: from === to ? from : null, rows };
 }
 
 router.get('/punch-log', (req, res) => {
@@ -700,25 +754,36 @@ router.get('/punch-log', (req, res) => {
   res.json(punchLogRows(req));
 });
 
+// Exports mirror the on-screen columns exactly, with check-in and check-out times in their own
+// separate columns (semicolon-separated within a cell, so a spreadsheet keeps them in one field).
+const PUNCH_LOG_HEADERS = ['code', 'name', 'department', 'designation', 'date', 'method', 'status',
+  'punch_count', 'check_in_count', 'check_out_count', 'check_in_times', 'check_out_times',
+  'first_check_in', 'last_check_out', 'worked_span'];
+const punchLogCells = (r) => [
+  r.employee_code, r.name, r.department, r.designation || '', r.date, r.method, r.status,
+  r.punch_count, r.check_in_count, r.check_out_count,
+  r.check_ins.join('; '), r.check_outs.join('; '),
+  r.first_check_in || '', r.last_check_out || '', r.worked_span || ''
+];
+const punchLogFilename = (from, to) => (from === to ? from : `${from}_to_${to}`);
+
 router.get('/punch-log/export', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { date, rows } = punchLogRows(req);
+  const { from, to, rows } = punchLogRows(req);
   const csv = [
-    'code,name,department,designation,date,method,status,punch_count,time_interval',
-    ...rows.map((r) => `${r.employee_code},${r.name},${r.department},${r.designation || ''},${r.date},${r.method},${r.status},${r.punch_count},${r.time_interval}`)
+    PUNCH_LOG_HEADERS.join(','),
+    ...rows.map((r) => punchLogCells(r).map((c) => (String(c).includes(',') || String(c).includes(';') ? `"${c}"` : c)).join(','))
   ].join('\n');
   res.setHeader('Content-Type', 'text/csv');
-  res.setHeader('Content-Disposition', `attachment; filename="attendance-punch-log-${date}.csv"`);
+  res.setHeader('Content-Disposition', `attachment; filename="attendance-punch-log-${punchLogFilename(from, to)}.csv"`);
   res.send(csv);
 });
 
 router.get('/punch-log/export.xlsx', async (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { date, rows } = punchLogRows(req);
-  await sendXlsx(res, 'Punch Log',
-    ['code', 'name', 'department', 'designation', 'date', 'method', 'status', 'punch_count', 'time_interval'],
-    rows.map((r) => [r.employee_code, r.name, r.department, r.designation || '', r.date, r.method, r.status, r.punch_count, r.time_interval]),
-    `attendance-punch-log-${date}.xlsx`);
+  const { from, to, rows } = punchLogRows(req);
+  await sendXlsx(res, 'Punch Log', PUNCH_LOG_HEADERS, rows.map(punchLogCells),
+    `attendance-punch-log-${punchLogFilename(from, to)}.xlsx`);
 });
 
 // Employee raises a regularization request (routed through the shared approvals queue).
