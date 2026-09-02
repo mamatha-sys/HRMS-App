@@ -14,8 +14,25 @@ const WRITE_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager'];
 // own "My Profile" card above the (company-wide, unscoped) employee list, rather than only the
 // admin table. Super Admin is a pure system-administrator account with no such expectation.
 const SELF_SERVICE_ROLES = ['manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
-const STAGE_LABEL = { draft: 'Draft', assigned: 'Assigned', submitted: 'Submitted', locked: 'Locked' };
-const STAGE_CLASS = { draft: 'pending', assigned: 'info', submitted: 'present', locked: 'locked' };
+// Human labels for the fields an employee can change on their own profile, so the reviewer's
+// change list reads like the form they filled in rather than raw column names.
+const FIELD_LABELS = {
+  name: 'Full name', phone: 'Phone', photo: 'Employee photo', date_of_birth: 'Date of birth',
+  blood_group: 'Blood Group', email: 'Email',
+  emergency_contact_name: 'Emergency contact name', emergency_contact_relation: 'Emergency contact relation',
+  emergency_contact_number: 'Emergency contact number',
+  address_type: 'Address type', address_line1: 'Address line 1', address_line2: 'Address line 2',
+  address_building_no: 'Building no', address_door_no: 'Door no', address_floor_no: 'Floor no',
+  address_landmark: 'Landmark', address_city: 'City', address_district: 'District',
+  address_state: 'State', address_country: 'Country', address_pincode: 'Pincode',
+  bank_name: 'Bank name', bank_account_number: 'Bank account number', ifsc_code: 'IFSC code',
+  aadhaar_number: 'Aadhaar number', pan_number: 'PAN number', uan_number: 'UAN number',
+  pf_number: 'PF number', esi_number: 'ESI number',
+  employment_type: 'Employment type', education: 'Education', experience: 'Experience',
+  skills: 'Skills', documents: 'Documents'
+};
+const STAGE_LABEL = { draft: 'Draft', assigned: 'Assigned', submitted: 'Pending Review', locked: 'Locked' };
+const STAGE_CLASS = { draft: 'pending', assigned: 'info', submitted: 'pending', locked: 'locked' };
 
 const EMPTY_FORM = {
   employee_code: '', name: '', email: '', email_verified: false, password: '', phone: '', phone_verified: false, photo: '', date_of_birth: '',
@@ -465,7 +482,7 @@ export default function Employees() {
   const canExport = user?.role === 'super_admin' || user?.role === 'manager';
   const canEditEmployee = user?.role === 'super_admin' || user?.role === 'hr_admin';
   const canTransferEmployee = canEditEmployee;
-
+  const [profileApprovals, setProfileApprovals] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [branches, setBranches] = useState([]);
@@ -530,8 +547,31 @@ export default function Employees() {
     setLoading(true);
     api.get('/employees').then((res) => setEmployees(res.data.employees))
       .catch(() => setError('Could not load employees.')).finally(() => setLoading(false));
+    loadPendingReview();
   }
   useEffect(load, []);
+
+  // Profile submissions awaiting review. The approvals queue is what carries them up the
+  // hierarchy (Accountant → TL → Assistant Manager → Super Admin), so the reviewer's Approve /
+  // Send back actions go through that chain rather than the HR-only direct route — that's what
+  // lets a TL or STL act on their own people's submissions at all.
+  function loadPendingReview() {
+    api.get('/approvals').then((r) => setProfileApprovals(r.data.approvals.filter((a) => a.type === 'Profile Update' && a.status === 'Pending'))).catch(() => {});
+  }
+  const approvalForEmployee = (emp) => profileApprovals.find((a) => a.requester === emp.name);
+
+  async function decideSubmission(emp, verb) {
+    setError(''); setInfo('');
+    const approval = approvalForEmployee(emp);
+    try {
+      // Route through the chain when a queue row exists; fall back to the direct HR route for
+      // any profile submitted before this queue existed.
+      if (approval) await api.post(`/approvals/${approval.id}/${verb}`);
+      else await api.post(`/employees/${emp.id}/${verb === 'approve' ? 'approve' : 'reject'}`);
+      setInfo(verb === 'approve' ? `${emp.name}'s details approved.` : `${emp.name}'s details sent back for edit.`);
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not record that decision.'); }
+  }
   useEffect(loadCustomFields, []);
 
   // Hired candidates arrive here from Recruitment's "Convert to Employee" button with a
@@ -932,7 +972,13 @@ export default function Employees() {
                   )}
                   {expandedId === emp.id && (
                     <tr><td colSpan={canHR ? 11 : 10} style={{ textAlign: 'left', background: '#F7F8FA' }}>
-                      <EmployeeDetail emp={emp} />
+                      <EmployeeDetail
+                        emp={emp}
+                        canDecide={canEditEmployee}
+                        pendingStageName={approvalForEmployee(emp)?.current_stage_name}
+                        onApprove={() => decideSubmission(emp, 'approve')}
+                        onSendBack={() => decideSubmission(emp, 'reject')}
+                      />
                     </td></tr>
                   )}
                 </Fragment>
@@ -1154,12 +1200,53 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, teams
 }
 
 // ---------- Detail (read-only expand) ----------
-function EmployeeDetail({ emp }) {
+// `canDecide` is deliberately narrower than "who can open this profile": every higher role
+// (Manager, Assistant Manager, STL, TL) can read a submitted record here, but only Super Admin
+// and HR Admin get the Approve / Send back buttons — reviewing is not the same permission as
+// changing someone's profile.
+function EmployeeDetail({ emp, canDecide, onApprove, onSendBack, pendingStageName }) {
   const addr = [
     emp.address_line1, emp.address_line2, emp.address_city, emp.address_district, emp.address_state, emp.address_country, emp.address_pincode
   ].filter(Boolean).join(', ');
   return (
     <div style={{ padding: '10px 6px' }}>
+      {emp.stage === 'submitted' && (
+        <div className="banner" style={{ background: '#FFF6E5', border: '1px solid #E3B341', marginBottom: 12 }}>
+          <div className="row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <span>
+              <strong>Pending Review</strong> — this employee submitted these details for review.
+              {pendingStageName && <span className="feature-meta"> Currently waiting on {pendingStageName}.</span>}
+            </span>
+            <div style={{ flex: 1 }} />
+            {canDecide ? (
+              <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                <button className="btn-approve" onClick={onApprove}>Approve</button>
+                <button className="btn-reject" onClick={onSendBack} title="Send the profile back to the employee to correct and re-submit">Send back for Edit</button>
+              </span>
+            ) : (
+              <span className="feature-meta">View only — Super Admin or HR Admin decides this.</span>
+            )}
+          </div>
+
+          {/* The point of the review: exactly which fields this employee changed, and from what. */}
+          {emp.pending_changes?.length > 0 ? (
+            <div style={{ marginTop: 10, background: '#fff', border: '1px solid #EEDCA8', borderRadius: 8, overflowX: 'auto' }}>
+              <table style={{ marginTop: 0 }}>
+                <thead><tr><th style={{ textAlign: 'left' }}>Field changed</th><th style={{ textAlign: 'left' }}>Previous value</th><th style={{ textAlign: 'left' }}>Submitted value</th></tr></thead>
+                <tbody>{emp.pending_changes.map((c) => (
+                  <tr key={c.field}>
+                    <td style={{ textAlign: 'left', fontWeight: 600 }}>{FIELD_LABELS[c.field] || c.field.replace(/_/g, ' ')}</td>
+                    <td style={{ textAlign: 'left', color: '#8A93A6', textDecoration: c.old_value ? 'line-through' : 'none' }}>{c.old_value || '(blank)'}</td>
+                    <td style={{ textAlign: 'left', fontWeight: 600 }}>{c.new_value || '(cleared)'}</td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="feature-meta" style={{ marginTop: 8 }}>No field-level changes were recorded for this submission — review the full record below.</div>
+          )}
+        </div>
+      )}
       {emp.photo && <img src={emp.photo} alt={emp.name} style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: '1px solid #E2E5EA', marginBottom: 10 }} />}
       <div className="grid2">
         <div>Employee ID: <strong>{emp.employee_code}</strong></div>

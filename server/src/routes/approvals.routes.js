@@ -2,7 +2,7 @@ import { Router } from 'express';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { evaluateDecision, approvalChainLabel } from '../utils/chain.js';
-import { isScopedRole, getSupervisorScope, isEmployeeInScope, filterToScope } from '../utils/scope.js';
+import { isScopedRole, filterToScopeOrOwnDepartment, isEmployeeInScopeOrOwnDepartment } from '../utils/scope.js';
 import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
@@ -39,7 +39,11 @@ router.get('/', (req, res) => {
       edit_request_count: r.type === 'Profile Edit' ? editRequestCountFor(r.requester) : undefined
     };
   });
-  const scoped = filterToScope(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+  // Own-department fallback (not the strict filterToScope): an STL/TL who has no explicit
+  // supervisor_scopes row still sees their own department's requests, matching how Leave,
+  // Attendance and the Dashboard already scope. Without this, a newly-appointed TL sees an empty
+  // approvals queue and a submitted profile silently reaches nobody below HR.
+  const scoped = filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ approvals: withStage(scoped), chainLabel: approvalChainLabel() });
 });
 
@@ -52,11 +56,9 @@ function decide(finalStatus) {
     if (!approval) return res.status(404).json({ error: 'Approval not found' });
     if (approval.status !== 'Pending') return res.status(400).json({ error: 'This request has already been decided' });
 
-    if (isScopedRole(req.user.role)) {
-      const scope = getSupervisorScope(myEmployee(req.user.sub)?.id);
-      if (!isEmployeeInScope(scope, employeeByName(approval.requester))) {
-        return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
-      }
+    if (isScopedRole(req.user.role)
+      && !isEmployeeInScopeOrOwnDepartment(req.user.role, myEmployee(req.user.sub)?.id, employeeByName(approval.requester))) {
+      return res.status(403).json({ error: 'This employee is outside your assigned department/team.' });
     }
 
     const result = evaluateDecision(req.user.role, approval.current_stage_role_id, finalStatus === 'Rejected');
@@ -83,6 +85,21 @@ function decide(finalStatus) {
           if (finalStatus === 'Approved') db.prepare("UPDATE employees SET stage = 'assigned' WHERE id = ?").run(requesterEmp.id);
           notifyEmployee(requesterEmp.id, `Profile edit request ${finalStatus}`,
             `Your profile edit request ("${approval.detail}") was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
+        }
+      }
+      // A submitted profile decided from here must move the employee's own stage exactly as
+      // Employee Management's Approve/Reject buttons do — approved locks the record, rejected
+      // sends it back to the employee to correct and re-submit.
+      if (approval.type === 'Profile Update') {
+        const requesterEmp = employeeByName(approval.requester);
+        if (requesterEmp) {
+          db.prepare('UPDATE employees SET stage = ?, edit_requested = 0 WHERE id = ?')
+            .run(finalStatus === 'Approved' ? 'locked' : 'assigned', requesterEmp.id);
+          // The field-level change list has now been reviewed either way — close it so the next
+          // round of edits starts from a clean slate.
+          db.prepare("UPDATE employee_profile_changes SET reviewed_at = datetime('now') WHERE employee_id = ? AND reviewed_at IS NULL").run(requesterEmp.id);
+          notifyEmployee(requesterEmp.id, `Profile update ${finalStatus}`,
+            `Your submitted profile details were ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`);
         }
       }
     } else {

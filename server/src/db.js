@@ -1680,6 +1680,7 @@ function migrate() {
   migratePayrollFormula();
   migrateBiometricIntegration();
   migrateEmployeeCheckinMethods();
+  migrateEmployeeProfileChanges();
   migrateSyncEmployeeRoles();
 }
 
@@ -1831,6 +1832,24 @@ function migrateEmployeeCheckinMethods() {
       employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
       method TEXT NOT NULL,
       PRIMARY KEY (employee_id, method)
+    );
+  `);
+}
+
+// Field-level record of what an employee changed on their own profile, so whoever reviews the
+// submission can see exactly WHICH values moved and from what — the full current record alone
+// doesn't tell a reviewer what to check. A row stays "pending" (reviewed_at IS NULL) until the
+// submission is approved or sent back.
+function migrateEmployeeProfileChanges() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS employee_profile_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      field TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+      reviewed_at TEXT
     );
   `);
 }

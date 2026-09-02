@@ -127,6 +127,49 @@ function syncUserRoleToDesignation(userId, designation) {
   if (roleKey) db.prepare('UPDATE users SET role = ? WHERE id = ?').run(roleKey, userId);
 }
 
+// Photo/document values are multi-MB base64 data URLs — storing them as before/after text would
+// bloat the DB and tell a reviewer nothing useful, so those record a marker instead of content.
+const BLOB_FIELDS = ['photo', 'documents'];
+const changeDisplay = (field, value) => {
+  if (value == null || value === '') return '';
+  if (BLOB_FIELDS.includes(field)) return field === 'photo' ? '(photo)' : '(documents)';
+  return String(value).length > 200 ? `${String(value).slice(0, 200)}…` : String(value);
+};
+
+// Diff an employee's self-edit and keep one pending row per changed field. Re-editing the same
+// field before submitting updates that row's new value while preserving the ORIGINAL old value,
+// so the reviewer always sees "what it was before this round of edits → what it is now".
+function recordProfileChanges(before, after, allowedFields) {
+  const findPending = db.prepare('SELECT id FROM employee_profile_changes WHERE employee_id = ? AND field = ? AND reviewed_at IS NULL');
+  const insert = db.prepare('INSERT INTO employee_profile_changes (employee_id, field, old_value, new_value) VALUES (?, ?, ?, ?)');
+  const update = db.prepare('UPDATE employee_profile_changes SET new_value = ?, changed_at = datetime(\'now\') WHERE id = ?');
+  const clear = db.prepare('DELETE FROM employee_profile_changes WHERE id = ?');
+
+  allowedFields.forEach((f) => {
+    const oldV = before[f] ?? '';
+    const newV = after[f] ?? '';
+    if (String(oldV) === String(newV)) return;
+    const existing = findPending.get(before.id, f);
+    if (existing) {
+      // Edited back to the original value — there's nothing left to review for this field.
+      const original = db.prepare('SELECT old_value FROM employee_profile_changes WHERE id = ?').get(existing.id).old_value || '';
+      if (original === changeDisplay(f, newV)) clear.run(existing.id);
+      else update.run(changeDisplay(f, newV), existing.id);
+    } else {
+      insert.run(before.id, f, changeDisplay(f, oldV), changeDisplay(f, newV));
+    }
+  });
+}
+
+// Still-unreviewed field changes for one employee, newest first.
+function pendingProfileChanges(employeeId) {
+  return db.prepare('SELECT field, old_value, new_value, changed_at FROM employee_profile_changes WHERE employee_id = ? AND reviewed_at IS NULL ORDER BY id').all(employeeId);
+}
+
+function closeProfileChanges(employeeId) {
+  db.prepare("UPDATE employee_profile_changes SET reviewed_at = datetime('now') WHERE employee_id = ? AND reviewed_at IS NULL").run(employeeId);
+}
+
 function serializeField(field, value) {
   if (field === 'team_id') return value === '' || value == null ? null : Number(value);
   // email is UNIQUE — an empty string (unlike NULL) collides with every other blank email, so
@@ -207,6 +250,9 @@ function hydrate(emp) {
     // Derived, not the raw column — a Pending row in the chain is the actual source of truth now.
     edit_requested: editRequests.some((r) => r.status === 'Pending'),
     edit_chain_label: approvalChainLabel(),
+    // What this employee changed on their own profile and hasn't been reviewed yet — drives the
+    // "what did they actually update?" list a reviewer sees on a Pending Review profile.
+    pending_changes: pendingProfileChanges(emp.id),
     transfers: transfersFor(emp.id)
   };
 }
@@ -816,6 +862,11 @@ router.put('/:id', (req, res) => {
   db.prepare(`UPDATE employees SET ${setCols.map((f) => `${f} = @${f}`).join(', ')} WHERE id = @id`).run(updated);
   saveCustomFieldValues(emp.id, req.body?.custom_fields);
 
+  // Record what the employee changed on their OWN profile, field by field, so the reviewer can
+  // see the actual edits instead of having to eyeball the whole record. HR/Super Admin edits
+  // aren't tracked here — those are already authoritative and don't go through review.
+  if (!hr) recordProfileChanges(emp, updated, allowed);
+
   // Keep the linked login's actual RBAC role in lockstep with the edited Role/Designation —
   // allowed.includes('designation') is only true for the HR edit tier (HR_EDITABLE_FIELDS), never
   // an employee's own self-edit, so this can't be used to self-promote.
@@ -915,22 +966,51 @@ router.post('/:id/email/verify-otp', (req, res) => {
 });
 
 // Stage 3 submit — employee (or HR on their behalf) sends the filled profile for review.
+// The edited values are already persisted by PUT /:id; this marks them Pending Review AND raises
+// a row in the shared approvals queue, so the submission actually surfaces to the people who have
+// to act on it (Super Admin's panel, plus HR/Manager/Assistant Manager/STL/TL within their scope)
+// instead of only showing as a stage badge inside Employee Management. Same queue and chain
+// mechanics as Profile Edit and Regularization.
 router.post('/:id/submit', (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   const own = emp.user_id === req.user.sub;
   if (!isHR(req.user.role) && !own) return res.status(403).json({ error: 'Insufficient permissions' });
   if (emp.stage !== 'assigned') return res.status(400).json({ error: 'Only an assigned profile can be submitted.' });
-  db.prepare("UPDATE employees SET stage = 'submitted' WHERE id = ?").run(req.params.id);
+
+  const submit = db.transaction(() => {
+    db.prepare("UPDATE employees SET stage = 'submitted' WHERE id = ?").run(req.params.id);
+    // One open request per employee — re-submitting after a rejection reuses the queue rather
+    // than stacking duplicates for approvers to wade through.
+    const alreadyOpen = db.prepare("SELECT 1 FROM approvals WHERE type = 'Profile Update' AND requester = ? AND status = 'Pending'").get(emp.name);
+    if (!alreadyOpen) {
+      const stage = bottomRole();
+      db.prepare('INSERT INTO approvals (type, requester, detail, current_stage_role_id) VALUES (?, ?, ?, ?)')
+        .run('Profile Update', emp.name, `${emp.employee_code} — profile details submitted for review`, stage ? stage.id : null);
+    }
+  });
+  submit();
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
 // Stage 4 — HR approves (locks) or rejects (back to the employee).
+// Deciding here (straight from Employee Management) and deciding the same submission from the
+// Approvals queue must not drift apart — whichever one is used, close out the other's row too.
+function closeProfileUpdateApproval(employeeName, finalStatus, userId) {
+  db.prepare("UPDATE approvals SET status = ?, decided_by = ?, current_stage_role_id = NULL WHERE type = 'Profile Update' AND requester = ? AND status = 'Pending'")
+    .run(finalStatus, userId || null, employeeName);
+}
+
 router.post('/:id/approve', requireHR, (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   if (emp.stage !== 'submitted') return res.status(400).json({ error: 'Only a submitted profile can be approved.' });
-  db.prepare("UPDATE employees SET stage = 'locked', edit_requested = 0 WHERE id = ?").run(req.params.id);
+  const approve = db.transaction(() => {
+    db.prepare("UPDATE employees SET stage = 'locked', edit_requested = 0 WHERE id = ?").run(req.params.id);
+    closeProfileUpdateApproval(emp.name, 'Approved', req.user.sub);
+    closeProfileChanges(emp.id);
+  });
+  approve();
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
@@ -938,7 +1018,12 @@ router.post('/:id/reject', requireHR, (req, res) => {
   const emp = getEmp(req.params.id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
   if (emp.stage !== 'submitted') return res.status(400).json({ error: 'Only a submitted profile can be rejected.' });
-  db.prepare("UPDATE employees SET stage = 'assigned' WHERE id = ?").run(req.params.id);
+  const reject = db.transaction(() => {
+    db.prepare("UPDATE employees SET stage = 'assigned' WHERE id = ?").run(req.params.id);
+    closeProfileUpdateApproval(emp.name, 'Rejected', req.user.sub);
+    closeProfileChanges(emp.id);
+  });
+  reject();
   res.json({ employee: present(getEmp(req.params.id), req.user) });
 });
 
