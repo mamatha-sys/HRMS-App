@@ -192,6 +192,15 @@ th:first-child, td:first-child { text-align: left; }
 td { padding: 8px 4px; font-size: 13px; border-top: 1px solid #EEF0F3; text-align: center; }
 td:first-child { font-weight: 600; }
 
+/* A wide table (many columns, or a long Actions cell) otherwise bursts out of its .card and
+   makes .main the horizontal scroller — dragging the whole page, heading and filters included,
+   sideways. Wrapping the table in this makes the TABLE the only thing that scrolls, so the page
+   itself never overflows while every column stays reachable. Same idea as .matrix-wrap below.
+   width:max-content keeps the table at its natural, uncramped column widths; min-width:100%
+   still makes it fill the card when it happens to be narrower than the space available. */
+.table-scroll { overflow-x: auto; }
+.table-scroll > table { width: max-content; min-width: 100%; }
+
 .kpi-row { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
 .kpi-card { flex: 1; min-width: 160px; background: #fff; border: 1px solid #E2E5EA; border-left: 4px solid #2E5CB8; border-radius: 8px; padding: 12px 14px; }
 .kpi-card.green { border-left-color: #1E8E5A; }

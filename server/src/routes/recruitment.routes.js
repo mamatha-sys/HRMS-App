@@ -6,6 +6,7 @@ import { isScopedRole, getSupervisorScope, filterToScope, scopeDepartmentNames }
 import { autoCompleteOnboardingTask, recomputeOnboardingPct } from '../utils/onboarding.js';
 import { recomputeOffboardingClearance } from '../utils/offboarding.js';
 import { sendEmail, sendWhatsapp } from '../utils/channels.js';
+import { appLink } from '../utils/appUrl.js';
 import { generateInterviewQuestions, generateOfferLetter } from '../utils/aiAssist.js';
 import { extractResumeText, screenResume } from '../utils/resumeScreen.js';
 import { getSetting, getSettings } from '../utils/integrationSettings.js';
@@ -292,7 +293,7 @@ async function createInterviewInvite(candidate, customQuestions) {
     .run(candidate.id, token, JSON.stringify(questions));
 
   if (!candidate.email) return;
-  const link = `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${token}`;
+  const link = appLink(`/interview/${token}`);
   try {
     await sendEmail(
       candidate.email,
@@ -382,7 +383,7 @@ router.get('/candidates/:id/interview', (req, res) => {
       summary: interview.summary,
       createdAt: interview.created_at,
       completedAt: interview.completed_at,
-      link: `${process.env.CLIENT_URL || 'http://localhost:5173'}/interview/${interview.token}`,
+      link: appLink(`/interview/${interview.token}`),
       answers
     }
   });

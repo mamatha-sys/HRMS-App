@@ -5,6 +5,7 @@ import db from '../db.js';
 import { requireAuth, requireAuthOrFileToken } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { sendSms, sendEmail } from '../utils/channels.js';
+import { appLink } from '../utils/appUrl.js';
 import { filterToScopeOrOwnDepartment } from '../utils/scope.js';
 import { autoCompleteOnboardingTask } from '../utils/onboarding.js';
 import { autoCompleteOffboardingTask } from '../utils/offboarding.js';
@@ -554,7 +555,7 @@ router.post('/', requireHR, (req, res) => {
   // email isn't configured or the send fails (same fire-and-forget shape as the AI interview
   // invite in recruitment.routes.js). Includes the login the HR admin just set so the new hire can
   // sign in immediately — a normal "here are your account details" onboarding email.
-  const loginUrl = `${process.env.CLIENT_URL || 'http://localhost:5173'}/login`;
+  const loginUrl = appLink('/login');
   sendEmail(
     email,
     'Welcome — your HRMS account is ready',

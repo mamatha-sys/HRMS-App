@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { sendEmail } from '../utils/channels.js';
+import { appLink } from '../utils/appUrl.js';
 
 const router = Router();
 
@@ -70,7 +71,7 @@ router.post('/forgot-password', async (req, res) => {
     const token = crypto.randomBytes(32).toString('hex');
     const expires = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     db.prepare('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?').run(token, expires, user.id);
-    const resetLink = `${process.env.CLIENT_URL || 'http://localhost:5173'}/reset-password?token=${token}`;
+    const resetLink = appLink(`/reset-password?token=${token}`);
     try {
       await sendEmail(user.email, 'Reset your password',
         `Hi ${user.name},\n\nUse this link to reset your password (valid for 30 minutes):\n${resetLink}\n\nIf you didn't request this, you can ignore this email.`);

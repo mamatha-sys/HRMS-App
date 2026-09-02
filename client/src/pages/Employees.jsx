@@ -619,6 +619,20 @@ export default function Employees() {
     } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
   }
 
+  // Permanent delete — Super Admin only, and irreversible: the employee row is removed and their
+  // login is deactivated in the same transaction (see DELETE /employees/:id). Deliberately a
+  // two-step confirm, since Pause/exit is the recoverable action and this one is not.
+  async function deleteEmployee(emp) {
+    if (!window.confirm(`Permanently delete ${emp.name} (${emp.employee_code})?\n\nThis cannot be undone. Their attendance, leave and payroll records go with them.\n\nTo keep the records and only revoke access, use Pause instead.`)) return;
+    if (!window.confirm(`Last check — really delete ${emp.name}?`)) return;
+    setError(''); setInfo('');
+    try {
+      await api.delete(`/employees/${emp.id}`);
+      setInfo(`${emp.name} was permanently deleted.`);
+      load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not delete this employee.'); }
+  }
+
   // Full Excel workbook — every field, plus a clickable "View Photo" link and one link per
   // document (opens/downloads it) instead of embedding the raw file data.
   async function downloadFull() {
@@ -821,6 +835,7 @@ export default function Employees() {
         {!loading && employees.length === 0 && <div className="empty">No employee records yet.</div>}
         {!loading && employees.length > 0 && filteredEmployees.length === 0 && <div className="empty">No employees match your filters.</div>}
         {!loading && filteredEmployees.length > 0 && (
+          <div className="table-scroll">
           <table>
             <thead>
               <tr>
@@ -875,6 +890,7 @@ export default function Employees() {
                       )}
                       {canTransferEmployee && <button style={{ marginLeft: 6 }} onClick={() => (transferFor === emp.id ? setTransferFor(null) : startTransfer(emp))}>{transferFor === emp.id ? 'Cancel' : 'Transfer'}</button>}
                       {canExport && <button style={{ marginLeft: 6 }} onClick={() => downloadOneFull(emp)} title="Excel — every field, plus photo/document links">Export (Full)</button>}
+                      {isSuperAdmin && <button className="btn-reject" style={{ marginLeft: 6 }} onClick={() => deleteEmployee(emp)} title="Permanently delete this employee record — cannot be undone">Delete</button>}
                     </td>
                   </tr>
                   {transferFor === emp.id && (
@@ -923,6 +939,7 @@ export default function Employees() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
     </div>
