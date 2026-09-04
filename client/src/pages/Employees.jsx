@@ -1199,6 +1199,27 @@ function FullEmployeeFields({ form, setForm, field, departments, branches, teams
   );
 }
 
+// The field-by-field diff of a self-edited profile. Deliberately ONE component used by both the
+// reviewer's expanded row and the employee's own card, so the two can never drift into showing
+// different things — the employee sees exactly the list their approver is deciding on.
+function ProfileChangesTable({ changes, emptyNote }) {
+  if (!changes?.length) return emptyNote ? <div className="feature-meta" style={{ marginTop: 8 }}>{emptyNote}</div> : null;
+  return (
+    <div style={{ marginTop: 10, background: '#fff', border: '1px solid #EEDCA8', borderRadius: 8, overflowX: 'auto' }}>
+      <table style={{ marginTop: 0 }}>
+        <thead><tr><th style={{ textAlign: 'left' }}>Field changed</th><th style={{ textAlign: 'left' }}>Previous value</th><th style={{ textAlign: 'left' }}>Submitted value</th></tr></thead>
+        <tbody>{changes.map((c) => (
+          <tr key={c.field}>
+            <td style={{ textAlign: 'left', fontWeight: 600 }}>{FIELD_LABELS[c.field] || c.field.replace(/_/g, ' ')}</td>
+            <td style={{ textAlign: 'left', color: '#8A93A6', textDecoration: c.old_value ? 'line-through' : 'none' }}>{c.old_value || '(blank)'}</td>
+            <td style={{ textAlign: 'left', fontWeight: 600 }}>{c.new_value || '(cleared)'}</td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
 // ---------- Detail (read-only expand) ----------
 // `canDecide` is deliberately narrower than "who can open this profile": every higher role
 // (Manager, Assistant Manager, STL, TL) can read a submitted record here, but only Super Admin
@@ -1229,22 +1250,10 @@ function EmployeeDetail({ emp, canDecide, onApprove, onSendBack, pendingStageNam
           </div>
 
           {/* The point of the review: exactly which fields this employee changed, and from what. */}
-          {emp.pending_changes?.length > 0 ? (
-            <div style={{ marginTop: 10, background: '#fff', border: '1px solid #EEDCA8', borderRadius: 8, overflowX: 'auto' }}>
-              <table style={{ marginTop: 0 }}>
-                <thead><tr><th style={{ textAlign: 'left' }}>Field changed</th><th style={{ textAlign: 'left' }}>Previous value</th><th style={{ textAlign: 'left' }}>Submitted value</th></tr></thead>
-                <tbody>{emp.pending_changes.map((c) => (
-                  <tr key={c.field}>
-                    <td style={{ textAlign: 'left', fontWeight: 600 }}>{FIELD_LABELS[c.field] || c.field.replace(/_/g, ' ')}</td>
-                    <td style={{ textAlign: 'left', color: '#8A93A6', textDecoration: c.old_value ? 'line-through' : 'none' }}>{c.old_value || '(blank)'}</td>
-                    <td style={{ textAlign: 'left', fontWeight: 600 }}>{c.new_value || '(cleared)'}</td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="feature-meta" style={{ marginTop: 8 }}>No field-level changes were recorded for this submission — review the full record below.</div>
-          )}
+          <ProfileChangesTable
+            changes={emp.pending_changes}
+            emptyNote="No field-level changes were recorded for this submission — review the full record below."
+          />
         </div>
       )}
       {emp.photo && <img src={emp.photo} alt={emp.name} style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: '1px solid #E2E5EA', marginBottom: 10 }} />}
@@ -1439,6 +1448,21 @@ function EmployeeSelfCard({ emp, onSaved, setError, setInfo, customFields, field
         <span className={'status-tag ' + STAGE_CLASS[emp.stage]}>{STAGE_LABEL[emp.stage]}</span>
       </div>
       <div className="banner info">{banner}</div>
+
+      {/* The same diff the approver is looking at, shown to the employee on their own record —
+          the form fields below already hold the submitted values, but not what they were before,
+          so without this the employee is the only person in the flow who cannot see what was
+          actually changed. While still 'assigned' it doubles as a running list of unsaved-for-
+          review edits, so they can check it before hitting Submit. */}
+      {emp.pending_changes?.length > 0 && (
+        <div className="banner" style={{ background: '#FFF6E5', border: '1px solid #E3B341', marginBottom: 12 }}>
+          <strong>{emp.stage === 'submitted' ? 'What you submitted for review' : 'Changes you have made so far'}</strong>
+          {emp.stage === 'submitted'
+            ? <span className="feature-meta"> — this is exactly what your approver sees.</span>
+            : <span className="feature-meta"> — these go to your approver when you Submit.</span>}
+          <ProfileChangesTable changes={emp.pending_changes} />
+        </div>
+      )}
 
       <form onSubmit={save}>
         <div className="section-label" style={{ paddingLeft: 0 }}>Personal</div>
