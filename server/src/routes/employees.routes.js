@@ -271,6 +271,12 @@ function maskEmployee(emp, requester) {
   const hiddenFields = Object.keys(access).filter((f) => access[f] === 'hidden');
   const masked = { ...emp, sensitiveFieldsMasked: hiddenFields.length > 0 };
   hiddenFields.forEach((f) => { masked[f] = null; });
+  // pending_changes carries old/new values for the very fields being masked, so leaving it whole
+  // handed a viewer the exact value the column above was nulled out to hide. Drop the hidden
+  // fields' rows from the diff too, so "hidden" means hidden on both.
+  if (hiddenFields.length && Array.isArray(masked.pending_changes)) {
+    masked.pending_changes = masked.pending_changes.filter((c) => !hiddenFields.includes(c.field));
+  }
   return masked;
 }
 

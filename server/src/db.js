@@ -397,8 +397,11 @@ function seed() {
   insertBranch.run('Chennai', 'Tamil Nadu, India');
 
   const insertFieldPerm = db.prepare('INSERT INTO field_permissions (role, field_name, access) VALUES (?, ?, ?)');
+  // Visible (not hidden) to Manager: a Manager reviewing a submitted profile has to be able to
+  // check the bank/ID details the employee entered. Super Admin can still restrict any of these
+  // per role on the Manage permissions screen.
   const sensitiveFields = ['bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number'];
-  sensitiveFields.forEach((f) => insertFieldPerm.run('manager', f, 'hidden'));
+  sensitiveFields.forEach((f) => insertFieldPerm.run('manager', f, 'view'));
   sensitiveFields.forEach((f) => insertFieldPerm.run('employee', f, 'view'));
 
   // --- Roles catalog (matches the documented role model) ---
@@ -2160,6 +2163,7 @@ function migratePermissionCatalog() {
   });
 
   migrateManagerFullAccess();
+  migrateManagerSensitiveFieldsVisible();
   migrateDocumentPublishFeature();
   migrateKnowledgeTransferModule();
   migrateBiometricIntegrationModule();
@@ -2320,6 +2324,23 @@ function migrateManagerFullAccess() {
       ACTIONS.forEach((a) => insertGrant.run(roleId, featureId, a));
     });
   });
+}
+
+// Manager used to have bank_name/bank_account_number/ifsc_code/aadhaar_number/pan_number seeded
+// as 'hidden', so after an employee filled those in on their own profile the Manager reviewing the
+// submission saw them blank — the one role expected to check the details couldn't. Per Super Admin
+// policy they are now visible to Manager, matching HR Admin (which has no field_permissions rows
+// at all, so nothing is masked for it).
+//
+// runOnce, deliberately: field_permissions is user-configurable on the Manage permissions screen
+// (Super Admin only, see permissions.routes.js), so this must be a one-time correction of the old
+// default and never a per-boot reset — otherwise setting a field back to 'hidden' there would
+// silently revert on the next restart or deploy, the same bug migrateManagerFullAccess had.
+function migrateManagerSensitiveFieldsVisible() {
+  if (!runOnce('manager_sensitive_fields_visible')) return;
+  const fields = ['bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number'];
+  const update = db.prepare("UPDATE field_permissions SET access = 'view' WHERE role = 'manager' AND field_name = ? AND access = 'hidden'");
+  fields.forEach((f) => update.run(f));
 }
 
 // One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a
