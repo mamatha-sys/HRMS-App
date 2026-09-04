@@ -4,11 +4,18 @@ import db from '../db.js';
 // specific departments (STL) or teams (TL) Super Admin has assigned them in User Management,
 // rather than the company-wide access every other HR-tier role (manager/hr_admin/etc.) gets.
 // A single place to extend this list later if another role needs the same treatment.
-// Assistant Manager joined this list per Super Admin policy: Assistant Manager/STL/TL are all
-// limited to viewing their own + assigned department/team's records and performing workflow
-// approvals only — no create/edit/delete/configure/manage anywhere unless explicitly granted.
+//
+// Assistant Manager was previously listed here, but is now company-wide per Super Admin policy:
+// they need org-wide KPIs and the Department/Branch filters on the Dashboard. This also removes a
+// long-standing inconsistency — Employee Management and Integrations already treated Assistant
+// Manager as HR-tier (company-wide), while Attendance/Leave/Approvals/Dashboard scoped them, so
+// the same role saw different populations depending on the screen.
+//
+// This governs only WHICH employees they can see. What they may DO is still decided separately by
+// their Manage Roles grants (see rbac.js) — widening visibility here does not grant any
+// create/edit/delete action they didn't already have.
 export function isScopedRole(role) {
-  return role === 'stl' || role === 'tl' || role === 'assistant_manager';
+  return role === 'stl' || role === 'tl';
 }
 
 // The departments/teams a given employee (identified by their own employees.id, not user id)

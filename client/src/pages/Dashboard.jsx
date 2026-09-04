@@ -14,6 +14,7 @@ import MyAttendanceLeaveWidget from '../components/MyAttendanceLeaveWidget.jsx';
 import AnnouncementsWidget from '../components/AnnouncementsWidget.jsx';
 import IdeaLeaderboardWidget from '../components/IdeaLeaderboardWidget.jsx';
 import CelebrationsWidget from '../components/CelebrationsWidget.jsx';
+import { SCOPED_ROLES } from '../roles.js';
 
 const BANNERS = {
   super_admin: 'Full, unrestricted access — every widget below, organization-wide, no scope restriction.',
@@ -22,10 +23,6 @@ const BANNERS = {
 };
 
 const DECIDER_ROLES = ['super_admin', 'manager', 'hr_admin', 'assistant_manager', 'stl', 'tl'];
-// STL/TL already only ever see their own assigned department(s)/team(s) here — the
-// Department/Branch/Status filter bar has nothing else for them to filter into, so it's just
-// noise (and picking a department outside their scope would silently return nothing).
-const SCOPED_ROLES = ['stl', 'tl'];
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -48,6 +45,10 @@ export default function Dashboard() {
   }
 
   useEffect(() => { load(filters); }, [filters]);
+  // A scoped role (STL/TL/Assistant Manager) only ever sees their own assigned
+  // department(s)/team(s) here, so the Department/Branch/Status filter bar has nothing else for
+  // them to filter into — it's just noise, and picking a department outside their scope would
+  // silently return nothing. Don't render it, and don't fetch its options either.
   useEffect(() => {
     if (user?.role === 'employee' || isScoped) return;
     api.get('/org/departments').then((res) => setDepartments(res.data.departments)).catch(() => {});

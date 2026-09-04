@@ -4,10 +4,11 @@ import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
 import { loadFaceModels, extractFaceDescriptor, detectFacePresence } from '../faceApi.js';
+import { SCOPED_ROLES } from '../roles.js';
 
 // Super Admin is a pure system-administrator account — admin overview only, no own check-in/out.
 const FULL_HR_ROLES = ['super_admin'];
-const SCOPED_ROLES = ['stl', 'tl'];
+
 // Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own check-in/out
 // (MyAttendance) AND the overview below it (company-wide for the first three, scoped to their
 // assigned departments/teams for STL/TL), rather than one replacing the other.

@@ -9,7 +9,10 @@ import {
 } from './attendanceCore.js';
 
 function normalizeBiometricId(value) {
-  return String(value ?? '').trim().toUpperCase().replace(/[-\s]/g, '');
+  return String(value ?? '')
+    .trim()
+    .toUpperCase()
+    .replace(/[-\s]/g, '');
 }
 
 export function employeeForDeviceUser(deviceUserId) {
@@ -17,7 +20,9 @@ export function employeeForDeviceUser(deviceUserId) {
   if (!id) return null;
 
   const mapped = db
-    .prepare('SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?')
+    .prepare(
+      'SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?'
+    )
     .get(id);
 
   if (mapped?.employee_id) return mapped.employee_id;
@@ -25,19 +30,23 @@ export function employeeForDeviceUser(deviceUserId) {
   const normalized = normalizeBiometricId(id);
   if (!normalized) return null;
 
-  const matches = db.prepare(`
-    SELECT id, employee_code
-    FROM employees
-    WHERE status = 'Active'
-      AND REPLACE(REPLACE(UPPER(employee_code), '-', ''), ' ', '') = ?
-  `).all(normalized);
+  const matches = db
+    .prepare(`
+      SELECT id, employee_code
+      FROM employees
+      WHERE status='Active'
+        AND REPLACE(REPLACE(UPPER(employee_code),'-',''),' ','') = ?
+    `)
+    .all(normalized);
 
   if (matches.length !== 1) return null;
 
   const employeeId = matches[0].id;
 
   const usedByOther = db
-    .prepare('SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?')
+    .prepare(
+      'SELECT employee_id FROM employee_biometric_ids WHERE device_user_id = ?'
+    )
     .get(id);
 
   if (
@@ -48,7 +57,9 @@ export function employeeForDeviceUser(deviceUserId) {
   }
 
   const employeeExisting = db
-    .prepare('SELECT device_user_id FROM employee_biometric_ids WHERE employee_id = ?')
+    .prepare(
+      'SELECT device_user_id FROM employee_biometric_ids WHERE employee_id = ?'
+    )
     .get(employeeId);
 
   if (
@@ -60,10 +71,10 @@ export function employeeForDeviceUser(deviceUserId) {
 
   db.prepare(`
     INSERT INTO employee_biometric_ids (employee_id, device_user_id)
-    VALUES (?, ?)
+    VALUES (?,?)
     ON CONFLICT(employee_id) DO UPDATE SET
-      device_user_id = excluded.device_user_id,
-      mapped_at = datetime('now')
+      device_user_id=excluded.device_user_id,
+      mapped_at=datetime('now')
   `).run(employeeId, id);
 
   return employeeId;
@@ -79,42 +90,41 @@ function inferPunchType(statusCode) {
 }
 
 /*
- * Rebuild attendance for one employee/date from ALL raw biometric punches.
+ * IMPORTANT FIX
  *
- * Rules:
- *   status=0 -> check-in
- *   status=1 -> check-out
+ * eSSL X2008 can upload cached punches later.
  *
- * Multiple check-ins:
- *   earliest check-in wins.
+ * Example:
+ *   Received 10:22 first
+ *   Later uploads 09:58 and 09:59
  *
- * Multiple check-outs:
- *   latest check-out wins.
+ * The old code sorted by punch_time and incorrectly changed attendance
+ * to 09:58.
  *
- * This prevents repeated device uploads from turning a later check-in
- * into a false checkout.
+ * We now rebuild attendance using the ORDER THE SERVER RECEIVED THE PUNCHES
+ * (created_at, then id), which keeps the first valid received check-in.
  */
 export function rebuildAttendanceFromPunches(employeeId, date) {
   const punches = db.prepare(`
     SELECT *
     FROM biometric_punches
     WHERE employee_id = ?
-      AND substr(punch_time, 1, 10) = ?
-      AND punch_type IN ('check-in', 'check-out')
-    ORDER BY punch_time ASC, id ASC
+      AND substr(punch_time,1,10)=?
+      AND punch_type IN ('check-in','check-out')
+    ORDER BY datetime(created_at) ASC, id ASC
   `).all(employeeId, date);
 
   if (!punches.length) return null;
 
-  const checkIns = punches.filter((p) => p.punch_type === 'check-in');
-  const checkOuts = punches.filter((p) => p.punch_type === 'check-out');
+  const checkIns = punches.filter(p => p.punch_type === 'check-in');
+  const checkOuts = punches.filter(p => p.punch_type === 'check-out');
 
   const firstCheckIn = checkIns.length
-    ? checkIns[0].punch_time.slice(11, 16)
+    ? checkIns[0].punch_time.slice(11,16)
     : null;
 
   const lastCheckOut = checkOuts.length
-    ? checkOuts[checkOuts.length - 1].punch_time.slice(11, 16)
+    ? checkOuts[checkOuts.length-1].punch_time.slice(11,16)
     : null;
 
   const shift = effectiveShiftFor(employeeId, date);
@@ -146,31 +156,25 @@ export function rebuildAttendanceFromPunches(employeeId, date) {
     notifyIfEarlyLogout(employeeId, row, shift);
   }
 
-  recomputeLateFlags(employeeId, date.slice(0, 7));
+  recomputeLateFlags(employeeId, date.slice(0,7));
 
   return row;
 }
 
-/*
- * Process a raw device punch.
- *
- * Every raw punch is permanently recorded.
- * Attendance is then rebuilt from the complete punch history for that
- * employee/date, making duplicate/repeated device punches harmless.
- */
 export function processPunchLine(deviceSerial, line) {
-  const parts = line.split('\t').map((part) => part.trim());
+  // X2008 sometimes sends tabs, sometimes multiple spaces.
+  const parts = line.trim().split(/\s+/);
 
-  const [
-    deviceUserId,
-    timestamp,
-    statusCode,
-    verifyType
-  ] = parts;
+  const deviceUserId = parts[0];
+  const datePart = parts[1];
+  const timePart = parts[2];
+  const statusCode = parts[3];
 
-  if (!deviceUserId || !timestamp) {
+  if (!deviceUserId || !datePart || !timePart) {
     return null;
   }
+
+  const timestamp = `${datePart} ${timePart}`;
 
   const punchType = inferPunchType(statusCode);
   const employeeId = employeeForDeviceUser(deviceUserId);
@@ -185,7 +189,7 @@ export function processPunchLine(deviceSerial, line) {
       processed,
       raw_line
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    VALUES (?,?,?,?,?,?,?)
   `).run(
     deviceSerial,
     deviceUserId,
@@ -199,20 +203,16 @@ export function processPunchLine(deviceSerial, line) {
   if (employeeId && punchType !== 'unknown') {
     rebuildAttendanceFromPunches(
       employeeId,
-      timestamp.slice(0, 10)
+      timestamp.slice(0,10)
     );
   }
 
   return info.lastInsertRowid;
 }
 
-/*
- * HR manually maps a previously-unmapped punch to an employee,
- * then rebuilds the complete attendance record from raw punches.
- */
 export function mapPunch(punchId, employeeId) {
   const punch = db
-    .prepare('SELECT * FROM biometric_punches WHERE id = ?')
+    .prepare('SELECT * FROM biometric_punches WHERE id=?')
     .get(punchId);
 
   if (!punch) {
@@ -221,12 +221,13 @@ export function mapPunch(punchId, employeeId) {
 
   db.prepare(`
     UPDATE biometric_punches
-    SET employee_id = ?, processed = 1
-    WHERE id = ?
+    SET employee_id=?,
+        processed=1
+    WHERE id=?
   `).run(employeeId, punchId);
 
   rebuildAttendanceFromPunches(
     employeeId,
-    punch.punch_time.slice(0, 10)
+    punch.punch_time.slice(0,10)
   );
 }

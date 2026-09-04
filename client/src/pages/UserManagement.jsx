@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
+import { SCOPED_ROLES } from '../roles.js';
 
 const EMPTY_NEW_USER = { name: '', email: '', password: '', role: 'employee' };
 
-const SCOPED_ROLES = ['stl', 'tl'];
 
 export default function UserManagement() {
   const { user: currentUser } = useAuth();

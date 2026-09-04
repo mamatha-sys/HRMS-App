@@ -2,6 +2,7 @@ import { Fragment, useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import ChainStepper from '../components/ChainStepper.jsx';
+import { SCOPED_ROLES } from '../roles.js';
 
 // Same base64-data-URL pattern already used for expense receipts / helpdesk attachments.
 function readFileAsDataUrl(file) {
@@ -15,7 +16,7 @@ function readFileAsDataUrl(file) {
 
 // Super Admin is a pure system-administrator account — admin overview only, no own leave balance.
 const FULL_HR_ROLES = ['super_admin'];
-const SCOPED_ROLES = ['stl', 'tl'];
+
 // Manager/Assistant Manager/HR Admin/STL/TL are employees too — they get their own leave
 // balance/apply (MyLeave) AND the dashboard/reports below it (company-wide for the first three,
 // scoped to their assigned departments/teams for STL/TL), rather than one replacing the other.

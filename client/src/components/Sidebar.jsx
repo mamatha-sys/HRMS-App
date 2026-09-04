@@ -42,7 +42,21 @@ export default function Sidebar({ collapsed, mobileOpen, onToggle, onCloseMobile
   const { user } = useAuth();
   const [access, setAccess] = useState(null);
 
-  useEffect(() => { api.get('/my-access').then((r) => setAccess(r.data)).catch(() => {}); }, []);
+  // Permissions are changed by someone ELSE (Super Admin in Manage Roles), so fetching once on
+  // mount left this menu stale until a full page reload or re-login — a revoked module kept
+  // showing, which reads as "removing the permission did nothing". Re-fetch whenever this tab
+  // regains focus, the same self-refresh idiom the Dashboard already uses.
+  useEffect(() => {
+    const refresh = () => api.get('/my-access').then((r) => setAccess(r.data)).catch(() => {});
+    refresh();
+    const onVisibility = () => { if (document.visibilityState === 'visible') refresh(); };
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   // While loading (or if the call fails), fall back to showing everything rather than
   // flashing an empty sidebar — access is enforced server-side regardless.

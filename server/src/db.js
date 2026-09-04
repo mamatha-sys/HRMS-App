@@ -407,7 +407,7 @@ function seed() {
     { key: 'super_admin', name: 'Super Admin', scope: 'Company-wide (all branches, all departments)', system: 1 },
     { key: 'hr_admin', name: 'HR Admin', scope: 'Company-wide (all branches, all departments)', system: 0 },
     { key: 'manager', name: 'Manager', scope: 'All departments, company-wide', system: 0 },
-    { key: 'assistant_manager', name: 'Assistant Manager', scope: 'Own assigned department(s)/team(s) — supervisor scope set in User Management', system: 0 },
+    { key: 'assistant_manager', name: 'Assistant Manager', scope: 'All departments, company-wide (supporting role)', system: 0 },
     { key: 'stl', name: 'Senior Team Lead (STL)', scope: 'Team-A & Team-B (Educational), plus Medical & Manufacturing', system: 0 },
     { key: 'tl', name: 'Team Lead (TL)', scope: 'Single team (direct reports only)', system: 0 },
     { key: 'employee', name: 'Employee (Self-Service)', scope: 'Own record only', system: 0 }
@@ -1681,6 +1681,8 @@ function migrate() {
   migrateBiometricIntegration();
   migrateEmployeeCheckinMethods();
   migrateEmployeeProfileChanges();
+  migratePermCustomActions();
+  migrateModuleVisibleActions();
   migrateSyncEmployeeRoles();
 }
 
@@ -1832,6 +1834,38 @@ function migrateEmployeeCheckinMethods() {
       employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
       method TEXT NOT NULL,
       PRIMARY KEY (employee_id, method)
+    );
+  `);
+}
+
+// Which action columns a module shows. A module with NO rows here shows every action (the
+// default for all the standard modules). A module WITH rows shows only those — used for the
+// Dashboard, which starts at View and grows only as Super Admin adds actions to it.
+function migrateModuleVisibleActions() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS module_visible_actions (
+      module_id INTEGER NOT NULL REFERENCES perm_modules(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      PRIMARY KEY (module_id, action)
+    );
+  `);
+  // Seed the Dashboard once: View is the only action its code actually reads.
+  if (runOnce('dashboard_visible_actions_seed')) {
+    const dash = db.prepare("SELECT id FROM perm_modules WHERE code = '01'").get();
+    if (dash) db.prepare('INSERT OR IGNORE INTO module_visible_actions (module_id, action) VALUES (?, ?)').run(dash.id, 'View');
+  }
+}
+
+// Extra permission action names Super Admin has added on top of the twelve built-in ones
+// (View/Create/Edit/…/Manage). Kept in their own table so the built-in list stays a constant in
+// code: a custom action can be granted and revoked like any other, but nothing in the app checks
+// it by name until someone writes code that does — it is a label, not new enforcement.
+function migratePermCustomActions() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS perm_custom_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
 }
@@ -2134,14 +2168,14 @@ function migratePermissionCatalog() {
   migrateAssistantManagerScopeLabel();
 }
 
-// Assistant Manager's scope label was seeded as "All departments, company-wide" — misleading,
-// since employees.routes.js (and every other scoped module) treats Assistant Manager as a
-// department/team-scoped role, same as STL/TL. Corrects the label on an already-seeded live DB;
-// guarded on the old value so it's a no-op once fixed, and never overwrites a value Super Admin
-// has since edited by hand in Manage Roles.
+// Assistant Manager is company-wide again (see isScopedRole in utils/scope.js) — they need
+// org-wide Dashboard KPIs and the Department/Branch filters. An earlier migration had rewritten
+// this label to the department/team-scoped wording, so put it back on any DB that got it.
+// Guarded on that exact previous value, so it's a no-op once corrected and never overwrites a
+// description Super Admin has since edited by hand in Manage Roles.
 function migrateAssistantManagerScopeLabel() {
   db.prepare("UPDATE roles SET scope_description = ? WHERE key = 'assistant_manager' AND scope_description = ?")
-    .run('Own assigned department(s)/team(s) — supervisor scope set in User Management', 'All departments, company-wide (supporting role)');
+    .run('All departments, company-wide (supporting role)', 'Own assigned department(s)/team(s) — supervisor scope set in User Management');
 }
 
 // Re-files an already-seeded feature row under a different module (keeping its
@@ -2255,7 +2289,27 @@ function migrateDocumentPublishFeature() {
 // Assistant Manager/STL/TL are limited to View + workflow-approval actions only across every
 // module (05-18, Payroll excepted), unless Super Admin explicitly grants more in Manage Roles.
 // Re-adding it here would silently undo that on every server restart.
+// Records that a one-time migration has run, so it never repeats. Needed for backfills that
+// hand a role a set of permissions: repeating one on every startup silently reverses whatever
+// Super Admin has since configured in Manage Roles, which is indistinguishable from the change
+// never having saved.
+function runOnce(key) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS applied_migrations (
+      key TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  if (db.prepare('SELECT 1 FROM applied_migrations WHERE key = ?').get(key)) return false;
+  db.prepare('INSERT INTO applied_migrations (key) VALUES (?)').run(key);
+  return true;
+}
+
 function migrateManagerFullAccess() {
+  // One-time backfill only. It used to re-run on every boot, so pausing ANY action for Manager
+  // (in any module) came back on the next restart or deploy — permission edits for that role
+  // could never stick.
+  if (!runOnce('manager_full_access_backfill')) return;
   const ACTIONS = ['View', 'Create', 'Edit', 'Delete', 'Approve', 'Reject', 'Assign', 'Import', 'Export', 'Download', 'Print', 'Manage'];
   const roleIds = db.prepare("SELECT id FROM roles WHERE key IN ('manager')").all().map((r) => r.id);
   if (!roleIds.length) return;

@@ -14,6 +14,36 @@ export default function ManageRoles() {
   const [modules, setModules] = useState([]);
   const [activeModule, setActiveModule] = useState(null);
   const [matrix, setMatrix] = useState(null);
+  const [showCreateAction, setShowCreateAction] = useState(false);
+  const [newAction, setNewAction] = useState('');
+  // Every action that exists anywhere, so the add box can suggest ones not yet on this module.
+  const [knownActions, setKnownActions] = useState([]);
+  useEffect(() => { api.get('/roles/actions').then((r) => setKnownActions(r.data.actions)).catch(() => {}); }, []);
+
+  // Action names are global — a new one becomes an extra column in every module's matrix,
+  // granted to nobody until someone ticks it.
+  async function createAction(e) {
+    e.preventDefault();
+    setError('');
+    try {
+      await api.post('/roles/actions', { name: newAction, module_id: activeModule.id });
+      setNewAction(''); setShowCreateAction(false);
+      await openMatrix(activeModule); // reload so the new column appears
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not create that action.');
+    }
+  }
+
+  async function removeAction(action) {
+    if (!window.confirm(`Stop showing "${action}" on ${activeModule.name}?\n\nAny ${action} permission already granted on this module will be cleared. Other modules keep it.`)) return;
+    setError('');
+    try {
+      await api.delete(`/roles/actions/${encodeURIComponent(action)}?module_id=${activeModule.id}`);
+      await openMatrix(activeModule);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not remove that action.');
+    }
+  }
 
   function loadCatalog() {
     api.get('/roles').then((res) => setRoles(res.data.roles)).catch(() => setError('Could not load roles.'));
@@ -148,12 +178,58 @@ export default function ManageRoles() {
       <div className="subtitle">
         <span className="crumb" onClick={() => setView('catalog')}>Role Catalog</span>
         {' / '}
-        <span className="crumb" onClick={() => setView('modules')}>Edit Access</span>
+        {/* Re-fetch rather than just switching view: the module list carries each module's
+            "features with at least one action granted" count, which is now stale after the
+            grants just toggled in this matrix. Without this, revoking a permission and going
+            back still shows the old count, so the change looks like it didn't apply. */}
+        <span className="crumb" onClick={() => openModules(activeRole)}>Edit Access</span>
       </div>
       {error && <div className="banner error">{error}</div>}
 
       <div className="scope-banner">Data Scope: {activeRole.scope_description}</div>
       {activeRole.is_system && <div className="banner info">Super Admin permissions are read-only — this role always has every action.</div>}
+
+      {!activeRole.is_system && (
+        <div className="card">
+          <div className="row" style={{ alignItems: 'center' }}>
+            <div>
+              <div className="feature-name">Actions</div>
+              <div className="feature-meta">
+                {matrix.actions.length} action{matrix.actions.length === 1 ? '' : 's'} shown on this module.
+                Add an existing one (e.g. Export) to show its column here, or type a new name to create it.
+              </div>
+            </div>
+            <div style={{ flex: 1 }} />
+            <button onClick={() => setShowCreateAction((v) => !v)}>{showCreateAction ? 'Cancel' : '+ Add action'}</button>
+          </div>
+          {showCreateAction && (
+            <form onSubmit={createAction} className="row" style={{ marginTop: 10, flexWrap: 'wrap' }}>
+              <input list="known-actions" placeholder="Action name (e.g. Export)" value={newAction} onChange={(e) => setNewAction(e.target.value)} required style={{ flex: '1 1 240px' }} />
+              <datalist id="known-actions">
+                {knownActions.filter((a) => !matrix.actions.includes(a)).map((a) => <option key={a} value={a} />)}
+              </datalist>
+              <button className="primary" type="submit">Add</button>
+            </form>
+          )}
+
+          {/* Only a module with its own configured list can have an action taken off it — an
+              unrestricted module shows all twelve and has no list to remove from. */}
+          {matrix.restricted && (
+            <div className="row" style={{ marginTop: 10, gap: 6, flexWrap: 'wrap' }}>
+              {matrix.actions.map((a) => (
+                <span key={a} className="status-tag info" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  {a}
+                  <button
+                    title={`Stop showing ${a} on this module`}
+                    onClick={() => removeAction(a)}
+                    style={{ width: 'auto', padding: '0 4px', border: 'none', background: 'none', cursor: 'pointer', lineHeight: 1 }}
+                  >×</button>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {Object.entries(grouped).map(([category, feats]) => (
         <div key={category} className="card">
