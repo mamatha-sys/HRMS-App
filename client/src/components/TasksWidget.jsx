@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
 
-export default function TasksWidget({ canAssignOthers, badge }) {
+export default function TasksWidget({ canAssignOthers, badge, department = '' }) {
   const { user } = useAuth();
   const [tasks, setTasks] = useState([]);
   const [assignees, setAssignees] = useState([]);
@@ -13,9 +13,10 @@ export default function TasksWidget({ canAssignOthers, badge }) {
   const [error, setError] = useState('');
 
   function load() {
-    api.get('/tasks').then((res) => setTasks(res.data.tasks)).catch(() => {});
+    api.get('/tasks', { params: department ? { department } : {} }).then((res) => setTasks(res.data.tasks)).catch(() => {});
   }
-  useEffect(load, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [department]);
 
   useEffect(() => {
     if (!canAssignOthers) return;

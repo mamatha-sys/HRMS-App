@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import api from '../api.js';
 
-// Company-wide upcoming birthdays and work anniversaries — same GET /dashboard/celebrations for
-// every role (see dashboard.routes.js), so a Super Admin and a plain employee see the identical
-// list. No department/team scoping, unlike the rest of the Dashboard — this is a shared
-// team-morale feature, not a data-access concern.
+// Upcoming birthdays and work anniversaries — same GET /dashboard/celebrations for every role
+// (see dashboard.routes.js), so a Super Admin and a plain employee see the identical list. No
+// department/team *scoping*, unlike the rest of the Dashboard — this is a shared team-morale
+// feature, not a data-access concern. The `department` prop is different: it is the Dashboard's
+// own filter bar, so when the whole page is narrowed to one department this list follows it.
 function whenLabel(daysAway) {
   if (daysAway === 0) return 'Today';
   if (daysAway === 1) return 'Tomorrow';
@@ -16,12 +17,13 @@ const ordinal = (n) => {
   return `${n}${suffix}`;
 };
 
-export default function CelebrationsWidget({ badge }) {
+export default function CelebrationsWidget({ badge, department = '' }) {
   const [data, setData] = useState(null);
 
   useEffect(() => {
-    api.get('/dashboard/celebrations').then((r) => setData(r.data)).catch(() => {});
-  }, []);
+    api.get('/dashboard/celebrations', { params: department ? { department } : {} })
+      .then((r) => setData(r.data)).catch(() => {});
+  }, [department]);
 
   const birthdays = data?.birthdays || [];
   const anniversaries = data?.anniversaries || [];

@@ -2,15 +2,17 @@ import { useEffect, useState } from 'react';
 import api from '../api.js';
 import ChainStepper from './ChainStepper.jsx';
 
-export default function ApprovalsWidget({ canDecide, badge }) {
+export default function ApprovalsWidget({ canDecide, badge, department = '' }) {
   const [approvals, setApprovals] = useState([]);
   const [chainLabel, setChainLabel] = useState('');
   const [error, setError] = useState('');
 
   function load() {
-    api.get('/approvals').then((res) => { setApprovals(res.data.approvals); setChainLabel(res.data.chainLabel || ''); }).catch(() => {});
+    api.get('/approvals', { params: department ? { department } : {} })
+      .then((res) => { setApprovals(res.data.approvals); setChainLabel(res.data.chainLabel || ''); }).catch(() => {});
   }
-  useEffect(load, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(load, [department]);
 
   async function decide(id, verb) {
     setError('');

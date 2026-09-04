@@ -10,12 +10,13 @@ const CATEGORY_CLASS = { General: 'info', Policy: 'pending', Event: 'present', H
 const PREVIEW_COUNT = 5;
 const DASHBOARD_AGE_MS = 24 * 60 * 60 * 1000;
 
-export default function AnnouncementsWidget({ badge }) {
+export default function AnnouncementsWidget({ badge, department = '' }) {
   const [announcements, setAnnouncements] = useState([]);
 
   useEffect(() => {
-    api.get('/announcements').then((r) => setAnnouncements(r.data.announcements)).catch(() => {});
-  }, []);
+    api.get('/announcements', { params: department ? { department } : {} })
+      .then((r) => setAnnouncements(r.data.announcements)).catch(() => {});
+  }, [department]);
 
   // The Dashboard is "what's fresh," not a permanent archive — that's what the full Announcements
   // page is for (this same feed, unfiltered). A pinned notice (e.g. a standing policy) stays

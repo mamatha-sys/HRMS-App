@@ -75,6 +75,41 @@ export default function Dashboard() {
     };
   }, [filters]);
 
+  // One export for the whole page, not per chart: sends the same filters the screen is showing so
+  // the workbook matches what you are looking at (Overview + Employees + breakdowns + trends +
+  // attendance + approvals + positions + celebrations, one sheet each).
+  const [exporting, setExporting] = useState(false);
+  async function exportDashboard() {
+    setError('');
+    setExporting(true);
+    try {
+      const params = {};
+      if (filters.department) params.department = filters.department;
+      if (filters.branch) params.branch = filters.branch;
+      if (filters.status) params.status = filters.status;
+      const res = await api.get('/dashboard/export.xlsx', { params, responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `hrms-dashboard-${filters.department ? filters.department.replace(/[^A-Za-z0-9]+/g, '-').toLowerCase() : 'all-departments'}.xlsx`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError('Could not export the dashboard.');
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  // The department selection drives every widget below too, not just the KPI strip — each widget
+  // fetches its own data, so the choice has to be handed down rather than applied centrally.
+  const dept = filters.department;
+  const activeFilters = [
+    filters.department && `Department: ${filters.department}`,
+    filters.branch && `Branch: ${filters.branch}`,
+    filters.status && `Status: ${filters.status}`
+  ].filter(Boolean);
+
   const vis = summary?.widgetVisibility || {};
   const show = (key) => vis[key] !== false;
 
@@ -89,22 +124,39 @@ export default function Dashboard() {
 
       {summary && summary.role !== 'employee' && (
         <>
-          {!isScoped && (
-            <div className="filter-bar">
-              <select value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })}>
-                <option value="">All Departments</option>
-                {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
-              </select>
-              <select value={filters.branch} onChange={(e) => setFilters({ ...filters, branch: e.target.value })}>
-                <option value="">All Branches</option>
-                {branches.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
-              </select>
-              <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
-                <option value="">All Statuses</option>
-                <option value="Active">Active</option>
-                <option value="On Probation">On Probation</option>
-                <option value="Exited">Exited</option>
-              </select>
+          {/* The bar renders even for a scoped role, which has no selects to show but still gets
+              the export button — their workbook is simply pre-narrowed to their assigned scope. */}
+          <div className="filter-bar">
+            {!isScoped && (
+              <>
+                <select value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })}>
+                  <option value="">All Departments</option>
+                  {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+                </select>
+                <select value={filters.branch} onChange={(e) => setFilters({ ...filters, branch: e.target.value })}>
+                  <option value="">All Branches</option>
+                  {branches.map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+                </select>
+                <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })}>
+                  <option value="">All Statuses</option>
+                  <option value="Active">Active</option>
+                  <option value="On Probation">On Probation</option>
+                  <option value="Exited">Exited</option>
+                </select>
+                {activeFilters.length > 0 && (
+                  <button onClick={() => setFilters({ department: '', branch: '', status: '' })}>Clear</button>
+                )}
+              </>
+            )}
+            <span className="spacer" />
+            <button className="primary" onClick={exportDashboard} disabled={exporting}>
+              {exporting ? 'Preparing…' : 'Export Dashboard (Excel)'}
+            </button>
+          </div>
+
+          {activeFilters.length > 0 && (
+            <div className="banner info">
+              Showing <strong>{activeFilters.join(' · ')}</strong> — every KPI, chart and widget on this page is narrowed to this selection, and so is the export.
             </div>
           )}
 
@@ -125,25 +177,28 @@ export default function Dashboard() {
               {show('hiring_chart') && <BarChart title="New Hires by Year" data={summary.hiringTrend} exportFilename="hiring.csv" />}
               {show('department_chart') && <BarChart title="Department Strength & Distribution" data={summary.departmentBreakdown.map((d) => ({ label: d.department, value: d.count }))} exportFilename="departments.csv" />}
               {summary.teamBreakdown && summary.teamBreakdown.length > 0 && (
-                <BarChart title="Team-wise Distribution" data={summary.teamBreakdown.map((t) => ({ label: t.team, value: t.count }))} exportFilename="teams.csv" />
+                <BarChart title={dept ? `Team-wise Distribution — ${dept}` : 'Team-wise Distribution'} data={summary.teamBreakdown.map((t) => ({ label: t.team, value: t.count }))} exportFilename="teams.csv" />
               )}
             </div>
             <div>
-              {show('approvals') && <ApprovalsWidget key={'approvals' + refreshKey} badge={1} canDecide={canDecide} />}
-              {show('tasks') && <TasksWidget key={'tasks' + refreshKey} badge={2} canAssignOthers={canManage} />}
+              {show('approvals') && <ApprovalsWidget key={'approvals' + refreshKey} badge={1} canDecide={canDecide} department={dept} />}
+              {show('tasks') && <TasksWidget key={'tasks' + refreshKey} badge={2} canAssignOthers={canManage} department={dept} />}
             </div>
             <div>
+              {/* Notifications and Calendar are deliberately NOT department-filtered: the first is
+                  your own personal inbox and the second is the shared company calendar — neither
+                  is a per-department dataset, so narrowing them would just hide your own items. */}
               {show('notifications') && <NotificationsWidget key={'notifications' + refreshKey} badge={3} canCreate={canManage} />}
               {show('calendar') && <EventsWidget key={'calendar' + refreshKey} badge={4} canCreate={canManage} />}
-              {show('announcements') && <AnnouncementsWidget key={'announcements' + refreshKey} badge={5} />}
-              {show('celebrations') && <CelebrationsWidget key={'celebrations' + refreshKey} badge={10} />}
+              {show('announcements') && <AnnouncementsWidget key={'announcements' + refreshKey} badge={5} department={dept} />}
+              {show('celebrations') && <CelebrationsWidget key={'celebrations' + refreshKey} badge={10} department={dept} />}
             </div>
           </div>
 
           <div className="dashboard-grid">
             {show('quick_actions') && <QuickActionsWidget badge={6} role={user?.role} />}
-            {show('vacancies') && <VacanciesWidget key={'vacancies' + refreshKey} badge={7} />}
-            {show('idea_leaderboard') && <IdeaLeaderboardWidget key={'idea_leaderboard' + refreshKey} badge={8} />}
+            {show('vacancies') && <VacanciesWidget key={'vacancies' + refreshKey} badge={7} department={dept} />}
+            {show('idea_leaderboard') && <IdeaLeaderboardWidget key={'idea_leaderboard' + refreshKey} badge={8} department={dept} />}
             {show('role_user') && user?.role === 'super_admin' && <RoleUserSummaryWidget badge={9} usersCount={summary.usersCount} />}
           </div>
         </>

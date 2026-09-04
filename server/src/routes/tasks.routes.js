@@ -22,7 +22,16 @@ router.get('/', (req, res) => {
         WHERE t.assigned_to = ? OR t.created_by = ?
         ORDER BY (t.status = 'Done'), t.due_date IS NULL, t.due_date ASC
       `).all(req.user.sub, req.user.sub);
-  res.json({ tasks: rows });
+
+  // Dashboard filter bar (not a permission check): narrow the already-authorised list to tasks
+  // whose assignee belongs to the selected department, so the Tasks widget follows the same
+  // department selection as the KPIs and charts. Tasks carry no department of their own — it
+  // comes from the assignee's employee record, which is linked to their user by employees.user_id.
+  const department = (req.query.department || '').trim();
+  if (!department) return res.json({ tasks: rows });
+  const deptOfUser = db.prepare('SELECT department FROM employees WHERE user_id = ?');
+  const filtered = rows.filter((t) => deptOfUser.get(t.assigned_to)?.department === department);
+  res.json({ tasks: filtered });
 });
 
 router.post('/', (req, res) => {

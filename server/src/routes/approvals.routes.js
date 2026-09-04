@@ -43,7 +43,13 @@ router.get('/', (req, res) => {
   // supervisor_scopes row still sees their own department's requests, matching how Leave,
   // Attendance and the Dashboard already scope. Without this, a newly-appointed TL sees an empty
   // approvals queue and a submitted profile silently reaches nobody below HR.
-  const scoped = filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+  //
+  // `?department=` is the Dashboard's filter bar, not a permission check — it narrows what an
+  // already-authorised viewer is looking at so the Approvals widget follows the same department
+  // selection as the KPIs above it, instead of staying company-wide while everything else narrows.
+  const department = (req.query.department || '').trim();
+  const visible = department ? enriched.filter((r) => r.department === department) : enriched;
+  const scoped = filterToScopeOrOwnDepartment(visible, req.user.role, myEmployee(req.user.sub)?.id);
   res.json({ approvals: withStage(scoped), chainLabel: approvalChainLabel() });
 });
 

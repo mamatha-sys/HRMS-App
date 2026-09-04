@@ -4,12 +4,13 @@ import api from '../api.js';
 
 const TOP_N = 5;
 
-export default function IdeaLeaderboardWidget({ badge }) {
+export default function IdeaLeaderboardWidget({ badge, department = '' }) {
   const [data, setData] = useState(null);
 
   useEffect(() => {
-    api.get('/ideas/leaderboard').then((r) => setData(r.data)).catch(() => {});
-  }, []);
+    api.get('/ideas/leaderboard', { params: department ? { department } : {} })
+      .then((r) => setData(r.data)).catch(() => {});
+  }, [department]);
 
   const top = data?.leaderboard.slice(0, TOP_N) || [];
 

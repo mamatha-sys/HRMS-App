@@ -33,8 +33,17 @@ function withRecipients(rows) {
 
 // HR/management view: every announcement, whoever it's targeted at.
 router.get('/', (req, res) => {
+  // `?department=` is the Dashboard's filter bar, not an access rule. Only applied to the HR
+  // branch: an HR-tier viewer already sees every post, so narrowing to the selected department
+  // (its own posts plus company-wide ones, which reach that department too) just follows the rest
+  // of the dashboard. The employee branch below is already personal and must not be narrowed
+  // further, or someone would end up with an emptier feed than they are entitled to.
+  const departmentFilter = (req.query.department || '').trim();
   if (isHR(req.user.role)) {
-    const announcements = db.prepare('SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC').all();
+    let announcements = db.prepare('SELECT * FROM announcements ORDER BY pinned DESC, created_at DESC').all();
+    if (departmentFilter) {
+      announcements = announcements.filter((a) => !a.target_department || a.target_department === departmentFilter);
+    }
     return res.json({ announcements: withRecipients(announcements) });
   }
   // Employee self-service: only company-wide posts, posts targeted at their own department (or,

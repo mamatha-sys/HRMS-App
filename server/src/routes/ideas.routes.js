@@ -168,7 +168,15 @@ function leaderboardRows() {
 }
 
 router.get('/leaderboard', (req, res) => {
-  res.json({ leaderboard: leaderboardRows(), weekStart: weekStartOf() });
+  // `?department=` is the Dashboard's filter bar, not an access rule — the leaderboard is already
+  // visible company-wide to everyone; this only narrows what is displayed so the widget follows
+  // the same department selection as the rest of the dashboard.
+  const department = (req.query.department || '').trim();
+  const rows = leaderboardRows();
+  res.json({
+    leaderboard: department ? rows.filter((r) => r.department === department) : rows,
+    weekStart: weekStartOf()
+  });
 });
 
 // HR/manager-tier: weekly compliance against the 3-unique-ideas quota (who's hit it, and how many

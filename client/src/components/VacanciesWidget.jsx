@@ -2,12 +2,13 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 
-export default function VacanciesWidget({ badge }) {
+export default function VacanciesWidget({ badge, department = '' }) {
   const [vacancies, setVacancies] = useState([]);
 
   useEffect(() => {
-    api.get('/positions/vacancies').then((res) => setVacancies(res.data.vacancies)).catch(() => {});
-  }, []);
+    api.get('/positions/vacancies', { params: department ? { department } : {} })
+      .then((res) => setVacancies(res.data.vacancies)).catch(() => {});
+  }, [department]);
 
   return (
     <div className="card">

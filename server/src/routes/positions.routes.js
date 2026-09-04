@@ -184,6 +184,10 @@ router.put('/:id/posting', (req, res) => {
 // Dashboard widget — a department-level (STL) grant already covers every team within it.
 router.get('/vacancies', (req, res) => {
   let departments = db.prepare('SELECT * FROM departments').all();
+  // Dashboard filter bar (not a permission check): narrow an already-authorised view to the one
+  // department selected on screen, so this widget matches the KPIs and charts above it.
+  const departmentFilter = (req.query.department || '').trim();
+  if (departmentFilter) departments = departments.filter((d) => d.name === departmentFilter);
   const scoped = isScopedRole(req.user.role);
   const scope = scoped ? getSupervisorScope(myEmployee(req.user.sub)?.id) : null;
   if (scoped) {
