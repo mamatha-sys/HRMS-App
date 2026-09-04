@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import api from '../api.js';
 import { useAuth } from '../context/AuthContext.jsx';
@@ -601,9 +601,18 @@ export default function Employees() {
 
   function reset() { setFormMode(null); setEditingId(null); setForm(EMPTY_FORM); setError(''); setInfo(''); }
 
-  function startCreate() { setEditingId(null); setForm(EMPTY_FORM); setFormMode('create'); }
+  const formRef = useRef(null);
+  const scrollToForm = () => requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  // The row being edited, so the form can show its review state (stage, pending changes) — the
+  // `form` state itself only carries field values, not the workflow stage.
+  const editingEmployee = editingId ? employees.find((e) => e.id === editingId) : null;
+
+  function startCreate() { setEditingId(null); setForm(EMPTY_FORM); setFormMode('create'); scrollToForm(); }
   function startEdit(emp) {
     setEditingId(emp.id);
+    // The form renders above the table, so opening it from a row far down the list otherwise
+    // looks like nothing happened. Deferred a frame so the card exists before we scroll to it.
+    scrollToForm();
     const next = { ...EMPTY_FORM };
     Object.keys(EMPTY_FORM).forEach((k) => { next[k] = emp[k] ?? ''; });
     next.employee_code = emp.employee_code || '';
@@ -817,7 +826,32 @@ export default function Employees() {
       )}
 
       {formMode && (
-        <div className="card">
+        <div className="card" ref={formRef}>
+          {/* Reviewing a submitted profile happens in the real form, not just the read-only
+              expand: the whole point of the stage is to check each field the employee filled and
+              decide, so the values sit in the fields you would correct them in, with the diff and
+              the Approve / Send back buttons right here rather than back down in the table. */}
+          {editingEmployee?.stage === 'submitted' && (
+            <div className="banner" style={{ background: '#FFF6E5', border: '1px solid #E3B341', marginBottom: 12 }}>
+              <div className="row" style={{ alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <span>
+                  <strong>Pending Review</strong> — {editingEmployee.name} submitted these details. Check the fields below, then decide.
+                  {approvalForEmployee(editingEmployee)?.current_stage_name && (
+                    <span className="feature-meta"> Currently waiting on {approvalForEmployee(editingEmployee).current_stage_name}.</span>
+                  )}
+                </span>
+                <div style={{ flex: 1 }} />
+                <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <button type="button" className="btn-approve" onClick={() => { decideSubmission(editingEmployee, 'approve'); reset(); }}>Approve</button>
+                  <button type="button" className="btn-reject" onClick={() => { decideSubmission(editingEmployee, 'reject'); reset(); }} title="Send the profile back to the employee to correct and re-submit">Send back for Edit</button>
+                </span>
+              </div>
+              <ProfileChangesTable
+                changes={editingEmployee.pending_changes}
+                emptyNote="No field-level changes were recorded for this submission — check the full form below."
+              />
+            </div>
+          )}
           <form onSubmit={handleSubmit}>
             {formMode === 'create' ? (
               <>
@@ -978,6 +1012,7 @@ export default function Employees() {
                         pendingStageName={approvalForEmployee(emp)?.current_stage_name}
                         onApprove={() => decideSubmission(emp, 'approve')}
                         onSendBack={() => decideSubmission(emp, 'reject')}
+                        onOpenForm={canEditEmployee ? () => startEdit(emp) : null}
                       />
                     </td></tr>
                   )}
@@ -1225,7 +1260,7 @@ function ProfileChangesTable({ changes, emptyNote }) {
 // (Manager, Assistant Manager, STL, TL) can read a submitted record here, but only Super Admin
 // and HR Admin get the Approve / Send back buttons — reviewing is not the same permission as
 // changing someone's profile.
-function EmployeeDetail({ emp, canDecide, onApprove, onSendBack, pendingStageName }) {
+function EmployeeDetail({ emp, canDecide, onApprove, onSendBack, onOpenForm, pendingStageName }) {
   const addr = [
     emp.address_line1, emp.address_line2, emp.address_city, emp.address_district, emp.address_state, emp.address_country, emp.address_pincode
   ].filter(Boolean).join(', ');
@@ -1241,6 +1276,7 @@ function EmployeeDetail({ emp, canDecide, onApprove, onSendBack, pendingStageNam
             <div style={{ flex: 1 }} />
             {canDecide ? (
               <span style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                {onOpenForm && <button onClick={onOpenForm} title="Open the submitted details in the full form, field by field">Check in form</button>}
                 <button className="btn-approve" onClick={onApprove}>Approve</button>
                 <button className="btn-reject" onClick={onSendBack} title="Send the profile back to the employee to correct and re-submit">Send back for Edit</button>
               </span>
