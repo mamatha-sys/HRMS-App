@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { getSettings } from '../utils/integrationSettings.js';
 import { explainPayrollComparison } from '../utils/aiAssist.js';
+import { recomputeLateFlags, freeLateAllowance } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -262,12 +263,13 @@ router.get('/run-preview', (req, res) => {
   const rows = employees.map((e) => {
     const already = !!db.prepare('SELECT id FROM payslips WHERE employee_id = ? AND period = ?').get(e.id, period);
     const b = breakdownFor(e.id);
-    const { deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
+    const { lateDays, flaggedDays, allowance, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
     const { lopDays, absentDays, unmarkedDays, paidDays, futureDays, deduction: lopDeduction } = lopFor(e.id, month, b.gross);
     const sandwichDays = sandwichWeekendDays(e.id, month);
     const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
     return {
       future_days: futureDays,
+      late_days: lateDays, half_day_count: flaggedDays, free_late_allowance: allowance,
       employee_id: e.id, name: e.name, employee_code: e.employee_code, department: e.department,
       already_generated: already,
       gross: b.gross, days_worked: Math.max(0, paidDays - sandwichDays),
@@ -349,11 +351,41 @@ const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'Ju
 // Half-day pay cut for late arrivals beyond the free monthly allowance (company rule — see
 // attendance.routes.js's half_day_flag, computed at check-in time from the "Free late arrivals
 // per month" policy). One half-day = gross / 30 / 2.
+// Late arrivals -> half-day cuts. Each day's late_minutes comes from the employee's real check-in
+// time against the shift that actually applied that day (effectiveShiftFor), with a grace period;
+// the first `Free late arrivals per month` late days are forgiven, and every late day after that
+// is flagged for half a day's pay.
+//
+// half_day_flag is only ever written at check-in time (attendance.routes.js) and on a biometric
+// punch, so it goes stale whenever something changes AFTER the fact — HR corrects a check-in
+// time, a roster reassignment changes which shift applied, punches arrive late from the device,
+// or Super Admin changes the free-late allowance. Payroll must not pay out of stale flags, so
+// recompute the month first. It only rederives columns from the check-in/out times already on
+// record, so it is idempotent and changes no attendance a human entered.
 function lateDeductionFor(employeeId, month, gross) {
-  const flaggedDays = db.prepare("SELECT COUNT(*) AS c FROM attendance WHERE employee_id = ? AND date LIKE ? AND half_day_flag = 1").get(employeeId, month + '%').c;
-  if (flaggedDays === 0) return { flaggedDays: 0, deduction: 0 };
-  const halfDayRate = Math.round(gross / 30 / 2);
-  return { flaggedDays, deduction: flaggedDays * halfDayRate };
+  recomputeLateFlags(employeeId, month);
+  const counts = db.prepare(`
+    SELECT
+      COUNT(*) FILTER (WHERE late_minutes > 0) AS lateDays,
+      COUNT(*) FILTER (WHERE half_day_flag = 1) AS flaggedDays,
+      COALESCE(SUM(late_minutes), 0) AS lateMinutes
+    FROM attendance WHERE employee_id = ? AND date LIKE ?
+  `).get(employeeId, month + '%');
+  const allowance = freeLateAllowance();
+  if (!counts.flaggedDays) {
+    return { lateDays: counts.lateDays, flaggedDays: 0, lateMinutes: counts.lateMinutes, allowance, deduction: 0 };
+  }
+  // Half of one day's pay, on the same per-day rate LOP uses. This used to divide by a hardcoded
+  // 30 regardless of month, which quietly overcharged every 31-day month and undercharged
+  // February against the rate applied everywhere else on the same payslip.
+  const halfDayRate = Math.round(gross / daysInMonthFor(month) / 2);
+  return {
+    lateDays: counts.lateDays,
+    flaggedDays: counts.flaggedDays,
+    lateMinutes: counts.lateMinutes,
+    allowance,
+    deduction: counts.flaggedDays * halfDayRate
+  };
 }
 
 function daysInMonthFor(month) {
@@ -505,7 +537,7 @@ router.post('/run', (req, res) => {
       const basic = basicLine?.amount || 0;
       const hra = hraLine?.amount || 0;
       const allowances = b.earnings.filter((l) => l.key !== 'basic' && l.key !== 'hra').reduce((t, l) => t + l.amount, 0);
-      const { deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
+      const { lateDays, flaggedDays, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
       const { lopDays, unmarkedDays, paidDays, deduction: lopDeduction } = lopFor(e.id, month, b.gross);
       const sandwichDays = sandwichWeekendDays(e.id, month);
       const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
@@ -517,9 +549,9 @@ router.post('/run', (req, res) => {
       // zero rather than going negative — an employer withholds pay, it does not invoice for it.
       const net = Math.max(0, b.net - lateDeduction - lopDeduction - sandwichDeduction);
       db.prepare(`
-        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, lop_days, unmarked_lop_days, lop_deduction, sandwich_lop_days, sandwich_lop_deduction, days_worked, net, lines_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lopDays, unmarkedDays, lopDeduction, sandwichDays, sandwichDeduction, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
+        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, late_days, half_day_count, lop_days, unmarked_lop_days, lop_deduction, sandwich_lop_days, sandwich_lop_deduction, days_worked, net, lines_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lateDays, flaggedDays, lopDays, unmarkedDays, lopDeduction, sandwichDays, sandwichDeduction, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
       generated++;
     });
     db.prepare("INSERT INTO payroll_runs (period, status) VALUES (?, 'Completed')").run(period);

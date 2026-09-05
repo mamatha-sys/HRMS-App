@@ -50,7 +50,13 @@ function openPayslip(payslipId) {
 function payslipHtml({ payslip, employee, company }) {
   const earnings = payslip.earnings || [];
   const deductionLines = [...(payslip.deductions || [])];
-  if (payslip.late_deduction) deductionLines.push({ label: 'Late Arrival Half-day Cut', amount: payslip.late_deduction });
+  if (payslip.late_deduction) {
+    const cuts = payslip.half_day_count || 0;
+    deductionLines.push({
+      label: `Late Arrival Half-day Cut${cuts ? ` (${cuts} day${cuts === 1 ? '' : 's'})` : ''}`,
+      amount: payslip.late_deduction
+    });
+  }
   if (payslip.lop_deduction) {
     // Split the cause out on the payslip itself — "8 days LOP" reads as a payroll error unless it
     // says that 6 of them were days with no attendance record at all.
@@ -68,12 +74,16 @@ function payslipHtml({ payslip, employee, company }) {
   const rowCount = Math.max(earnings.length, deductionLines.length, 1);
   // payslip.month is YYYY-MM; day 0 of the next month is the last day of this one.
   const daysInMonth = payslip.month ? new Date(Number(payslip.month.slice(0, 4)), Number(payslip.month.slice(5, 7)), 0).getDate() : null;
+  // Each half-day cut is a day paid at half, so the days-paid figure carries the .5 rather than
+  // counting a docked day as a whole one.
+  const effectiveDays = (payslip.days_worked || 0) - 0.5 * (payslip.half_day_count || 0);
 
   const infoLeft = [
     ['Employee Code', employee?.employee_code],
     ['Employee Name', employee?.name],
     ['ESI Number', employee?.esi_number],
-    ['Days Paid', payslip.days_worked != null ? `${payslip.days_worked}${daysInMonth ? ` of ${daysInMonth}` : ''}` : '—'],
+    ['Days Paid', payslip.days_worked != null ? `${effectiveDays}${daysInMonth ? ` of ${daysInMonth}` : ''}` : '—'],
+    ['Late Arrivals', payslip.late_days || 0],
     ['DOJ', employee?.date_of_joining],
     ['Department', employee?.department],
     ['Location', employee?.branch],
@@ -84,6 +94,7 @@ function payslipHtml({ payslip, employee, company }) {
     ['UAN Number', employee?.uan_number],
     ['PF Number', employee?.pf_number],
     ['LOP Days', payslip.lop_days || 0],
+    ['Half-day Cuts', payslip.half_day_count || 0],
     ['Month', payslip.period],
     ['Designation', employee?.designation],
     ['Bank A/C Number', employee?.bank_account_number],
@@ -361,9 +372,9 @@ function HRPayroll({ compact, sectionLabel }) {
                 <button className="primary" onClick={runPayroll}>Run Payroll</button>
               </div>
               <div className="feature-meta" style={{ marginTop: 4 }}>
-                Pay follows attendance: days marked Present or on approved Leave are paid, and days
-                marked Absent are deducted. Late arrivals beyond the free monthly allowance (see
-                Configuration Policies) are auto-deducted as a half-day cut.
+                Pay follows attendance: days marked Present or on approved Leave are paid, days marked
+                Absent are deducted, and each check-in later than the shift's grace period beyond the free
+                monthly allowance (see Configuration Policies) costs half a day's pay.
               </div>
 
               {attConfig && (
@@ -430,7 +441,9 @@ function HRPayroll({ compact, sectionLabel }) {
                   <thead>
                     <tr>
                       <th>Code</th><th>Name</th><th>Department</th><th>Days Paid</th><th>Absent</th><th>Not Marked</th>
-                      <th>Gross</th><th>LOP Cut</th><th>Net</th><th></th>
+                      <th title="Days checked in after the shift's grace period">Late</th>
+                      <th title="Late days beyond the free monthly allowance — each cut half a day's pay">½-day Cuts</th>
+                      <th>Gross</th><th>LOP Cut</th><th>Late Cut</th><th>Net</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -442,8 +455,11 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td><strong>{p.days_worked}</strong> <span className="feature-meta">/ {p.total_days}</span></td>
                         <td>{p.absent_days || '—'}</td>
                         <td>{p.unmarked_days ? <span style={{ color: '#B3401E' }}>{p.unmarked_days}</span> : '—'}</td>
+                        <td>{p.late_days || '—'}</td>
+                        <td>{p.half_day_count ? <span style={{ color: '#B3401E' }}>{p.half_day_count}</span> : '—'}</td>
                         <td>{inr(p.gross)}</td>
                         <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
+                        <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>
                         <td><strong>{inr(p.net)}</strong></td>
                         <td>{p.already_generated && <span className="status-tag info">already run</span>}</td>
                       </tr>

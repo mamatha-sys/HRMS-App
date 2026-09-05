@@ -2004,6 +2004,10 @@ function migrateTeamsAndScopes() {
   // Splits lop_days into its two causes so a payslip can say WHY a day was unpaid: an explicit
   // Absent mark, or a working day with no attendance record at all.
   if (!payCols2.includes('unmarked_lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN unmarked_lop_days INTEGER NOT NULL DEFAULT 0');
+  // How the late-arrival half-day cut was arrived at: how many days the employee checked in late,
+  // and how many of those fell beyond the month's free-late allowance and were actually cut.
+  if (!payCols2.includes('late_days')) db.exec('ALTER TABLE payslips ADD COLUMN late_days INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('half_day_count')) db.exec('ALTER TABLE payslips ADD COLUMN half_day_count INTEGER NOT NULL DEFAULT 0');
 
   // Super Admin can give recognition without being linked to an employee record (a true
   // system-administrator login often isn't tied to one) — from_employee_id has to become
