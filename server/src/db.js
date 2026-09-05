@@ -2008,6 +2008,11 @@ function migrateTeamsAndScopes() {
   // and how many of those fell beyond the month's free-late allowance and were actually cut.
   if (!payCols2.includes('late_days')) db.exec('ALTER TABLE payslips ADD COLUMN late_days INTEGER NOT NULL DEFAULT 0');
   if (!payCols2.includes('half_day_count')) db.exec('ALTER TABLE payslips ADD COLUMN half_day_count INTEGER NOT NULL DEFAULT 0');
+  // Days worked short of a full day (paid pro-rata from hours), what that cost, and days with a
+  // check-in but no check-out — those are never docked, only reported so HR can fix the record.
+  if (!payCols2.includes('short_days')) db.exec('ALTER TABLE payslips ADD COLUMN short_days INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('short_day_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN short_day_deduction INTEGER NOT NULL DEFAULT 0');
+  if (!payCols2.includes('missing_checkout_days')) db.exec('ALTER TABLE payslips ADD COLUMN missing_checkout_days INTEGER NOT NULL DEFAULT 0');
 
   // Super Admin can give recognition without being linked to an employee record (a true
   // system-administrator login often isn't tied to one) — from_employee_id has to become

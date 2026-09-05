@@ -69,14 +69,15 @@ function payslipHtml({ payslip, employee, company }) {
     });
   }
   if (payslip.sandwich_lop_deduction) deductionLines.push({ label: `Weekend Loss of Pay — Sandwich Rule (${payslip.sandwich_lop_days} day${payslip.sandwich_lop_days === 1 ? '' : 's'})`, amount: payslip.sandwich_lop_deduction });
+  if (payslip.short_day_deduction) deductionLines.push({ label: `Short Day — hours worked below a full day (${payslip.short_days} day${payslip.short_days === 1 ? '' : 's'})`, amount: payslip.short_day_deduction });
   const grossSalary = earnings.reduce((t, l) => t + l.amount, 0);
   const totalDeductions = deductionLines.reduce((t, l) => t + l.amount, 0);
   const rowCount = Math.max(earnings.length, deductionLines.length, 1);
   // payslip.month is YYYY-MM; day 0 of the next month is the last day of this one.
   const daysInMonth = payslip.month ? new Date(Number(payslip.month.slice(0, 4)), Number(payslip.month.slice(5, 7)), 0).getDate() : null;
-  // Each half-day cut is a day paid at half, so the days-paid figure carries the .5 rather than
-  // counting a docked day as a whole one.
-  const effectiveDays = (payslip.days_worked || 0) - 0.5 * (payslip.half_day_count || 0);
+  // days_worked already carries the short-day fraction from the server; the late-arrival cut is
+  // charged separately, so take that off here to get the honest days-paid figure (22.5, not 23).
+  const effectiveDays = Math.max(0, (payslip.days_worked || 0) - 0.5 * (payslip.half_day_count || 0));
 
   const infoLeft = [
     ['Employee Code', employee?.employee_code],
@@ -95,6 +96,7 @@ function payslipHtml({ payslip, employee, company }) {
     ['PF Number', employee?.pf_number],
     ['LOP Days', payslip.lop_days || 0],
     ['Half-day Cuts', payslip.half_day_count || 0],
+    ['Short Days', payslip.short_days || 0],
     ['Month', payslip.period],
     ['Designation', employee?.designation],
     ['Bank A/C Number', employee?.bank_account_number],
@@ -240,6 +242,7 @@ function HRPayroll({ compact, sectionLabel }) {
   const [filterDept, setFilterDept] = useState('');
   const [filterCycle, setFilterCycle] = useState('');
   const [attConfig, setAttConfig] = useState(null);
+  const [attBooleans, setAttBooleans] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewing, setPreviewing] = useState(false);
   const [splitConfig, setSplitConfig] = useState(null);
@@ -251,7 +254,7 @@ function HRPayroll({ compact, sectionLabel }) {
     api.get('/payroll/structures').then((r) => { setStructures(r.data.structures); setComponents(r.data.components); }).catch(() => {});
     api.get('/payroll/payslips').then((r) => setPayslips(r.data.payslips)).catch(() => {});
     api.get('/payroll/split-config').then((r) => { setSplitConfig(r.data.config); setSplitDraft(r.data.config); }).catch(() => {});
-    api.get('/payroll/attendance-pay-config').then((r) => setAttConfig(r.data.config)).catch(() => {});
+    api.get('/payroll/attendance-pay-config').then((r) => { setAttConfig(r.data.config); setAttBooleans(r.data.booleans || []); }).catch(() => {});
   }
   useEffect(load, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
@@ -288,8 +291,9 @@ function HRPayroll({ compact, sectionLabel }) {
   async function toggleAttendancePolicy(name, value) {
     setError(''); setInfo('');
     try {
-      const r = await api.put('/payroll/attendance-pay-config', { ...attConfig, [name]: value ? 1 : 0 });
+      const r = await api.put('/payroll/attendance-pay-config', { ...attConfig, [name]: value });
       setAttConfig(r.data.config);
+      setAttBooleans(r.data.booleans || attBooleans);
       if (preview) loadPreview();
     } catch (err) { setError(err.response?.data?.error || 'Could not save that setting.'); }
   }
@@ -381,21 +385,42 @@ function HRPayroll({ compact, sectionLabel }) {
                 <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #EEF0F3' }}>
                   <div className="feature-meta" style={{ marginBottom: 4 }}>How attendance affects pay{user?.role === 'super_admin' ? '' : ' (Super Admin can change these)'}</div>
                   {Object.keys(attConfig).map((name) => (
-                    <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
-                      <input
-                        type="checkbox"
-                        checked={attConfig[name] === 1}
-                        disabled={user?.role !== 'super_admin'}
-                        onChange={(e) => toggleAttendancePolicy(name, e.target.checked)}
-                        style={{ width: 'auto' }}
-                      />
-                      {name}
-                    </label>
+                    attBooleans.includes(name) ? (
+                      <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
+                        <input
+                          type="checkbox"
+                          checked={attConfig[name] === 1}
+                          disabled={user?.role !== 'super_admin'}
+                          onChange={(e) => toggleAttendancePolicy(name, e.target.checked)}
+                          style={{ width: 'auto' }}
+                        />
+                        {name}
+                      </label>
+                    ) : (
+                      <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
+                        <input
+                          type="number" min="0" step="0.5"
+                          value={attConfig[name]}
+                          disabled={user?.role !== 'super_admin'}
+                          onChange={(e) => setAttConfig({ ...attConfig, [name]: e.target.value })}
+                          onBlur={(e) => toggleAttendancePolicy(name, e.target.value)}
+                          style={{ width: 70 }}
+                        />
+                        {name}
+                      </label>
+                    )
                   ))}
                   {attConfig['Unmarked working days are unpaid'] === 1 && (
                     <div className="feature-meta" style={{ marginTop: 4 }}>
                       A working day with no attendance record counts as Loss of Pay — so someone who
                       attended two days is paid for two days. Preview before running.
+                    </div>
+                  )}
+                  {attConfig['Pay by hours worked'] === 1 && (
+                    <div className="feature-meta" style={{ marginTop: 4 }}>
+                      A full day worked earns one full day's salary. Under {attConfig['Minimum hours for a full day']}h
+                      earns half a day, under {attConfig['Minimum hours for a half day']}h earns nothing for that day.
+                      A day with no check-out is never docked — the hours are unknown, not zero.
                     </div>
                   )}
                 </div>
@@ -429,6 +454,14 @@ function HRPayroll({ compact, sectionLabel }) {
                 </div>
               )}
 
+              {preview.employees.some((p) => p.missing_checkout_days > 0) && (
+                <div className="banner info">
+                  {preview.employees.reduce((t, p) => t + (p.missing_checkout_days || 0), 0)} day(s) have a check-in but
+                  no check-out, so the hours worked are unknown. Those days are paid in full and never docked — fix the
+                  records in Attendance if any should have been short days.
+                </div>
+              )}
+
               {preview.employees.some((p) => p.days_worked === 0) && (
                 <div className="banner error">
                   <strong>{preview.employees.filter((p) => p.days_worked === 0).length} employee(s) would be paid nothing</strong> — no attendance
@@ -443,7 +476,8 @@ function HRPayroll({ compact, sectionLabel }) {
                       <th>Code</th><th>Name</th><th>Department</th><th>Days Paid</th><th>Absent</th><th>Not Marked</th>
                       <th title="Days checked in after the shift's grace period">Late</th>
                       <th title="Late days beyond the free monthly allowance — each cut half a day's pay">½-day Cuts</th>
-                      <th>Gross</th><th>LOP Cut</th><th>Late Cut</th><th>Net</th><th></th>
+                      <th title="Days worked below a full day — paid pro-rata from hours">Short</th>
+                      <th>Gross</th><th>LOP Cut</th><th>Late Cut</th><th>Short Cut</th><th>Net</th><th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -457,9 +491,11 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td>{p.unmarked_days ? <span style={{ color: '#B3401E' }}>{p.unmarked_days}</span> : '—'}</td>
                         <td>{p.late_days || '—'}</td>
                         <td>{p.half_day_count ? <span style={{ color: '#B3401E' }}>{p.half_day_count}</span> : '—'}</td>
+                        <td>{p.short_days ? <span style={{ color: '#B3401E' }} title={p.zero_hour_days ? `${p.zero_hour_days} of these earned nothing` : undefined}>{p.short_days}</span> : '—'}</td>
                         <td>{inr(p.gross)}</td>
                         <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
                         <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>
+                        <td>{p.short_day_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.short_day_deduction)}</span> : inr(0)}</td>
                         <td><strong>{inr(p.net)}</strong></td>
                         <td>{p.already_generated && <span className="status-tag info">already run</span>}</td>
                       </tr>

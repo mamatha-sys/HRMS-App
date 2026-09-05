@@ -236,16 +236,19 @@ router.get('/split-config', (req, res) => {
 // only affect the NEXT payroll run — payslips already generated are a snapshot and never change.
 router.get('/attendance-pay-config', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ config: attendancePayConfig() });
+  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS });
 });
 
 router.put('/attendance-pay-config', (req, res) => {
   if (req.user.role !== 'super_admin') return res.status(403).json({ error: 'Only a Super Admin can change how attendance affects pay' });
   const body = req.body || {};
   Object.keys(ATTENDANCE_PAY_DEFAULTS).forEach((name) => {
-    if (body[name] !== undefined) setSplitPolicy(name, body[name] ? 1 : 0);
+    if (body[name] === undefined) return;
+    if (ATTENDANCE_PAY_BOOLEANS.includes(name)) { setSplitPolicy(name, body[name] ? 1 : 0); return; }
+    const n = parseFloat(body[name]);
+    if (Number.isFinite(n) && n >= 0) setSplitPolicy(name, n);
   });
-  res.json({ config: attendancePayConfig() });
+  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS });
 });
 
 // What the next run would pay, without writing anything. Running payroll for a month whose
@@ -264,18 +267,20 @@ router.get('/run-preview', (req, res) => {
     const already = !!db.prepare('SELECT id FROM payslips WHERE employee_id = ? AND period = ?').get(e.id, period);
     const b = breakdownFor(e.id);
     const { lateDays, flaggedDays, allowance, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
-    const { lopDays, absentDays, unmarkedDays, paidDays, futureDays, deduction: lopDeduction } = lopFor(e.id, month, b.gross);
+    const { lopDays, absentDays, unmarkedDays, futureDays, deduction: lopDeduction, shortDays, zeroHourDays, missingCheckoutDays, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
     const sandwichDays = sandwichWeekendDays(e.id, month);
     const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
     return {
       future_days: futureDays,
       late_days: lateDays, half_day_count: flaggedDays, free_late_allowance: allowance,
+      short_days: shortDays, zero_hour_days: zeroHourDays, missing_checkout_days: missingCheckoutDays,
+      short_day_deduction: shortDayDeduction,
       employee_id: e.id, name: e.name, employee_code: e.employee_code, department: e.department,
       already_generated: already,
-      gross: b.gross, days_worked: Math.max(0, paidDays - sandwichDays),
+      gross: b.gross, days_worked: Math.max(0, effectiveDays - sandwichDays),
       total_days: daysInMonthFor(month), absent_days: absentDays, unmarked_days: unmarkedDays, lop_days: lopDays,
       lop_deduction: lopDeduction, late_deduction: lateDeduction, sandwich_lop_deduction: sandwichDeduction,
-      net: Math.max(0, b.net - lateDeduction - lopDeduction - sandwichDeduction)
+      net: Math.max(0, b.net - lateDeduction - lopDeduction - sandwichDeduction - shortDayDeduction)
     };
   });
   res.json({ period, month, config: attendancePayConfig(), employees: rows });
@@ -403,8 +408,23 @@ const ATTENDANCE_PAY_DEFAULTS = {
   'Unmarked working days are unpaid': 1,
   // Saturday/Sunday are never docked for being unmarked — nobody marks attendance on a weekly
   // off. The Sandwich Rule below is the only thing that makes a weekend unpaid.
-  'Weekends are paid': 1
+  'Weekends are paid': 1,
+  // A day's pay follows the hours actually worked, not merely the existence of a check-in. Without
+  // this, ANY check-in earns a full day: real data has a day checked in and out at 12:02 (zero
+  // hours worked) drawing a full day's salary.
+  //   worked >= full-day hours  -> one full day's salary
+  //   worked >= half-day hours  -> half a day
+  //   worked <  half-day hours  -> nothing for that day
+  // A day with no check-out is NEVER docked — the hours are unknown, not zero, and forgetting to
+  // punch out must not cost someone a day's pay. Those days are reported separately so HR can fix
+  // the record.
+  'Pay by hours worked': 1,
+  'Minimum hours for a full day': 8,
+  'Minimum hours for a half day': 4
 };
+
+// Which of the above are on/off switches rather than numbers — drives the settings UI.
+const ATTENDANCE_PAY_BOOLEANS = ['Unmarked working days are unpaid', 'Weekends are paid', 'Pay by hours worked'];
 
 function getPolicyNumber(name, fallback) {
   const row = db.prepare('SELECT value FROM policies WHERE name = ?').get(name);
@@ -445,16 +465,40 @@ function attendanceDaysFor(employeeId, month) {
     SELECT d AS date, CAST(strftime('%w', d) AS INTEGER) AS dow FROM dates
   `).all(month, month);
 
-  const statusBy = new Map(
-    db.prepare('SELECT date, status FROM attendance WHERE employee_id = ? AND date LIKE ?')
-      .all(employeeId, month + '%').map((r) => [r.date, r.status])
+  const payByHours = cfg['Pay by hours worked'] === 1;
+  const fullDayHours = cfg['Minimum hours for a full day'];
+  const halfDayHours = cfg['Minimum hours for a half day'];
+
+  const rowBy = new Map(
+    db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?')
+      .all(employeeId, month + '%').map((r) => [r.date, r])
   );
 
   let paidDays = 0, absentDays = 0, unmarkedDays = 0, preJoiningDays = 0, futureDays = 0;
+  // Fractions of a day lost to short attendance, and the days that caused them. Kept apart from
+  // LOP: "you worked half a day" is a different fact from "you were absent", and a payslip that
+  // merges them cannot be checked.
+  let shortDayUnits = 0, shortDays = 0, zeroHourDays = 0, missingCheckoutDays = 0;
+
   days.forEach(({ date, dow }) => {
     if (joined && date < joined) { preJoiningDays++; return; }
-    const status = statusBy.get(date);
-    if (status === 'Present' || status === 'Leave') { paidDays++; return; }
+    const row = rowBy.get(date);
+    const status = row?.status;
+    if (status === 'Present' || status === 'Leave') {
+      paidDays++;
+      // Approved leave is paid in full and has no hours to judge.
+      if (status !== 'Present' || !payByHours) return;
+      if (row.working_hours == null) { missingCheckoutDays++; return; }
+      if (row.working_hours >= fullDayHours) return;
+      const earned = row.working_hours >= halfDayHours ? 0.5 : 0;
+      if (earned === 0) zeroHourDays++;
+      shortDays++;
+      // A late arrival already cost half a day on this same date (half_day_flag). Charge only the
+      // difference, so the two rules can never take more than one full day between them.
+      const lateCutAlreadyApplied = row.half_day_flag ? 0.5 : 0;
+      shortDayUnits += Math.max(0, (1 - earned) - lateCutAlreadyApplied);
+      return;
+    }
     if (status === 'Absent') { absentDays++; return; }
     if (date > today) { futureDays++; paidDays++; return; }
     const isWeekend = dow === 0 || dow === 6;
@@ -463,7 +507,10 @@ function attendanceDaysFor(employeeId, month) {
     paidDays++;
   });
 
-  return { totalDays: days.length, paidDays, absentDays, unmarkedDays, preJoiningDays, futureDays };
+  return {
+    totalDays: days.length, paidDays, absentDays, unmarkedDays, preJoiningDays, futureDays,
+    shortDayUnits, shortDays, zeroHourDays, missingCheckoutDays
+  };
 }
 
 // Loss of Pay for the month: explicitly-Absent days plus (by policy) working days with no
@@ -478,7 +525,16 @@ function lopFor(employeeId, month, gross) {
     unmarkedDays: d.unmarkedDays,
     paidDays: d.paidDays,
     futureDays: d.futureDays,
-    deduction: lopDays * perDayRate
+    deduction: lopDays * perDayRate,
+    // Short-day shortfall is a separate line from LOP on purpose: "you worked half a day" and
+    // "you were absent" are different facts, and a payslip that merges them cannot be checked.
+    shortDays: d.shortDays,
+    zeroHourDays: d.zeroHourDays,
+    missingCheckoutDays: d.missingCheckoutDays,
+    shortDayUnits: d.shortDayUnits,
+    shortDayDeduction: Math.round(d.shortDayUnits * perDayRate),
+    // Days actually earned, carrying the fraction: 22.5, not 23.
+    effectiveDays: d.paidDays - d.shortDayUnits
   };
 }
 
@@ -538,20 +594,20 @@ router.post('/run', (req, res) => {
       const hra = hraLine?.amount || 0;
       const allowances = b.earnings.filter((l) => l.key !== 'basic' && l.key !== 'hra').reduce((t, l) => t + l.amount, 0);
       const { lateDays, flaggedDays, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
-      const { lopDays, unmarkedDays, paidDays, deduction: lopDeduction } = lopFor(e.id, month, b.gross);
+      const { lopDays, unmarkedDays, deduction: lopDeduction, shortDays, missingCheckoutDays, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
       const sandwichDays = sandwichWeekendDays(e.id, month);
       const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
       // Days actually paid for, straight from the attendance classification, minus any weekend
       // the Sandwich Rule separately made unpaid — no longer "every day in the month that nobody
       // marked Absent", which was how a two-day month could still read as a full one.
-      const daysWorked = Math.max(0, paidDays - sandwichDays);
+      const daysWorked = Math.max(0, effectiveDays - sandwichDays);
       // Deductions can exceed gross once a month is almost entirely unattended. Net is floored at
       // zero rather than going negative — an employer withholds pay, it does not invoice for it.
-      const net = Math.max(0, b.net - lateDeduction - lopDeduction - sandwichDeduction);
+      const net = Math.max(0, b.net - lateDeduction - lopDeduction - sandwichDeduction - shortDayDeduction);
       db.prepare(`
-        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, late_days, half_day_count, lop_days, unmarked_lop_days, lop_deduction, sandwich_lop_days, sandwich_lop_deduction, days_worked, net, lines_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lateDays, flaggedDays, lopDays, unmarkedDays, lopDeduction, sandwichDays, sandwichDeduction, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
+        INSERT INTO payslips (employee_id, period, month, basic, hra, allowances, deductions, late_deduction, late_days, half_day_count, lop_days, unmarked_lop_days, lop_deduction, sandwich_lop_days, sandwich_lop_deduction, short_days, short_day_deduction, missing_checkout_days, days_worked, net, lines_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(e.id, period, month, basic, hra, allowances, b.totalDeductions, lateDeduction, lateDays, flaggedDays, lopDays, unmarkedDays, lopDeduction, sandwichDays, sandwichDeduction, shortDays, shortDayDeduction, missingCheckoutDays, daysWorked, net, JSON.stringify({ earnings: b.earnings, deductions: b.deductions }));
       generated++;
     });
     db.prepare("INSERT INTO payroll_runs (period, status) VALUES (?, 'Completed')").run(period);
