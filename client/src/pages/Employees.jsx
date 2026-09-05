@@ -40,7 +40,12 @@ const EMPTY_FORM = {
   address_type: '', address_line1: '', address_line2: '',
   address_city: '', address_district: '', address_state: '', address_country: '', address_pincode: '',
   department: '', branch: '', team_id: '', designation: '', date_of_joining: '', reporting_manager: '', status: 'Active',
-  shift: 'General (9:00 AM – 6:00 PM)', employment_type: '', ctc: '',
+  shift: 'General (9:00 AM – 6:00 PM)', employment_type: '',
+  // No CTC input on either form — pay is set in Payroll > Configure salary structures, which is
+  // the only place that actually splits it into salary components. The key stays here because
+  // startEdit copies every EMPTY_FORM key off the employee and the whole form is PUT back:
+  // dropping it would send no ctc and wipe the stored figure on every edit.
+  ctc: '',
   bank_name: '', bank_account_number: '', ifsc_code: '',
   pan_number: '', aadhaar_number: '', uan_number: '', pf_number: '', esi_number: '',
   education: '', experience: '', skills: '', documents: [], custom_fields: {}
@@ -879,7 +884,6 @@ export default function Employees() {
                     </select>
                   </div>
                   {field('email', 'Email (used to log in)', 'email')}
-                  {field('ctc', 'CTC (annual, ₹)')}
                   <div>
                     <label className="field-label">Password <span className="note">(for their login)</span></label>
                     <div className="row" style={{ gap: 6 }}>
