@@ -51,17 +51,29 @@ function payslipHtml({ payslip, employee, company }) {
   const earnings = payslip.earnings || [];
   const deductionLines = [...(payslip.deductions || [])];
   if (payslip.late_deduction) deductionLines.push({ label: 'Late Arrival Half-day Cut', amount: payslip.late_deduction });
-  if (payslip.lop_deduction) deductionLines.push({ label: `Loss of Pay (${payslip.lop_days} day${payslip.lop_days === 1 ? '' : 's'})`, amount: payslip.lop_deduction });
+  if (payslip.lop_deduction) {
+    // Split the cause out on the payslip itself — "8 days LOP" reads as a payroll error unless it
+    // says that 6 of them were days with no attendance record at all.
+    const unmarked = payslip.unmarked_lop_days || 0;
+    const marked = Math.max(0, (payslip.lop_days || 0) - unmarked);
+    const causes = [marked && `${marked} absent`, unmarked && `${unmarked} not marked present`].filter(Boolean).join(', ');
+    deductionLines.push({
+      label: `Loss of Pay (${payslip.lop_days} day${payslip.lop_days === 1 ? '' : 's'}${causes ? ` — ${causes}` : ''})`,
+      amount: payslip.lop_deduction
+    });
+  }
   if (payslip.sandwich_lop_deduction) deductionLines.push({ label: `Weekend Loss of Pay — Sandwich Rule (${payslip.sandwich_lop_days} day${payslip.sandwich_lop_days === 1 ? '' : 's'})`, amount: payslip.sandwich_lop_deduction });
   const grossSalary = earnings.reduce((t, l) => t + l.amount, 0);
   const totalDeductions = deductionLines.reduce((t, l) => t + l.amount, 0);
   const rowCount = Math.max(earnings.length, deductionLines.length, 1);
+  // payslip.month is YYYY-MM; day 0 of the next month is the last day of this one.
+  const daysInMonth = payslip.month ? new Date(Number(payslip.month.slice(0, 4)), Number(payslip.month.slice(5, 7)), 0).getDate() : null;
 
   const infoLeft = [
     ['Employee Code', employee?.employee_code],
     ['Employee Name', employee?.name],
     ['ESI Number', employee?.esi_number],
-    ['Days Worked', payslip.days_worked ?? '—'],
+    ['Days Paid', payslip.days_worked != null ? `${payslip.days_worked}${daysInMonth ? ` of ${daysInMonth}` : ''}` : '—'],
     ['DOJ', employee?.date_of_joining],
     ['Department', employee?.department],
     ['Location', employee?.branch],
@@ -216,6 +228,9 @@ function HRPayroll({ compact, sectionLabel }) {
   const [departments, setDepartments] = useState([]);
   const [filterDept, setFilterDept] = useState('');
   const [filterCycle, setFilterCycle] = useState('');
+  const [attConfig, setAttConfig] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [previewing, setPreviewing] = useState(false);
   const [splitConfig, setSplitConfig] = useState(null);
   const [showSplitConfig, setShowSplitConfig] = useState(false);
   const [splitDraft, setSplitDraft] = useState({});
@@ -225,6 +240,7 @@ function HRPayroll({ compact, sectionLabel }) {
     api.get('/payroll/structures').then((r) => { setStructures(r.data.structures); setComponents(r.data.components); }).catch(() => {});
     api.get('/payroll/payslips').then((r) => setPayslips(r.data.payslips)).catch(() => {});
     api.get('/payroll/split-config').then((r) => { setSplitConfig(r.data.config); setSplitDraft(r.data.config); }).catch(() => {});
+    api.get('/payroll/attendance-pay-config').then((r) => setAttConfig(r.data.config)).catch(() => {});
   }
   useEffect(load, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
@@ -252,9 +268,23 @@ function HRPayroll({ compact, sectionLabel }) {
     try { await api.put(`/payroll/structures/${employeeId}/pay-type`, { pay_type: payType }); setEditing(null); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not update pay type.'); }
   }
+  async function loadPreview() {
+    setError(''); setInfo(''); setPreviewing(true);
+    try { const r = await api.get('/payroll/run-preview', { params: { month } }); setPreview(r.data); }
+    catch (err) { setError(err.response?.data?.error || 'Could not preview this run.'); }
+    finally { setPreviewing(false); }
+  }
+  async function toggleAttendancePolicy(name, value) {
+    setError(''); setInfo('');
+    try {
+      const r = await api.put('/payroll/attendance-pay-config', { ...attConfig, [name]: value ? 1 : 0 });
+      setAttConfig(r.data.config);
+      if (preview) loadPreview();
+    } catch (err) { setError(err.response?.data?.error || 'Could not save that setting.'); }
+  }
   async function runPayroll() {
     setError(''); setInfo('');
-    try { const r = await api.post('/payroll/run', { month }); setInfo(`Payroll for ${r.data.period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
+    try { const r = await api.post('/payroll/run', { month }); setPreview(null); setInfo(`Payroll for ${r.data.period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Run failed.'); }
   }
   async function addComponent(e) {
@@ -327,15 +357,102 @@ function HRPayroll({ compact, sectionLabel }) {
               <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Quick Actions</div>
               <div className="row" style={{ flexWrap: 'wrap' }}>
                 <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={{ flex: '1 1 140px' }} />
+                <button onClick={loadPreview} disabled={previewing}>{previewing ? 'Checking…' : 'Preview'}</button>
                 <button className="primary" onClick={runPayroll}>Run Payroll</button>
               </div>
-              <div className="feature-meta" style={{ marginTop: 4 }}>Late arrivals beyond the free monthly allowance (see Configuration Policies) are auto-deducted as a half-day cut.</div>
+              <div className="feature-meta" style={{ marginTop: 4 }}>
+                Pay follows attendance: days marked Present or on approved Leave are paid, and days
+                marked Absent are deducted. Late arrivals beyond the free monthly allowance (see
+                Configuration Policies) are auto-deducted as a half-day cut.
+              </div>
+
+              {attConfig && (
+                <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #EEF0F3' }}>
+                  <div className="feature-meta" style={{ marginBottom: 4 }}>How attendance affects pay{user?.role === 'super_admin' ? '' : ' (Super Admin can change these)'}</div>
+                  {Object.keys(attConfig).map((name) => (
+                    <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
+                      <input
+                        type="checkbox"
+                        checked={attConfig[name] === 1}
+                        disabled={user?.role !== 'super_admin'}
+                        onChange={(e) => toggleAttendancePolicy(name, e.target.checked)}
+                        style={{ width: 'auto' }}
+                      />
+                      {name}
+                    </label>
+                  ))}
+                  {attConfig['Unmarked working days are unpaid'] === 1 && (
+                    <div className="feature-meta" style={{ marginTop: 4 }}>
+                      A working day with no attendance record counts as Loss of Pay — so someone who
+                      attended two days is paid for two days. Preview before running.
+                    </div>
+                  )}
+                </div>
+              )}
               <button style={{ width: '100%', marginTop: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }} onClick={() => setShowTable((v) => !v)}>
                 {showTable ? '− Hide salary structures table' : '+ Configure salary structures'}
               </button>
               {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', marginTop: 6, textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
             </div>
           </div>
+
+          {preview && (
+            <div className="card">
+              <div className="row" style={{ alignItems: 'center', marginBottom: 8 }}>
+                <div>
+                  <div className="feature-name">Preview — {preview.period}</div>
+                  <div className="feature-meta">
+                    Nothing has been saved yet. This is what Run Payroll would generate, using the attendance
+                    on record for this month. Anyone already generated for this period is skipped by the run.
+                  </div>
+                </div>
+                <div style={{ flex: 1 }} />
+                <button onClick={() => setPreview(null)}>Close</button>
+              </div>
+
+              {preview.employees.some((p) => p.future_days > 0) && (
+                <div className="banner info">
+                  This month is not over yet — {Math.max(...preview.employees.map((p) => p.future_days || 0))} day(s)
+                  have not happened, and are counted as paid rather than deducted. Run payroll after the month ends
+                  for a final figure.
+                </div>
+              )}
+
+              {preview.employees.some((p) => p.days_worked === 0) && (
+                <div className="banner error">
+                  <strong>{preview.employees.filter((p) => p.days_worked === 0).length} employee(s) would be paid nothing</strong> — no attendance
+                  is recorded for them this month. Check that attendance was actually marked before running payroll.
+                </div>
+              )}
+
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Code</th><th>Name</th><th>Department</th><th>Days Paid</th><th>Absent</th><th>Not Marked</th>
+                      <th>Gross</th><th>LOP Cut</th><th>Net</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.employees.map((p) => (
+                      <tr key={p.employee_id}>
+                        <td>{p.employee_code}</td>
+                        <td>{p.name}</td>
+                        <td>{p.department}</td>
+                        <td><strong>{p.days_worked}</strong> <span className="feature-meta">/ {p.total_days}</span></td>
+                        <td>{p.absent_days || '—'}</td>
+                        <td>{p.unmarked_days ? <span style={{ color: '#B3401E' }}>{p.unmarked_days}</span> : '—'}</td>
+                        <td>{inr(p.gross)}</td>
+                        <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
+                        <td><strong>{inr(p.net)}</strong></td>
+                        <td>{p.already_generated && <span className="status-tag info">already run</span>}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
 
           {showTable && (
             <div className="card">

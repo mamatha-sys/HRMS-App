@@ -2001,6 +2001,9 @@ function migrateTeamsAndScopes() {
   // exactly why a weekend got cut, distinct from their own actual absent days.
   if (!payCols2.includes('sandwich_lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN sandwich_lop_days INTEGER NOT NULL DEFAULT 0');
   if (!payCols2.includes('sandwich_lop_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN sandwich_lop_deduction INTEGER NOT NULL DEFAULT 0');
+  // Splits lop_days into its two causes so a payslip can say WHY a day was unpaid: an explicit
+  // Absent mark, or a working day with no attendance record at all.
+  if (!payCols2.includes('unmarked_lop_days')) db.exec('ALTER TABLE payslips ADD COLUMN unmarked_lop_days INTEGER NOT NULL DEFAULT 0');
 
   // Super Admin can give recognition without being linked to an employee record (a true
   // system-administrator login often isn't tied to one) — from_employee_id has to become
