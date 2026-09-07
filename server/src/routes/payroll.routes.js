@@ -271,7 +271,7 @@ router.get('/run-preview', (req, res) => {
     const already = !!db.prepare('SELECT id FROM payslips WHERE employee_id = ? AND period = ?').get(e.id, period);
     const b = breakdownFor(e.id);
     const { lateDays, flaggedDays, allowance, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
-    const { lopDays, absentDays, unmarkedDays, futureDays, deduction: lopDeduction, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
+    const { lopDays, absentDays, unmarkedDays, futureDays, deduction: lopDeduction, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts, paidLeaveDays, unpaidLeaveDays, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
     const sandwichDays = sandwichWeekendDays(e.id, month);
     const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
     return {
@@ -279,6 +279,7 @@ router.get('/run-preview', (req, res) => {
       late_days: lateDays, half_day_count: flaggedDays, free_late_allowance: allowance,
       short_days: shortDays, zero_hour_days: zeroHourDays, missing_checkout_days: missingCheckoutDays,
       excused_early_logouts: excusedEarlyLogouts,
+      paid_leave_days: paidLeaveDays, unpaid_leave_days: unpaidLeaveDays,
       short_day_deduction: shortDayDeduction,
       employee_id: e.id, name: e.name, employee_code: e.employee_code, department: e.department,
       already_generated: already,
@@ -431,7 +432,11 @@ const ATTENDANCE_PAY_DEFAULTS = {
   'Half day is measured by session': 1,
   'Session split time': '13:30',
   'Minimum hours for a full day': 8,
-  'Minimum hours for a half day': 4
+  'Minimum hours for a half day': 4,
+  // Company rule: one leave a month is paid (the monthly sick leave). Further approved leave in
+  // the same month is unpaid unless the leave type itself is a paid type being counted here.
+  // A leave type flagged `unpaid` in leave_types (e.g. Loss of Pay) is never paid regardless.
+  'Paid leave days per month': 1
 };
 
 
@@ -493,6 +498,26 @@ function attendanceDaysFor(employeeId, month) {
   const fullDayHours = cfg['Minimum hours for a full day'];
   const halfDayHours = cfg['Minimum hours for a half day'];
 
+  // Approved leave lives in the `leaves` table and never writes an attendance row, so without
+  // this an approved leave day looks exactly like a day nobody marked — and would be docked as
+  // Loss of Pay. Read the ranges directly and expand them to dates.
+  const monthEnd = db.prepare("SELECT date(? || '-01', '+1 month', '-1 day') AS d").get(month).d;
+  const leaveRanges = db.prepare(`
+    SELECT l.from_date, l.to_date, COALESCE(lt.name, l.type) AS type_name, COALESCE(lt.unpaid, 0) AS unpaid
+    FROM leaves l LEFT JOIN leave_types lt ON lt.id = l.leave_type_id
+    WHERE l.employee_id = ? AND l.status = 'Approved' AND l.cancelled = 0
+      AND l.from_date <= ? AND l.to_date >= ?
+  `).all(employeeId, monthEnd, `${month}-01`);
+  const leaveByDate = new Map();
+  leaveRanges.forEach((r) => {
+    db.prepare(`
+      WITH RECURSIVE d(x) AS (SELECT ? UNION ALL SELECT date(x, '+1 day') FROM d WHERE x < ?)
+      SELECT x AS date FROM d
+    `).all(r.from_date, r.to_date).forEach(({ date }) => {
+      if (date.slice(0, 7) === month) leaveByDate.set(date, { typeName: r.type_name, unpaid: !!r.unpaid });
+    });
+  });
+
   const rowBy = new Map(
     db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag, half_day_manual, early_logout_excused FROM attendance WHERE employee_id = ? AND date LIKE ?')
       .all(employeeId, month + '%').map((r) => [r.date, r])
@@ -503,15 +528,32 @@ function attendanceDaysFor(employeeId, month) {
   // LOP: "you worked half a day" is a different fact from "you were absent", and a payslip that
   // merges them cannot be checked.
   let shortDayUnits = 0, shortDays = 0, zeroHourDays = 0, missingCheckoutDays = 0, excusedEarlyLogouts = 0;
+  const paidLeaveAllowance = cfg['Paid leave days per month'];
+  let paidLeaveDays = 0, unpaidLeaveDays = 0;
 
   days.forEach(({ date, dow }) => {
     if (joined && date < joined) { preJoiningDays++; return; }
     const row = rowBy.get(date);
     const status = row?.status;
-    if (status === 'Present' || status === 'Leave') {
+
+    // Leave, from either source: an approved request in the `leaves` table, or an attendance row
+    // marked Leave. Only the month's allowance is paid — the first N leave days in date order,
+    // which is the monthly sick leave. Anything beyond it, and any type flagged unpaid in
+    // leave_types (Loss of Pay), is docked like an absence but reported separately so a payslip
+    // can say "leave beyond your monthly allowance" rather than just "absent".
+    const leave = leaveByDate.get(date) || (status === 'Leave' ? { typeName: 'Leave', unpaid: false } : null);
+    if (leave) {
+      if (!leave.unpaid && paidLeaveDays < paidLeaveAllowance) {
+        paidLeaveDays++;
+        paidDays++;
+      } else {
+        unpaidLeaveDays++;
+      }
+      return;
+    }
+
+    if (status === 'Present') {
       paidDays++;
-      // Approved leave is paid in full and has no hours to judge.
-      if (status !== 'Present') return;
       // An HR-declared half day is a judgement about the day, so it stands whatever the clock
       // says — including when hours were never recorded — and applies even with hours-based pay
       // switched off, because someone marked it deliberately.
@@ -570,7 +612,8 @@ function attendanceDaysFor(employeeId, month) {
 
   return {
     totalDays: days.length, paidDays, absentDays, unmarkedDays, preJoiningDays, futureDays,
-    shortDayUnits, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts
+    shortDayUnits, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts,
+    paidLeaveDays, unpaidLeaveDays
   };
 }
 
@@ -578,7 +621,7 @@ function attendanceDaysFor(employeeId, month) {
 // attendance record at all. The per-day rate stays gross/calendar-days, unchanged.
 function lopFor(employeeId, month, gross) {
   const d = attendanceDaysFor(employeeId, month);
-  const lopDays = d.absentDays + d.unmarkedDays;
+  const lopDays = d.absentDays + d.unmarkedDays + d.unpaidLeaveDays;
   const perDayRate = Math.round(gross / daysInMonthFor(month));
   return {
     lopDays,
@@ -593,6 +636,8 @@ function lopFor(employeeId, month, gross) {
     zeroHourDays: d.zeroHourDays,
     missingCheckoutDays: d.missingCheckoutDays,
     excusedEarlyLogouts: d.excusedEarlyLogouts,
+    paidLeaveDays: d.paidLeaveDays,
+    unpaidLeaveDays: d.unpaidLeaveDays,
     shortDayUnits: d.shortDayUnits,
     shortDayDeduction: Math.round(d.shortDayUnits * perDayRate),
     // Days actually earned, carrying the fraction: 22.5, not 23.

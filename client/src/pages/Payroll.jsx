@@ -432,6 +432,11 @@ function HRPayroll({ compact, sectionLabel }) {
                       attended two days is paid for two days. Preview before running.
                     </div>
                   )}
+                  <div className="feature-meta" style={{ marginTop: 4 }}>
+                    {attConfig['Paid leave days per month']} approved leave day(s) a month are paid — the monthly
+                    sick leave. Further approved leave that month is deducted, as is any leave type marked unpaid
+                    in Leave Types.
+                  </div>
                   {attConfig['Half day is measured by session'] === 1 && (
                     <div className="feature-meta" style={{ marginTop: 4 }}>
                       The day is two sessions split at {attConfig['Session split time']}, each worth half a day.
@@ -501,6 +506,8 @@ function HRPayroll({ compact, sectionLabel }) {
                       <th title="Late days beyond the free monthly allowance — each cut half a day's pay">½-day Cuts</th>
                       <th title="Days worked below a full day — paid pro-rata from hours">Short</th>
                       <th title="On-time days that finished early but are excused by the monthly early-logout allowance — paid in full">Early Out (free)</th>
+                      <th title="Approved leave paid under the monthly allowance">Leave (paid)</th>
+                      <th title="Approved leave beyond the monthly allowance, or an unpaid leave type — deducted">Leave (unpaid)</th>
                       <th>Gross</th><th>LOP Cut</th><th>Late Cut</th><th>Short Cut</th><th>Net</th><th></th>
                     </tr>
                   </thead>
@@ -517,6 +524,8 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td>{p.half_day_count ? <span style={{ color: '#B3401E' }}>{p.half_day_count}</span> : '—'}</td>
                         <td>{p.short_days ? <span style={{ color: '#B3401E' }} title={p.zero_hour_days ? `${p.zero_hour_days} of these earned nothing` : undefined}>{p.short_days}</span> : '—'}</td>
                         <td>{p.excused_early_logouts ? <span style={{ color: '#1E8E5A' }} title="Excused — paid in full">{p.excused_early_logouts}</span> : '—'}</td>
+                        <td>{p.paid_leave_days ? <span style={{ color: '#1E8E5A' }}>{p.paid_leave_days}</span> : '—'}</td>
+                        <td>{p.unpaid_leave_days ? <span style={{ color: '#B3401E' }}>{p.unpaid_leave_days}</span> : '—'}</td>
                         <td>{inr(p.gross)}</td>
                         <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
                         <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>
