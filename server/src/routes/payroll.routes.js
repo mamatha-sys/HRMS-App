@@ -729,8 +729,10 @@ router.get('/payslips', (req, res) => {
     if (!me) return res.json({ payslips: [] });
     return res.json({ payslips: db.prepare('SELECT * FROM payslips WHERE employee_id = ? ORDER BY created_at DESC').all(me.id) });
   }
+  // department comes along so the payslips table can be filtered by it, the same three ways the
+  // preview can — the payslip rows themselves carry no department of their own.
   const rows = db.prepare(`
-    SELECT p.*, e.name AS employee_name, e.employee_code
+    SELECT p.*, e.name AS employee_name, e.employee_code, e.department
     FROM payslips p JOIN employees e ON e.id = p.employee_id
     ORDER BY p.created_at DESC, e.id
   `).all();

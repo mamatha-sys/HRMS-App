@@ -314,7 +314,21 @@ function HRPayroll({ compact, sectionLabel }) {
     try { await api.put(`/payroll/components/${c.id}`, { active: !c.active }); load(); } catch (err) { setError(err.response?.data?.error || 'Could not update.'); }
   }
   const filteredStructures = structures.filter((s) => !filterDept || s.department === filterDept);
-  const filteredPayslips = payslips.filter((p) => !filterCycle || p.period === filterCycle);
+  // Employee ID / Name / Department, applied to what is DISPLAYED — the Preview table and the
+  // generated-payslips table each get their own set. One shared matcher so "filtered" cannot come
+  // to mean two different things in two tables on the same page.
+  const [previewFilters, setPreviewFilters] = useState({ code: '', name: '', department: '' });
+  const [slipFilters, setSlipFilters] = useState({ code: '', name: '', department: '' });
+  const matches = (f, code, name, department) =>
+    (!f.code || (code || '').toLowerCase().includes(f.code.trim().toLowerCase())) &&
+    (!f.name || (name || '').toLowerCase().includes(f.name.trim().toLowerCase())) &&
+    (!f.department || department === f.department);
+  const anyFilter = (f) => !!(f.code || f.name || f.department);
+
+  const filteredPayslips = payslips
+    .filter((p) => !filterCycle || p.period === filterCycle)
+    .filter((p) => matches(slipFilters, p.employee_code, p.employee_name, p.department));
+  const previewRows = (preview?.employees || []).filter((p) => matches(previewFilters, p.employee_code, p.name, p.department));
   const cycleOptions = [...new Set(payslips.map((p) => p.period))];
 
   async function exportCsv() {
@@ -474,29 +488,53 @@ function HRPayroll({ compact, sectionLabel }) {
                 <button onClick={() => setPreview(null)}>Close</button>
               </div>
 
-              {preview.employees.some((p) => p.future_days > 0) && (
+              <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                <input placeholder="Employee ID…" value={previewFilters.code}
+                  onChange={(e) => setPreviewFilters({ ...previewFilters, code: e.target.value })} style={{ flex: '1 1 120px', maxWidth: 180 }} />
+                <input placeholder="Employee name…" value={previewFilters.name}
+                  onChange={(e) => setPreviewFilters({ ...previewFilters, name: e.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }} />
+                <select value={previewFilters.department}
+                  onChange={(e) => setPreviewFilters({ ...previewFilters, department: e.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }}>
+                  <option value="">All Departments</option>
+                  {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+                </select>
+                {anyFilter(previewFilters) && <button onClick={() => setPreviewFilters({ code: '', name: '', department: '' })}>Clear</button>}
+                <div className="spacer" />
+                <span className="feature-meta">{previewRows.length} of {preview.employees.length}</span>
+              </div>
+
+              {previewRows.some((p) => p.future_days > 0) && (
                 <div className="banner info">
-                  This month is not over yet — {Math.max(...preview.employees.map((p) => p.future_days || 0))} day(s)
+                  This month is not over yet — {Math.max(0, ...previewRows.map((p) => p.future_days || 0))} day(s)
                   have not happened, and are counted as paid rather than deducted. Run payroll after the month ends
                   for a final figure.
                 </div>
               )}
 
-              {preview.employees.some((p) => p.missing_checkout_days > 0) && (
+              {previewRows.some((p) => p.missing_checkout_days > 0) && (
                 <div className="banner info">
-                  {preview.employees.reduce((t, p) => t + (p.missing_checkout_days || 0), 0)} day(s) have a check-in but
+                  {previewRows.reduce((t, p) => t + (p.missing_checkout_days || 0), 0)} day(s) have a check-in but
                   no check-out, so the hours worked are unknown. Those days are paid in full and never docked — fix the
                   records in Attendance if any should have been short days.
                 </div>
               )}
 
-              {preview.employees.some((p) => p.days_worked === 0) && (
+              {previewRows.some((p) => p.days_worked === 0) && (
                 <div className="banner error">
-                  <strong>{preview.employees.filter((p) => p.days_worked === 0).length} employee(s) would be paid nothing</strong> — no attendance
+                  <strong>{previewRows.filter((p) => p.days_worked === 0).length} employee(s) would be paid nothing</strong> — no attendance
                   is recorded for them this month. Check that attendance was actually marked before running payroll.
                 </div>
               )}
 
+              {previewRows.length === 0 && (
+                <div className="empty">
+                  {preview.employees.length === 0
+                    ? 'No active employees to generate payroll for.'
+                    : 'No employees match these filters — Run Payroll still covers everyone.'}
+                </div>
+              )}
+
+              {previewRows.length > 0 && (
               <div className="table-scroll">
                 <table>
                   <thead>
@@ -512,7 +550,7 @@ function HRPayroll({ compact, sectionLabel }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {preview.employees.map((p) => (
+                    {previewRows.map((p) => (
                       <tr key={p.employee_id}>
                         <td>{p.employee_code}</td>
                         <td>{p.name}</td>
@@ -537,6 +575,7 @@ function HRPayroll({ compact, sectionLabel }) {
                   </tbody>
                 </table>
               </div>
+              )}
             </div>
           )}
 
@@ -655,14 +694,28 @@ function HRPayroll({ compact, sectionLabel }) {
 
           <div className="card">
             <div className="feature-name" style={{ marginBottom: 8 }}>Generated payslips</div>
+            <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+              <input placeholder="Employee ID…" value={slipFilters.code}
+                onChange={(e) => setSlipFilters({ ...slipFilters, code: e.target.value })} style={{ flex: '1 1 120px', maxWidth: 180 }} />
+              <input placeholder="Employee name…" value={slipFilters.name}
+                onChange={(e) => setSlipFilters({ ...slipFilters, name: e.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }} />
+              <select value={slipFilters.department}
+                onChange={(e) => setSlipFilters({ ...slipFilters, department: e.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }}>
+                <option value="">All Departments</option>
+                {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+              </select>
+              {anyFilter(slipFilters) && <button onClick={() => setSlipFilters({ code: '', name: '', department: '' })}>Clear</button>}
+              <div className="spacer" />
+              <span className="feature-meta">{filteredPayslips.length} of {payslips.length}</span>
+            </div>
             {payslips.length === 0 && <div className="empty">No payslips yet — run payroll for a period.</div>}
             {payslips.length > 0 && filteredPayslips.length === 0 && <div className="empty">No payslips match this filter.</div>}
             {filteredPayslips.length > 0 && (
               <table>
-                <thead><tr><th>Period</th><th>Code</th><th>Name</th><th>Late Cut</th><th>LOP</th><th>Net</th><th></th></tr></thead>
+                <thead><tr><th>Period</th><th>Code</th><th>Name</th><th>Department</th><th>Late Cut</th><th>LOP</th><th>Net</th><th></th></tr></thead>
                 <tbody>{filteredPayslips.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.period}</td><td>{p.employee_code}</td><td>{p.employee_name}</td>
+                    <td>{p.period}</td><td>{p.employee_code}</td><td>{p.employee_name}</td><td>{p.department || '—'}</td>
                     <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>
                     <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
                     <td><strong>{inr(p.net)}</strong></td>
