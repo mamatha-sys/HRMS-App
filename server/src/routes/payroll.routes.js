@@ -5,7 +5,6 @@ import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { getSettings } from '../utils/integrationSettings.js';
 import { explainPayrollComparison } from '../utils/aiAssist.js';
 import { recomputeLateFlags, freeLateAllowance, EARLY_BEFORE } from '../utils/attendanceCore.js';
-import { applyEmployeeFilters } from '../utils/employeeFilters.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -267,12 +266,7 @@ router.get('/run-preview', (req, res) => {
   const [y, m] = month.split('-');
   const period = `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
 
-  // Same Employee ID / Name / Department narrowing the preview's own filter bar offers, so what
-  // you preview is exactly the set Run Payroll will generate for.
-  const employees = applyEmployeeFilters(
-    db.prepare("SELECT id, name, employee_code, department, designation FROM employees WHERE status = 'Active' ORDER BY name").all(),
-    req.query
-  );
+  const employees = db.prepare("SELECT id, name, employee_code, department FROM employees WHERE status = 'Active' ORDER BY name").all();
   const rows = employees.map((e) => {
     const already = !!db.prepare('SELECT id FROM payslips WHERE employee_id = ? AND period = ?').get(e.id, period);
     const b = breakdownFor(e.id);
@@ -695,13 +689,7 @@ router.post('/run', (req, res) => {
   const [y, m] = month.split('-');
   const period = `${MONTH_NAMES[parseInt(m, 10) - 1]} ${y}`;
 
-  // Payroll can be run for a subset — one department at a time, say. A run is idempotent per
-  // period (anyone already generated is skipped), so running repeatedly with different filters
-  // builds the month up rather than duplicating or overwriting anything.
-  const employees = applyEmployeeFilters(
-    db.prepare("SELECT id, name, employee_code, department, designation FROM employees WHERE status = 'Active'").all(),
-    req.body || {}
-  );
+  const employees = db.prepare("SELECT id FROM employees WHERE status = 'Active'").all();
   let generated = 0, skipped = 0;
   const run = db.transaction(() => {
     employees.forEach((e) => {
@@ -732,7 +720,7 @@ router.post('/run', (req, res) => {
     db.prepare("INSERT INTO payroll_runs (period, status) VALUES (?, 'Completed')").run(period);
   });
   run();
-  res.json({ generated, skipped, period, matched: employees.length });
+  res.json({ generated, skipped, period });
 });
 
 router.get('/payslips', (req, res) => {
