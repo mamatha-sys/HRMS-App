@@ -267,13 +267,14 @@ router.get('/run-preview', (req, res) => {
     const already = !!db.prepare('SELECT id FROM payslips WHERE employee_id = ? AND period = ?').get(e.id, period);
     const b = breakdownFor(e.id);
     const { lateDays, flaggedDays, allowance, deduction: lateDeduction } = lateDeductionFor(e.id, month, b.gross);
-    const { lopDays, absentDays, unmarkedDays, futureDays, deduction: lopDeduction, shortDays, zeroHourDays, missingCheckoutDays, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
+    const { lopDays, absentDays, unmarkedDays, futureDays, deduction: lopDeduction, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts, shortDayDeduction, effectiveDays } = lopFor(e.id, month, b.gross);
     const sandwichDays = sandwichWeekendDays(e.id, month);
     const sandwichDeduction = sandwichDays * Math.round(b.gross / daysInMonthFor(month));
     return {
       future_days: futureDays,
       late_days: lateDays, half_day_count: flaggedDays, free_late_allowance: allowance,
       short_days: shortDays, zero_hour_days: zeroHourDays, missing_checkout_days: missingCheckoutDays,
+      excused_early_logouts: excusedEarlyLogouts,
       short_day_deduction: shortDayDeduction,
       employee_id: e.id, name: e.name, employee_code: e.employee_code, department: e.department,
       already_generated: already,
@@ -470,7 +471,7 @@ function attendanceDaysFor(employeeId, month) {
   const halfDayHours = cfg['Minimum hours for a half day'];
 
   const rowBy = new Map(
-    db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag, half_day_manual FROM attendance WHERE employee_id = ? AND date LIKE ?')
+    db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag, half_day_manual, early_logout_excused FROM attendance WHERE employee_id = ? AND date LIKE ?')
       .all(employeeId, month + '%').map((r) => [r.date, r])
   );
 
@@ -478,7 +479,7 @@ function attendanceDaysFor(employeeId, month) {
   // Fractions of a day lost to short attendance, and the days that caused them. Kept apart from
   // LOP: "you worked half a day" is a different fact from "you were absent", and a payslip that
   // merges them cannot be checked.
-  let shortDayUnits = 0, shortDays = 0, zeroHourDays = 0, missingCheckoutDays = 0;
+  let shortDayUnits = 0, shortDays = 0, zeroHourDays = 0, missingCheckoutDays = 0, excusedEarlyLogouts = 0;
 
   days.forEach(({ date, dow }) => {
     if (joined && date < joined) { preJoiningDays++; return; }
@@ -498,6 +499,11 @@ function attendanceDaysFor(employeeId, month) {
         return;
       }
       if (!payByHours) return;
+      // The month's allowed early logout: they arrived on time and stayed past the earliest
+      // excusable hour, so the day is paid in full even though it is short of the shift. Without
+      // this the concession would be worthless — leaving at 5:00 after a 9:00 start is under the
+      // full-day hours threshold, so the short-day rule would dock it anyway.
+      if (row.early_logout_excused) { excusedEarlyLogouts++; return; }
       if (row.working_hours == null) { missingCheckoutDays++; return; }
       if (row.working_hours >= fullDayHours) return;
       const earned = row.working_hours >= halfDayHours ? 0.5 : 0;
@@ -519,7 +525,7 @@ function attendanceDaysFor(employeeId, month) {
 
   return {
     totalDays: days.length, paidDays, absentDays, unmarkedDays, preJoiningDays, futureDays,
-    shortDayUnits, shortDays, zeroHourDays, missingCheckoutDays
+    shortDayUnits, shortDays, zeroHourDays, missingCheckoutDays, excusedEarlyLogouts
   };
 }
 
@@ -541,6 +547,7 @@ function lopFor(employeeId, month, gross) {
     shortDays: d.shortDays,
     zeroHourDays: d.zeroHourDays,
     missingCheckoutDays: d.missingCheckoutDays,
+    excusedEarlyLogouts: d.excusedEarlyLogouts,
     shortDayUnits: d.shortDayUnits,
     shortDayDeduction: Math.round(d.shortDayUnits * perDayRate),
     // Days actually earned, carrying the fraction: 22.5, not 23.

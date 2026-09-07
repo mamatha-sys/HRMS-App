@@ -378,7 +378,9 @@ function HRPayroll({ compact, sectionLabel }) {
               <div className="feature-meta" style={{ marginTop: 4 }}>
                 Pay follows attendance: days marked Present or on approved Leave are paid, days marked
                 Absent are deducted, and each check-in later than the shift's grace period beyond the free
-                monthly allowance (see Configuration Policies) costs half a day's pay.
+                monthly allowance (see Configuration Policies) costs half a day's pay. Someone who arrived on
+                time may also leave early once a month without losing pay, provided they stayed past the
+                earliest excusable hour — both of those are Configuration Policies too.
               </div>
 
               {attConfig && (
@@ -477,6 +479,7 @@ function HRPayroll({ compact, sectionLabel }) {
                       <th title="Days checked in after the shift's grace period">Late</th>
                       <th title="Late days beyond the free monthly allowance — each cut half a day's pay">½-day Cuts</th>
                       <th title="Days worked below a full day — paid pro-rata from hours">Short</th>
+                      <th title="On-time days that finished early but are excused by the monthly early-logout allowance — paid in full">Early Out (free)</th>
                       <th>Gross</th><th>LOP Cut</th><th>Late Cut</th><th>Short Cut</th><th>Net</th><th></th>
                     </tr>
                   </thead>
@@ -492,6 +495,7 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td>{p.late_days || '—'}</td>
                         <td>{p.half_day_count ? <span style={{ color: '#B3401E' }}>{p.half_day_count}</span> : '—'}</td>
                         <td>{p.short_days ? <span style={{ color: '#B3401E' }} title={p.zero_hour_days ? `${p.zero_hour_days} of these earned nothing` : undefined}>{p.short_days}</span> : '—'}</td>
+                        <td>{p.excused_early_logouts ? <span style={{ color: '#1E8E5A' }} title="Excused — paid in full">{p.excused_early_logouts}</span> : '—'}</td>
                         <td>{inr(p.gross)}</td>
                         <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
                         <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>

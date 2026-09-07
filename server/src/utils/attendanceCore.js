@@ -77,6 +77,23 @@ export function freeLateAllowance() {
   return Number.isFinite(n) && n >= 0 ? n : 2;
 }
 
+// Company rule, the mirror of the late allowance: someone who came in ON TIME may leave early once
+// a month without losing pay, provided they still stayed until at least 5:00 PM. Both numbers are
+// ordinary `policies` rows, so Super Admin can retune them without a deploy.
+export function freeEarlyLogoutAllowance() {
+  const row = db.prepare("SELECT value FROM policies WHERE name = 'Free early logouts per month'").get();
+  const n = parseInt(row?.value, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1;
+}
+
+// The earliest a check-out can be and still count as an excusable early logout. Leaving before
+// this is not "a bit early", it is most of an afternoon missing, and stays subject to the normal
+// hours-worked rules.
+export function earliestExcusableLogout() {
+  const row = db.prepare("SELECT value FROM policies WHERE name = 'Earliest excusable early logout'").get();
+  return /^\d{2}:\d{2}$/.test(row?.value || '') ? row.value : '17:00';
+}
+
 // Super Admin can turn either check-in method off company-wide — stored as ordinary rows in the
 // same `policies` table Configuration Policies already uses (category 'setting'), so no new
 // table is needed. Missing row = enabled (matches freeLateAllowance's "default if missing" style).
@@ -134,15 +151,31 @@ export function effectiveMethodsFor(employeeId) {
 // consistent.
 export function recomputeLateFlags(employeeId, month) {
   const allowance = freeLateAllowance();
+  const earlyAllowance = freeEarlyLogoutAllowance();
+  const earliestLogout = earliestExcusableLogout();
   const rows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date LIKE ? ORDER BY date').all(employeeId, month + '%');
-  const update = db.prepare('UPDATE attendance SET half_day_flag = @half_day_flag, shift_id = @shift_id, working_hours = @working_hours, late_minutes = @late_minutes, early_logout_minutes = @early_logout_minutes, overtime_minutes = @overtime_minutes WHERE id = @id');
+  const update = db.prepare('UPDATE attendance SET half_day_flag = @half_day_flag, early_logout_excused = @early_logout_excused, shift_id = @shift_id, working_hours = @working_hours, late_minutes = @late_minutes, early_logout_minutes = @early_logout_minutes, overtime_minutes = @overtime_minutes WHERE id = @id');
   let lateCount = 0;
+  let excusedEarlyCount = 0;
   rows.forEach((r) => {
     const shift = effectiveShiftFor(employeeId, r.date);
     const stats = computeWorkStats(r.check_in_time, r.check_out_time, shift);
     const isLate = stats.late_minutes > 0;
     if (isLate) lateCount++;
-    update.run({ id: r.id, shift_id: shift.shiftId, half_day_flag: isLate && lateCount > allowance ? 1 : 0, ...stats });
+    // An early logout is excusable only when the employee also arrived on time — the concession is
+    // for someone who put in their morning, not for someone who came late AND left early — and
+    // only when they stayed past the earliest-excusable time. The first N such days in the month,
+    // in date order, are excused; the rest fall through to the ordinary hours-worked rules.
+    const leftEarly = stats.early_logout_minutes > 0;
+    const qualifies = leftEarly && !isLate && r.check_out_time && r.check_out_time >= earliestLogout;
+    if (qualifies) excusedEarlyCount++;
+    update.run({
+      id: r.id,
+      shift_id: shift.shiftId,
+      half_day_flag: isLate && lateCount > allowance ? 1 : 0,
+      early_logout_excused: qualifies && excusedEarlyCount <= earlyAllowance ? 1 : 0,
+      ...stats
+    });
   });
 }
 

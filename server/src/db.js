@@ -681,6 +681,9 @@ function migrate() {
   // CHECK ('Present','Absent','Leave') — a half day is a Present day worth half, so it needs no
   // new status value and no table rebuild.
   if (!attCols.includes('half_day_manual')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_manual INTEGER NOT NULL DEFAULT 0');
+  // Company rule: an on-time employee may leave early once a month (staying past 5:00 PM) without
+  // losing pay. Derived by recomputeLateFlags in date order, like half_day_flag.
+  if (!attCols.includes('early_logout_excused')) db.exec('ALTER TABLE attendance ADD COLUMN early_logout_excused INTEGER NOT NULL DEFAULT 0');
   // Who marked a day by hand, and when. A manual mark moves someone's pay, so "HR says you were
   // Absent" must be attributable — a self check-in leaves these NULL, which is how the two are
   // told apart.
@@ -694,6 +697,14 @@ function migrate() {
   const payCols = db.prepare('PRAGMA table_info(payslips)').all().map((c) => c.name);
   if (!payCols.includes('late_deduction')) db.exec('ALTER TABLE payslips ADD COLUMN late_deduction INTEGER NOT NULL DEFAULT 0');
 
+  // Mirror of the late allowance: an on-time employee may leave early once a month without losing
+  // pay, provided they stayed past 5:00 PM. Both are editable in Configuration Policies.
+  if (!db.prepare("SELECT 1 FROM policies WHERE name = 'Free early logouts per month'").get()) {
+    db.prepare("INSERT INTO policies (category, name, value) VALUES ('rule', 'Free early logouts per month', '1')").run();
+  }
+  if (!db.prepare("SELECT 1 FROM policies WHERE name = 'Earliest excusable early logout'").get()) {
+    db.prepare("INSERT INTO policies (category, name, value) VALUES ('rule', 'Earliest excusable early logout', '17:00')").run();
+  }
   if (!db.prepare("SELECT 1 FROM policies WHERE name = 'Free late arrivals per month'").get()) {
     db.prepare("INSERT INTO policies (category, name, value) VALUES ('rule', 'Free late arrivals per month', '2')").run();
   }
