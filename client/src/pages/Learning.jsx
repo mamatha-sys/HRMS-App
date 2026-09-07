@@ -1078,16 +1078,41 @@ function EnrollmentScreen({ canManage, onBack }) {
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
-  const [employeeId, setEmployeeId] = useState('');
   const [courseId, setCourseId] = useState('');
+  const [departments, setDepartments] = useState([]);
+  const [info, setInfo] = useState('');
+  // Same three ways an Announcement is targeted: everyone, one department, or hand-picked people.
+  const [targetMode, setTargetMode] = useState('employees');
+  const [department, setDepartment] = useState('');
+  const [employeeIds, setEmployeeIds] = useState([]);
+  const toggleEmployee = (id) => setEmployeeIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   function load() { api.get('/learning/enrollments').then((r) => setData(r.data)).catch(() => setError('Could not load enrollments.')); }
-  useEffect(() => { load(); api.get('/learning/employees').then((r) => setEmployees(r.data.employees)).catch(() => {}); }, []);
+  useEffect(() => {
+    load();
+    api.get('/learning/employees').then((r) => { setEmployees(r.data.employees); setDepartments(r.data.departments || []); }).catch(() => {});
+  }, []);
+
+  // How many people the current selection covers, shown before enrolling rather than after — a
+  // department pick can be a lot of people, and this is the only chance to notice that.
+  const targetCount = targetMode === 'all'
+    ? employees.length
+    : targetMode === 'department'
+      ? employees.filter((e) => e.department === department).length
+      : employeeIds.length;
 
   async function enroll(e) {
-    e.preventDefault(); setError('');
-    try { await api.post('/learning/enrollments', { employee_id: employeeId, course_id: courseId }); setEmployeeId(''); setCourseId(''); setShowForm(false); load(); }
-    catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
+    e.preventDefault(); setError(''); setInfo('');
+    try {
+      const r = await api.post('/learning/enrollments', {
+        course_id: courseId,
+        target: targetMode,
+        department: targetMode === 'department' ? department : null,
+        employee_ids: targetMode === 'employees' ? employeeIds : []
+      });
+      setInfo(`${r.data.enrolled} employee(s) enrolled${r.data.alreadyEnrolled ? `, ${r.data.alreadyEnrolled} already on the course` : ''}.`);
+      setCourseId(''); setDepartment(''); setEmployeeIds([]); setShowForm(false); load();
+    } catch (err) { setError(err.response?.data?.error || 'Could not enroll.'); }
   }
 
   const statusClass = (s) => (s === 'Certified' ? 'present' : (s === 'Assessed' ? 'pending' : 'info'));
@@ -1096,6 +1121,7 @@ function EnrollmentScreen({ canManage, onBack }) {
     <div>
       <h1>Course Enrollment — who has access to what</h1>
       {error && <div className="banner error">{error}</div>}
+      {info && <div className="banner info">{info}</div>}
       <button onClick={onBack} style={{ marginBottom: 14 }}>← Back to Learning Management</button>
       <div className="card">
         {!data && <div className="empty">Loading…</div>}
@@ -1113,20 +1139,50 @@ function EnrollmentScreen({ canManage, onBack }) {
           </table>
         )}
         {canManage && (showForm ? (
-          <form onSubmit={enroll} className="row" style={{ flexWrap: 'wrap', marginTop: 10 }}>
-            <select value={employeeId} onChange={(e) => setEmployeeId(e.target.value)} required style={{ flex: '1 1 160px' }}>
-              <option value="">Select employee…</option>
-              {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
-            </select>
-            <select value={courseId} onChange={(e) => setCourseId(e.target.value)} required style={{ flex: '1 1 160px' }}>
+          <form onSubmit={enroll} style={{ marginTop: 10, borderTop: '1px solid #EEF0F3', paddingTop: 10 }}>
+            <label className="field-label">Course</label>
+            <select value={courseId} onChange={(e) => setCourseId(e.target.value)} required style={{ marginBottom: 10 }}>
               <option value="">Select course…</option>
               {data?.courses.map((c) => <option key={c.id} value={c.id}>{c.title}</option>)}
             </select>
-            <button className="primary" type="submit">Enroll</button>
-            <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+
+            <label className="field-label">Enroll</label>
+            <select value={targetMode} onChange={(e) => setTargetMode(e.target.value)} style={{ marginBottom: 10 }}>
+              <option value="employees">Individual employee(s)</option>
+              <option value="department">By department</option>
+              <option value="all">Everyone</option>
+            </select>
+
+            {targetMode === 'department' && (
+              <select value={department} onChange={(e) => setDepartment(e.target.value)} required style={{ marginBottom: 10 }}>
+                <option value="">Select department…</option>
+                {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            )}
+
+            {targetMode === 'employees' && (
+              <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid #EEF0F3', borderRadius: 6, padding: 6, marginBottom: 10 }}>
+                {employees.map((emp) => (
+                  <label key={emp.id} className="row" style={{ alignItems: 'center', gap: 6, padding: '2px 0' }}>
+                    <input type="checkbox" checked={employeeIds.includes(emp.id)} onChange={() => toggleEmployee(emp.id)} style={{ width: 14, height: 14 }} />
+                    {emp.name} <span className="feature-meta">({emp.employee_code}{emp.department ? ` · ${emp.department}` : ''})</span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            <div className="feature-meta" style={{ marginBottom: 10 }}>
+              {targetCount} employee(s) selected. Anyone already on the course is skipped, and only the
+              people actually added are notified.
+            </div>
+
+            <div className="row">
+              <button className="primary" type="submit" disabled={targetCount === 0}>Enroll {targetCount || ''}</button>
+              <button type="button" onClick={() => setShowForm(false)}>Cancel</button>
+            </div>
           </form>
         ) : (
-          <button className="primary" style={{ marginTop: 10 }} onClick={() => setShowForm(true)}>+ Enroll Employee</button>
+          <button className="primary" style={{ marginTop: 10 }} onClick={() => setShowForm(true)}>+ Enroll Employees</button>
         ))}
       </div>
     </div>

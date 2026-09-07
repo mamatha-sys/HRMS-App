@@ -5,6 +5,7 @@ import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, getSupervisorScope, scopeDepartmentNames } from '../utils/scope.js';
 import * as googleCalendar from '../utils/googleCalendar.js';
 import { getSettings } from '../utils/integrationSettings.js';
+import { notifyEmployee } from '../utils/notify.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -544,7 +545,12 @@ router.get('/reports', (req, res) => {
 // Active employees, for the picker dropdowns on Enrollment/Competency/Progress screens.
 router.get('/employees', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ employees: db.prepare("SELECT id, name, employee_code FROM employees WHERE status = 'Active' ORDER BY name").all() });
+  // department comes along so the enrollment form can offer the same Everyone / By department /
+  // Individual employee(s) targeting the Announcements compose form uses.
+  res.json({
+    employees: db.prepare("SELECT id, name, employee_code, department FROM employees WHERE status = 'Active' ORDER BY name").all(),
+    departments: db.prepare('SELECT name FROM departments ORDER BY name').all().map((d) => d.name)
+  });
 });
 
 // "Course Enrollment — who has access to what": every enrollment across every course.
@@ -570,18 +576,52 @@ router.get('/enrollments', (req, res) => {
   });
 });
 
+// Enroll onto a course, targeted the same three ways an Announcement is: everyone, one
+// department, or a hand-picked set of employees. `employee_id` (singular) is still accepted so
+// anything still calling the old one-at-a-time shape keeps working.
+//
+// Only Active employees are ever enrolled — an exited employee should not appear on a course
+// roster because their department was picked.
 router.post('/enrollments', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  const { employee_id, course_id } = req.body || {};
-  const emp = employee_id ? db.prepare('SELECT id FROM employees WHERE id = ?').get(employee_id) : null;
-  const course = course_id ? db.prepare('SELECT id FROM courses WHERE id = ?').get(course_id) : null;
-  if (!emp || !course) return res.status(400).json({ error: 'A valid employee and course are required' });
-  try {
-    db.prepare('INSERT INTO course_enrollments (course_id, employee_id) VALUES (?, ?)').run(course.id, emp.id);
-    res.status(201).json({ ok: true });
-  } catch {
-    res.status(409).json({ error: 'That employee is already enrolled in that course.' });
+  const { employee_id, employee_ids, department, target, course_id } = req.body || {};
+  const course = course_id ? db.prepare('SELECT id, title FROM courses WHERE id = ?').get(course_id) : null;
+  if (!course) return res.status(400).json({ error: 'A valid course is required' });
+
+  const mode = target || (employee_id ? 'employees' : null);
+  let recipients;
+  if (mode === 'all') {
+    recipients = db.prepare("SELECT id FROM employees WHERE status = 'Active'").all();
+  } else if (mode === 'department') {
+    if (!department) return res.status(400).json({ error: 'Choose a department to enroll' });
+    recipients = db.prepare("SELECT id FROM employees WHERE status = 'Active' AND department = ?").all(department);
+  } else if (mode === 'employees') {
+    const ids = employee_ids?.length ? employee_ids : (employee_id ? [employee_id] : []);
+    if (!ids.length) return res.status(400).json({ error: 'Choose at least one employee to enroll' });
+    const placeholders = ids.map(() => '?').join(',');
+    recipients = db.prepare(`SELECT id FROM employees WHERE status = 'Active' AND id IN (${placeholders})`).all(...ids);
+  } else {
+    return res.status(400).json({ error: 'Choose who to enroll' });
   }
+  if (!recipients.length) return res.status(400).json({ error: 'No active employees matched that selection' });
+
+  // INSERT OR IGNORE against the course/employee unique constraint: enrolling a department where
+  // half are already on the course should add the other half, not fail the whole batch.
+  const insert = db.prepare('INSERT OR IGNORE INTO course_enrollments (course_id, employee_id) VALUES (?, ?)');
+  const newlyEnrolled = [];
+  db.transaction(() => {
+    recipients.forEach((r) => { if (insert.run(course.id, r.id).changes) newlyEnrolled.push(r.id); });
+  })();
+  const alreadyEnrolled = recipients.length - newlyEnrolled.length;
+
+  // Being put on a course is something the employee has to act on, so tell them — same reasoning
+  // as notifying someone when HR marks their attendance. Only the people actually added:
+  // re-running a department enrollment must not re-ping everyone already on the course.
+  newlyEnrolled.forEach((id) => {
+    notifyEmployee(id, 'Enrolled on a course', `You have been enrolled on "${course.title}". Open Learning to start it.`);
+  });
+
+  res.status(201).json({ ok: true, enrolled: newlyEnrolled.length, alreadyEnrolled, matched: recipients.length });
 });
 
 // "Assessments & Assignments": every course's final assessment / completion criterion.
