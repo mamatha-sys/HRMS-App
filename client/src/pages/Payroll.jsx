@@ -539,7 +539,7 @@ function HRPayroll({ compact, sectionLabel }) {
                 <table>
                   <thead>
                     <tr>
-                      <th>Code</th><th>Name</th><th>Department</th><th>Days Paid</th><th>Absent</th><th>Not Marked</th>
+                      <th>Code</th><th>Name</th><th>Department</th><th>Days Paid</th><th>Not Marked</th>
                       <th title="Days checked in after the shift's grace period">Late</th>
                       <th title="Late days beyond the free monthly allowance — each cut half a day's pay">½-day Cuts</th>
                       <th title="Days worked below a full day — paid pro-rata from hours">Short</th>
@@ -556,7 +556,6 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td>{p.name}</td>
                         <td>{p.department}</td>
                         <td><strong>{p.days_worked}</strong> <span className="feature-meta">/ {p.total_days}</span></td>
-                        <td>{p.absent_days || '—'}</td>
                         <td>{p.unmarked_days ? <span style={{ color: '#B3401E' }}>{p.unmarked_days}</span> : '—'}</td>
                         <td>{p.late_days || '—'}</td>
                         <td>{p.half_day_count ? <span style={{ color: '#B3401E' }}>{p.half_day_count}</span> : '—'}</td>
@@ -565,7 +564,13 @@ function HRPayroll({ compact, sectionLabel }) {
                         <td>{p.paid_leave_days ? <span style={{ color: '#1E8E5A' }}>{p.paid_leave_days}</span> : '—'}</td>
                         <td>{p.unpaid_leave_days ? <span style={{ color: '#B3401E' }}>{p.unpaid_leave_days}</span> : '—'}</td>
                         <td>{inr(p.gross)}</td>
-                        <td>{p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}</td>
+                        <td title={[
+                          p.absent_days && `${p.absent_days} marked absent`,
+                          p.unmarked_days && `${p.unmarked_days} not marked`,
+                          p.unpaid_leave_days && `${p.unpaid_leave_days} unpaid leave`
+                        ].filter(Boolean).join(', ') || undefined}>
+                          {p.lop_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.lop_deduction)}</span> : inr(0)}
+                        </td>
                         <td>{p.late_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.late_deduction)}</span> : inr(0)}</td>
                         <td>{p.short_day_deduction ? <span style={{ color: '#B3401E' }}>−{inr(p.short_day_deduction)}</span> : inr(0)}</td>
                         <td><strong>{inr(p.net)}</strong></td>
