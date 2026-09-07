@@ -68,7 +68,7 @@ function MyPerformance({ compact }) {
             <div className="kpi-label">Overall Progress</div>
             <div className="kpi-value">{progressScore.overall}% · {progressScore.band}</div>
             <div className="feature-meta">
-              Goals {progressScore.goalsScore ?? '—'}{progressScore.goalsScore != null ? '%' : ' (none assigned)'} · Attendance {progressScore.attendanceScore}% · Conduct {progressScore.disciplinaryScore}%
+              Goals {progressScore.goalsScore ?? '—'}{progressScore.goalsScore != null ? '%' : ' (none assigned)'} · Attendance {progressScore.attendanceScore}% · Disciplinary {progressScore.disciplinaryScore}%
               {progressScore.knowledgeTransferScore != null && ` · Knowledge Transfer ${progressScore.knowledgeTransferScore}% (${progressScore.weeksComplied}/${progressScore.weeksExpected} wks)`}
               {progressScore.learningScore != null && ` · Learning ${progressScore.learningScore}% (${progressScore.coursesCompleted}/${progressScore.coursesEnrolled})`}
             </div>
@@ -172,6 +172,10 @@ function HRPerformance({ compact, sectionLabel }) {
   const [form, setForm] = useState({ employee_id: '', employee_name: '', team: '', goal_text: '', kpi_text: '', month: new Date().toISOString().slice(0, 7), target_value: '', unit: '' });
   const [expandedDetails, setExpandedDetails] = useState(null);
   const [showProgress, setShowProgress] = useState(false);
+  // Employee ID / Name / Department, narrowing what the Employee Progress table displays. Same
+  // shape as the Payroll preview's — ID and name match on a case-insensitive substring,
+  // department is exact, since it comes from a dropdown of values actually present in the rows.
+  const [progressFilters, setProgressFilters] = useState({ code: '', name: '', department: '' });
 
   // A plain-text summary of one review — everything the card shows plus the write-up fields that
   // only appear in "View Details" — downloaded client-side, same lightweight Blob-download
@@ -228,6 +232,15 @@ function HRPerformance({ compact, sectionLabel }) {
   // The selected employee's department decides how many targets they're allowed this month —
   // shown live in the Add Review form so HR knows the cap before hitting it.
   const selectedEmpDept = employees.find((e) => String(e.id) === String(form.employee_id))?.department;
+  // Departments offered are the ones actually present in the rows this user can see, not the
+  // org-wide list — a scoped role only ever receives their own departments from the server.
+  const progressDepartments = [...new Set((ov?.employeeProgress || []).map((e) => e.department).filter(Boolean))].sort();
+  const filteredProgress = (ov?.employeeProgress || []).filter((e) =>
+    (!progressFilters.code || (e.employee_code || '').toLowerCase().includes(progressFilters.code.trim().toLowerCase())) &&
+    (!progressFilters.name || (e.name || '').toLowerCase().includes(progressFilters.name.trim().toLowerCase())) &&
+    (!progressFilters.department || e.department === progressFilters.department)
+  );
+
   const capForSelected = targetPolicy?.departments.find((d) => d.department === selectedEmpDept)?.targets_per_month ?? targetPolicy?.defaultTargetsPerMonth ?? 4;
 
   function goToReviewScreen(reviewId, target) { setActiveReviewId(reviewId); setScreen(target); }
@@ -379,10 +392,31 @@ function HRPerformance({ compact, sectionLabel }) {
                 One score blending this month's goal completion (40%), attendance (20%), disciplinary record (15%), Knowledge Transfer weekly idea contribution (15%), and Learning course completion (10%). Salary Increase Recommendation is advisory only — HR always makes the actual compensation decision; this is never wired into Payroll automatically.
               </div>
               {showProgress && (
+                <>
+                <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                  <input placeholder="Employee ID…" value={progressFilters.code}
+                    onChange={(ev) => setProgressFilters({ ...progressFilters, code: ev.target.value })} style={{ flex: '1 1 120px', maxWidth: 180 }} />
+                  <input placeholder="Employee name…" value={progressFilters.name}
+                    onChange={(ev) => setProgressFilters({ ...progressFilters, name: ev.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }} />
+                  <select value={progressFilters.department}
+                    onChange={(ev) => setProgressFilters({ ...progressFilters, department: ev.target.value })} style={{ flex: '1 1 140px', maxWidth: 200 }}>
+                    <option value="">All Departments</option>
+                    {progressDepartments.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                  {(progressFilters.code || progressFilters.name || progressFilters.department) && (
+                    <button onClick={() => setProgressFilters({ code: '', name: '', department: '' })}>Clear</button>
+                  )}
+                  <div className="spacer" />
+                  <span className="feature-meta">{filteredProgress.length} of {ov.employeeProgress.length}</span>
+                </div>
+
+                {filteredProgress.length === 0 && <div className="empty">No employees match these filters.</div>}
+                {filteredProgress.length > 0 && (
                 <table>
-                  <thead><tr><th>Employee</th><th>Department</th><th>Goals</th><th>Attendance</th><th>Conduct</th><th>Knowledge Transfer</th><th>Learning</th><th>Overall</th><th>Band</th><th>Salary Increase</th></tr></thead>
-                  <tbody>{ov.employeeProgress.map((e) => (
+                  <thead><tr><th>Employee ID</th><th>Employee</th><th>Department</th><th>Goals</th><th>Attendance</th><th title="Disciplinary record — 100% with a clean record, reduced by each case on file">Disciplinary</th><th>Knowledge Transfer</th><th>Learning</th><th>Overall</th><th>Band</th><th>Salary Increase</th></tr></thead>
+                  <tbody>{filteredProgress.map((e) => (
                     <tr key={e.employee_id}>
+                      <td>{e.employee_code}</td>
                       <td>{e.name}</td>
                       <td>{e.department}</td>
                       <td>{e.goalsScore != null ? `${e.goalsScore}%` : '—'} <span className="feature-meta">({e.targetsCompleted}/{e.targetsAssigned})</span></td>
@@ -396,6 +430,8 @@ function HRPerformance({ compact, sectionLabel }) {
                     </tr>
                   ))}</tbody>
                 </table>
+                )}
+                </>
               )}
             </div>
           )}
