@@ -403,7 +403,12 @@ function myReportRows(req) {
     to = today();
   }
 
-  const attRows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date BETWEEN ? AND ? AND check_in_time IS NOT NULL ORDER BY date').all(me.id, from, to);
+  // No `check_in_time IS NOT NULL` filter: a day Super Admin/HR marked by hand has no check-in
+  // time, so that condition hid every HR-marked day from the employee's own report — they were
+  // told nothing while the day still decided their pay. Days with no attendance row at all are
+  // still absent from this list by design; the calendar is what shows those gaps.
+  const attRows = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date BETWEEN ? AND ? ORDER BY date').all(me.id, from, to);
+  const userName = (id) => (id ? db.prepare('SELECT name FROM users WHERE id = ?').get(id)?.name : null);
   const rows = attRows.map((att) => {
     const punches = db.prepare('SELECT punch_time FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time ASC').all(me.id, att.date + '%');
     let times = punches.map((p) => p.punch_time.slice(11, 19));
@@ -414,13 +419,20 @@ function myReportRows(req) {
     const first = times[0] || null;
     const last = times.length > 1 ? times[times.length - 1] : null;
     const totalSeconds = first && last ? Math.max(0, hmsToSeconds(last) - hmsToSeconds(first)) : null;
+    // Two different facts, kept as two fields: what the day COUNTS AS (which is what pay follows)
+    // and what the punches show. An HR-marked day has the first and not the second.
+    const markedByName = userName(att.marked_by);
     return {
       date: att.date,
+      attendance_status: att.half_day_manual ? 'Half Day' : att.status,
+      marked_by_name: markedByName,
       first_check_in: first,
       last_check_out: last,
       total_hours: totalSeconds != null ? secondsToHms(totalSeconds) : null,
-      method: punches.length > 0 ? 'Biometric (Fingerprint)' : (att.method || null),
-      status: att.check_out_time ? 'Checked Out' : 'Checked In',
+      method: punches.length > 0 ? 'Biometric (Fingerprint)' : (att.check_in_time ? att.method : null),
+      status: att.check_in_time
+        ? (att.check_out_time ? 'Checked Out' : 'Checked In')
+        : (markedByName ? `Marked by ${markedByName}` : 'No punch'),
       latitude: att.latitude,
       longitude: att.longitude,
       logs: times
@@ -439,11 +451,11 @@ router.get('/mine/report', (req, res) => {
 router.get('/mine/report/export.xlsx', async (req, res) => {
   const { from, to, rows } = myReportRows(req);
   const excelRows = rows.map((r) => [
-    r.date, r.first_check_in || '', r.last_check_out || '', r.method || '',
+    r.date, r.attendance_status || '', r.marked_by_name || '', r.first_check_in || '', r.last_check_out || '', r.method || '',
     r.latitude != null ? `${r.latitude}, ${r.longitude}` : '', r.total_hours || '', r.status, r.logs.join(' | ')
   ]);
   await sendXlsx(res, 'My Attendance',
-    ['date', 'first_check_in', 'last_check_out', 'method', 'location', 'total_hours', 'status', 'logs'],
+    ['date', 'attendance', 'marked_by', 'first_check_in', 'last_check_out', 'method', 'location', 'total_hours', 'status', 'logs'],
     excelRows, `my-attendance-${from}-to-${to}.xlsx`);
 });
 

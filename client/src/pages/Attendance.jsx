@@ -420,14 +420,18 @@ function MyAttendance({ compact }) {
         {reportError && <div className="banner error">{reportError}</div>}
         {reportData?.branch && <div className="feature-meta" style={{ marginBottom: 8 }}>Work Location: {reportData.branch}</div>}
         {!reportData && !reportError && <div className="empty">Loading…</div>}
-        {reportData && reportData.rows.length === 0 && <div className="empty">No check-ins in this range.</div>}
+        {reportData && reportData.rows.length === 0 && <div className="empty">No attendance recorded in this range.</div>}
         {reportData && reportData.rows.length > 0 && (
           <table>
-            <thead><tr><th>Date</th><th>First Check-In</th><th>Last Check-Out</th><th>Method</th><th>Location</th><th>Total Hours</th><th>Status</th><th>Logs</th></tr></thead>
+            <thead><tr><th>Date</th><th title="What this day counts as for pay">Attendance</th><th>First Check-In</th><th>Last Check-Out</th><th>Method</th><th>Location</th><th>Total Hours</th><th>Status</th><th>Logs</th></tr></thead>
             <tbody>{reportData.rows.map((r) => (
               <Fragment key={r.date}>
                 <tr>
                   <td>{r.date}</td>
+                  <td>
+                    <span className={'status-tag ' + tag(r.attendance_status === 'Half Day' ? 'Present' : r.attendance_status)}>{r.attendance_status || '—'}</span>
+                    {r.marked_by_name && <div className="feature-meta">marked by {r.marked_by_name}</div>}
+                  </td>
                   <td>{r.first_check_in || '—'}</td>
                   <td>{r.last_check_out || '—'}</td>
                   <td>{r.method || '—'}</td>
