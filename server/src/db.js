@@ -1513,7 +1513,18 @@ function migrate() {
       acknowledged_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(document_id, employee_id)
     );
+
+    -- Same targeting shape as announcements: NULL target_department + no recipients rows means
+    -- "everyone"; a department name narrows to that department; specific rows here narrow to
+    -- exactly those employees. Mirrors announcement_recipients exactly.
+    CREATE TABLE IF NOT EXISTS document_recipients (
+      document_id INTEGER NOT NULL REFERENCES company_documents(id) ON DELETE CASCADE,
+      employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      PRIMARY KEY (document_id, employee_id)
+    );
   `);
+  const companyDocCols = db.prepare('PRAGMA table_info(company_documents)').all().map((c) => c.name);
+  if (!companyDocCols.includes('target_department')) db.exec('ALTER TABLE company_documents ADD COLUMN target_department TEXT');
 
   migrateLeavesTable();
   // Optional attachment (e.g. a medical certificate for Sick Leave) — same base64-data-URL-as-
