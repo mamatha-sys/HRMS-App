@@ -70,6 +70,20 @@ function rangeBounds(range) {
   return null;
 }
 
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+// An explicit calendar date (or date range) from a date-picker, alongside the Daily/Weekly/
+// Monthly presets above — a specific "show me the 14th" or "show me the 10th to the 20th" that
+// the presets can't express. Takes priority over `range` whenever either bound is given; a single
+// date with no matching other bound is treated as a one-day range. Same inclusive-YYYY-MM-DD
+// comparison against start_date as rangeBounds, so the two filters can never disagree on what
+// "in range" means.
+function resolveTaskDateBounds(query) {
+  const from = DATE_RE.test(query.from || '') ? query.from : null;
+  const to = DATE_RE.test(query.to || '') ? query.to : null;
+  if (from || to) return { start: from || to, end: to || from };
+  return rangeBounds(query.range);
+}
+
 // Overdue-task reminder sweep — lazy, no-background-scheduler idiom (same as Performance's
 // sendPendingAssessmentReminders): runs at the top of every My Tasks / Task Reports read, and
 // only actually notifies once per cooldown window per task (via last_reminded_at) so loading the
@@ -185,7 +199,7 @@ router.get('/tasks', (req, res) => {
     const teamId = Number(req.query.team_id);
     rows = rows.filter((t) => employeeById(t.assigned_to_employee_id)?.team_id === teamId);
   }
-  const range = rangeBounds(req.query.range);
+  const range = resolveTaskDateBounds(req.query);
   if (range) rows = rows.filter((t) => t.start_date >= range.start && t.start_date <= range.end);
 
   res.json({ tasks: withTaskDetails(rows) });
@@ -299,7 +313,7 @@ router.get('/reports/task-status', (req, res) => {
   const params = [];
   if (req.query.department) { conditions.push('t.department = ?'); params.push(req.query.department); }
   if (req.query.team_id) { conditions.push('e.team_id = ?'); params.push(Number(req.query.team_id)); }
-  const range = rangeBounds(req.query.range);
+  const range = resolveTaskDateBounds(req.query);
   if (range) { conditions.push('t.start_date >= ? AND t.start_date <= ?'); params.push(range.start, range.end); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 

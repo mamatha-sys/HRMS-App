@@ -52,15 +52,21 @@ function MyTasksSection({ isHR }) {
   const [filterDept, setFilterDept] = useState('');
   const [filterTeam, setFilterTeam] = useState('');
   const [range, setRange] = useState('all');
+  // An explicit calendar date/range, alongside the Today/This Week/This Month presets below —
+  // picking either clears the preset, since the two would otherwise silently disagree about
+  // which one wins.
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
   function load() {
     const params = {};
     if (filterDept) params.department = filterDept;
     if (filterTeam) params.team_id = filterTeam;
-    if (range !== 'all') params.range = range;
+    if (dateFrom || dateTo) { if (dateFrom) params.from = dateFrom; if (dateTo) params.to = dateTo; }
+    else if (range !== 'all') params.range = range;
     api.get('/timesheet/tasks', { params }).then((r) => setTasks(r.data.tasks)).catch(() => setError('Could not load tasks.'));
   }
-  useEffect(load, [filterDept, filterTeam, range]);
+  useEffect(load, [filterDept, filterTeam, range, dateFrom, dateTo]);
   useEffect(() => { api.get('/timesheet/tasks/options').then((r) => { setDepartments(r.data.departments); setTeams(r.data.teams); }).catch(() => {}); }, []);
 
   async function setStatus(taskId, status) {
@@ -87,12 +93,15 @@ function MyTasksSection({ isHR }) {
             {teams.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.department})</option>)}
           </select>
         )}
-        <select value={range} onChange={(e) => setRange(e.target.value)}>
+        <select value={range} onChange={(e) => { setRange(e.target.value); setDateFrom(''); setDateTo(''); }} disabled={!!(dateFrom || dateTo)}>
           <option value="all">All Time</option>
           <option value="daily">Today</option>
           <option value="weekly">This Week</option>
           <option value="monthly">This Month</option>
         </select>
+        <input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setRange('all'); }} title="From date" style={{ width: 'auto' }} />
+        <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => { setDateTo(e.target.value); setRange('all'); }} title="To date" style={{ width: 'auto' }} />
+        {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(''); setDateTo(''); }}>Clear date</button>}
       </div>
       {error && <div className="banner error">{error}</div>}
       {tasks.length === 0 && <div className="empty">No tasks yet.</div>}
@@ -404,15 +413,18 @@ function TaskStatusReportScreen({ onBack }) {
   const [filterDept, setFilterDept] = useState('');
   const [filterTeam, setFilterTeam] = useState('');
   const [range, setRange] = useState('all');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
 
   useEffect(() => { api.get('/timesheet/tasks/options').then((r) => { setDepartments(r.data.departments); setTeams(r.data.teams); }).catch(() => {}); }, []);
   useEffect(() => {
     const params = {};
     if (filterDept) params.department = filterDept;
     if (filterTeam) params.team_id = filterTeam;
-    if (range !== 'all') params.range = range;
+    if (dateFrom || dateTo) { if (dateFrom) params.from = dateFrom; if (dateTo) params.to = dateTo; }
+    else if (range !== 'all') params.range = range;
     api.get('/timesheet/reports/task-status', { params }).then((r) => setData(r.data)).catch(() => setError('Could not load task status report.'));
-  }, [filterDept, filterTeam, range]);
+  }, [filterDept, filterTeam, range, dateFrom, dateTo]);
 
   return (
     <div>
@@ -428,12 +440,15 @@ function TaskStatusReportScreen({ onBack }) {
           <option value="">All Teams</option>
           {teams.map((t) => <option key={t.id} value={t.id}>{t.name} ({t.department})</option>)}
         </select>
-        <select value={range} onChange={(e) => setRange(e.target.value)}>
+        <select value={range} onChange={(e) => { setRange(e.target.value); setDateFrom(''); setDateTo(''); }} disabled={!!(dateFrom || dateTo)}>
           <option value="all">All Time</option>
           <option value="daily">Today</option>
           <option value="weekly">This Week</option>
           <option value="monthly">This Month</option>
         </select>
+        <input type="date" value={dateFrom} onChange={(e) => { setDateFrom(e.target.value); setRange('all'); }} title="From date" style={{ width: 'auto' }} />
+        <input type="date" value={dateTo} min={dateFrom || undefined} onChange={(e) => { setDateTo(e.target.value); setRange('all'); }} title="To date" style={{ width: 'auto' }} />
+        {(dateFrom || dateTo) && <button onClick={() => { setDateFrom(''); setDateTo(''); }}>Clear date</button>}
       </div>
       {error && <div className="banner error">{error}</div>}
 
