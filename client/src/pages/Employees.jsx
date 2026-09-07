@@ -500,6 +500,8 @@ export default function Employees() {
   const [expandedId, setExpandedId] = useState(null);
   const [showPassword, setShowPassword] = useState(false);
   const [showFieldManager, setShowFieldManager] = useState(false);
+  const [showProfileRequests, setShowProfileRequests] = useState(false);
+  const [expandedRequest, setExpandedRequest] = useState(null);
   const [fieldConfig, setFieldConfig] = useState([]);
   const isSuperAdmin = user?.role === 'super_admin';
   const [filterId, setFilterId] = useState('');
@@ -769,9 +771,13 @@ export default function Employees() {
   const quickActions = [
     { to: '/bulk-import', label: 'Bulk Import' },
     { to: '/organization', label: 'Add Departments' },
-    { to: '/organization', label: 'Add Branch' },
-    { to: '/policies', label: 'Configuration Policies' }
+    { to: '/organization', label: 'Add Branch' }
   ];
+
+  // Employees who have submitted profile details and are waiting on a decision. Uses the page's
+  // own Employee ID / Name / Department filter bar rather than a second set of its own, so
+  // narrowing the list narrows the queue with it.
+  const pendingProfileUpdates = filteredEmployees.filter((e) => e.stage === 'submitted');
 
   return (
     <div>
@@ -817,6 +823,16 @@ export default function Employees() {
         {canManageEmployees && quickActions.map((a) => (
           <Link key={a.label} to={a.to}><button>{a.label}</button></Link>
         ))}
+        {canHR && (
+          <button
+            className={showProfileRequests ? 'primary' : ''}
+            onClick={() => setShowProfileRequests((v) => !v)}
+            title="Employees who have submitted profile details for review"
+          >
+            Profile Update Requests
+            {pendingProfileUpdates.length > 0 && <span className="widget-badge" style={{ marginLeft: 6, marginRight: 0 }}>{pendingProfileUpdates.length}</span>}
+          </button>
+        )}
         <div style={{ flex: 1 }} />
         {isSuperAdmin && <button onClick={() => setShowFieldManager((v) => !v)}>{showFieldManager ? 'Close Field Manager' : 'Manage Fields'}</button>}
         {canExport && <button onClick={downloadFull} title="Excel — every field, plus photo/document links">Export (Full)</button>}
@@ -905,6 +921,80 @@ export default function Employees() {
               <button type="button" onClick={reset}>Cancel</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {showProfileRequests && canHR && (
+        <div className="card">
+          <div className="row" style={{ alignItems: 'center', marginBottom: 8 }}>
+            <div>
+              <div className="feature-name">Profile Update Requests</div>
+              <div className="feature-meta">
+                Employees who submitted their details and are waiting on a decision.
+                Filtered by the Employee ID / Name / Department filters above.
+              </div>
+            </div>
+            <div style={{ flex: 1 }} />
+            <button onClick={() => setShowProfileRequests(false)}>Close</button>
+          </div>
+
+          {pendingProfileUpdates.length === 0 ? (
+            <div className="empty">
+              {employees.some((e) => e.stage === 'submitted')
+                ? 'No requests match the current filters.'
+                : 'No profile update requests waiting.'}
+            </div>
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Employee ID</th><th>Name</th><th>Department</th><th>Designation</th>
+                    <th>Fields changed</th><th>Waiting on</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingProfileUpdates.map((emp) => (
+                    <Fragment key={emp.id}>
+                      <tr>
+                        <td>{emp.employee_code}</td>
+                        <td>{emp.name}</td>
+                        <td>{emp.department}</td>
+                        <td>{emp.designation}</td>
+                        <td>
+                          {emp.pending_changes?.length
+                            ? <button onClick={() => setExpandedRequest(expandedRequest === emp.id ? null : emp.id)}>
+                                {emp.pending_changes.length} field{emp.pending_changes.length === 1 ? '' : 's'} {expandedRequest === emp.id ? '▲' : '▼'}
+                              </button>
+                            : <span className="feature-meta">not recorded</span>}
+                        </td>
+                        <td>
+                          <span className="feature-meta">{approvalForEmployee(emp)?.current_stage_name || '—'}</span>
+                        </td>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          {canEditEmployee && <button onClick={() => startEdit(emp)} title="Open the submitted details in the full form">Check in form</button>}
+                          {canEditEmployee ? (
+                            <>
+                              <button className="btn-approve" style={{ marginLeft: 6 }} onClick={() => decideSubmission(emp, 'approve')}>Approve</button>
+                              <button className="btn-reject" style={{ marginLeft: 6 }} onClick={() => decideSubmission(emp, 'reject')}>Send back</button>
+                            </>
+                          ) : <span className="feature-meta">View only</span>}
+                        </td>
+                      </tr>
+                      {expandedRequest === emp.id && (
+                        <tr><td colSpan={7} style={{ background: '#F7F8FA' }}>
+                          <ProfileChangesTable
+                            changes={emp.pending_changes}
+                            emptyNote="No field-level changes were recorded for this submission."
+                          />
+                        </td></tr>
+                      )}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 
