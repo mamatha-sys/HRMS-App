@@ -5,7 +5,7 @@ import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { isScopedRole, filterToScopeOrOwnDepartment, isEmployeeInScopeOrOwnDepartment, scopeDepartmentNamesOrOwn } from '../utils/scope.js';
 import { bottomRole, roleAbove, approvalChainLabel, evaluateDecision } from '../utils/chain.js';
 import { notifyEmployee } from '../utils/notify.js';
-import { monthlyAttendanceSummary } from '../utils/attendanceCore.js';
+import { monthlyAttendanceSummary, upsertAttendanceForDate } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -508,6 +508,35 @@ function restoreBalanceForLeave(leave) {
   logBalanceHistory(leave.employee_id, leave.type, leave.days, newBal, `Leave cancelled (${leave.from_date} to ${leave.to_date})`, null);
 }
 
+// Approved leave has to reach the attendance table, not just live in `leaves`. Nothing else wrote
+// it there, so an approved leave day had no attendance row — it showed as "Not marked" on the
+// calendar and in every report, and once unmarked working days became Loss of Pay it read as an
+// unexplained absence.
+//
+// A day the employee actually checked in on is never overwritten: a check-in is evidence they
+// worked, and it must outrank a leave range drawn around it.
+function markLeaveDates(leave) {
+  const dates = db.prepare(`
+    WITH RECURSIVE d(x) AS (SELECT ? UNION ALL SELECT date(x, '+1 day') FROM d WHERE x < ?)
+    SELECT x AS date FROM d
+  `).all(leave.from_date, leave.to_date).map((r) => r.date);
+  dates.forEach((date) => {
+    const existing = db.prepare('SELECT id, check_in_time FROM attendance WHERE employee_id = ? AND date = ?').get(leave.employee_id, date);
+    if (existing?.check_in_time) return;
+    upsertAttendanceForDate(leave.employee_id, date, { status: 'Leave' });
+  });
+}
+
+// Cancelling an approved leave takes those days back out, so the calendar stops claiming leave
+// that no longer exists. Only rows this created are removed — anything carrying a check-in, or
+// since re-marked to something other than Leave, is left exactly as it is.
+function unmarkLeaveDates(leave) {
+  db.prepare(`
+    DELETE FROM attendance
+    WHERE employee_id = ? AND date BETWEEN ? AND ? AND status = 'Leave' AND check_in_time IS NULL
+  `).run(leave.employee_id, leave.from_date, leave.to_date);
+}
+
 function decideCancel(finalStatus) {
   return (req, res) => {
     // Feature-level gate: cancellation decisions are part of the 'Leave Approval' feature —
@@ -524,6 +553,7 @@ function decideCancel(finalStatus) {
 
     if (finalStatus === 'Approved') {
       restoreBalanceForLeave(leave);
+      unmarkLeaveDates(leave);
       db.prepare('UPDATE leaves SET cancelled = 1, cancel_requested = 0 WHERE id = ?').run(leave.id);
     } else {
       db.prepare('UPDATE leaves SET cancel_requested = 0 WHERE id = ?').run(leave.id);
@@ -762,6 +792,7 @@ function decide(finalStatus) {
         }
         db.prepare('UPDATE leaves SET status = ?, decided_by = ?, current_stage_role_id = NULL, approval_reason_ids = ?, decision_note = ? WHERE id = ?')
           .run('Approved', req.user.sub, mergedReasonIds.length ? JSON.stringify(mergedReasonIds) : null, note || null, leave.id);
+        markLeaveDates(leave);
         notifyEmployee(leave.employee_id, 'Leave approved', `Your ${leave.type} request (${leave.from_date} to ${leave.to_date}) was approved.${note ? ` Note: ${note}` : ''}`, { email: true });
       } else {
         db.prepare('UPDATE leaves SET status = ?, decided_by = ?, decision_note = ? WHERE id = ?').run('Rejected', req.user.sub, note, leave.id);

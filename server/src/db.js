@@ -2209,6 +2209,7 @@ function migratePermissionCatalog() {
 
   migrateManagerFullAccess();
   migrateManagerSensitiveFieldsVisible();
+  migrateApprovedLeaveIntoAttendance();
   migrateDocumentPublishFeature();
   migrateKnowledgeTransferModule();
   migrateBiometricIntegrationModule();
@@ -2386,6 +2387,29 @@ function migrateManagerSensitiveFieldsVisible() {
   const fields = ['bank_name', 'bank_account_number', 'ifsc_code', 'aadhaar_number', 'pan_number'];
   const update = db.prepare("UPDATE field_permissions SET access = 'view' WHERE role = 'manager' AND field_name = ? AND access = 'hidden'");
   fields.forEach((f) => update.run(f));
+}
+
+// Approved leave never used to write an attendance row (leaves.routes.js does now), so every
+// leave approved before that change still has no attendance for its dates — showing as "Not
+// marked" on the calendar and, since unmarked working days became Loss of Pay, reading as an
+// unexplained absence. Expand the ranges of every still-approved, non-cancelled leave into rows.
+//
+// INSERT OR IGNORE, not an upsert: attendance is UNIQUE(employee_id, date), so any day that
+// already has a row — a real check-in above all — is left exactly as it is.
+//
+// runOnce, because this is a backfill of history, not a rule. Re-running it every boot would
+// resurrect leave days an administrator had since corrected by hand.
+function migrateApprovedLeaveIntoAttendance() {
+  if (!runOnce('approved_leave_into_attendance')) return;
+  db.exec(`
+    WITH RECURSIVE span(employee_id, d, to_date) AS (
+      SELECT employee_id, from_date, to_date FROM leaves WHERE status = 'Approved' AND cancelled = 0
+      UNION ALL
+      SELECT employee_id, date(d, '+1 day'), to_date FROM span WHERE d < to_date
+    )
+    INSERT OR IGNORE INTO attendance (employee_id, date, status)
+    SELECT employee_id, d, 'Leave' FROM span;
+  `);
 }
 
 // One-time rebuild: candidates.stage was a fixed 5-value CHECK column. Replace it with a
