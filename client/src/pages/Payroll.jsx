@@ -243,6 +243,7 @@ function HRPayroll({ compact, sectionLabel }) {
   const [filterCycle, setFilterCycle] = useState('');
   const [attConfig, setAttConfig] = useState(null);
   const [attBooleans, setAttBooleans] = useState([]);
+  const [attTimes, setAttTimes] = useState([]);
   const [preview, setPreview] = useState(null);
   const [previewing, setPreviewing] = useState(false);
   const [splitConfig, setSplitConfig] = useState(null);
@@ -254,7 +255,7 @@ function HRPayroll({ compact, sectionLabel }) {
     api.get('/payroll/structures').then((r) => { setStructures(r.data.structures); setComponents(r.data.components); }).catch(() => {});
     api.get('/payroll/payslips').then((r) => setPayslips(r.data.payslips)).catch(() => {});
     api.get('/payroll/split-config').then((r) => { setSplitConfig(r.data.config); setSplitDraft(r.data.config); }).catch(() => {});
-    api.get('/payroll/attendance-pay-config').then((r) => { setAttConfig(r.data.config); setAttBooleans(r.data.booleans || []); }).catch(() => {});
+    api.get('/payroll/attendance-pay-config').then((r) => { setAttConfig(r.data.config); setAttBooleans(r.data.booleans || []); setAttTimes(r.data.times || []); }).catch(() => {});
   }
   useEffect(load, []);
   useEffect(() => { api.get('/org/departments').then((r) => setDepartments(r.data.departments)).catch(() => {}); }, []);
@@ -294,6 +295,7 @@ function HRPayroll({ compact, sectionLabel }) {
       const r = await api.put('/payroll/attendance-pay-config', { ...attConfig, [name]: value });
       setAttConfig(r.data.config);
       setAttBooleans(r.data.booleans || attBooleans);
+      setAttTimes(r.data.times || attTimes);
       if (preview) loadPreview();
     } catch (err) { setError(err.response?.data?.error || 'Could not save that setting.'); }
   }
@@ -398,6 +400,18 @@ function HRPayroll({ compact, sectionLabel }) {
                         />
                         {name}
                       </label>
+                    ) : attTimes.includes(name) ? (
+                      <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
+                        <input
+                          type="time"
+                          value={attConfig[name]}
+                          disabled={user?.role !== 'super_admin'}
+                          onChange={(e) => setAttConfig({ ...attConfig, [name]: e.target.value })}
+                          onBlur={(e) => toggleAttendancePolicy(name, e.target.value)}
+                          style={{ width: 110 }}
+                        />
+                        {name}
+                      </label>
                     ) : (
                       <label key={name} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 2 }}>
                         <input
@@ -418,7 +432,14 @@ function HRPayroll({ compact, sectionLabel }) {
                       attended two days is paid for two days. Preview before running.
                     </div>
                   )}
-                  {attConfig['Pay by hours worked'] === 1 && (
+                  {attConfig['Half day is measured by session'] === 1 && (
+                    <div className="feature-meta" style={{ marginTop: 4 }}>
+                      The day is two sessions split at {attConfig['Session split time']}, each worth half a day.
+                      Working across the split earns the morning half; staying to shift end earns the afternoon half.
+                      Lateness is not judged here — it has its own free monthly allowance.
+                    </div>
+                  )}
+                  {attConfig['Pay by hours worked'] === 1 && attConfig['Half day is measured by session'] !== 1 && (
                     <div className="feature-meta" style={{ marginTop: 4 }}>
                       A full day worked earns one full day's salary. Under {attConfig['Minimum hours for a full day']}h
                       earns half a day, under {attConfig['Minimum hours for a half day']}h earns nothing for that day.

@@ -4,7 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
 import { getSettings } from '../utils/integrationSettings.js';
 import { explainPayrollComparison } from '../utils/aiAssist.js';
-import { recomputeLateFlags, freeLateAllowance } from '../utils/attendanceCore.js';
+import { recomputeLateFlags, freeLateAllowance, EARLY_BEFORE } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -236,7 +236,7 @@ router.get('/split-config', (req, res) => {
 // only affect the NEXT payroll run — payslips already generated are a snapshot and never change.
 router.get('/attendance-pay-config', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS });
+  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS, times: ATTENDANCE_PAY_TIMES });
 });
 
 router.put('/attendance-pay-config', (req, res) => {
@@ -245,10 +245,14 @@ router.put('/attendance-pay-config', (req, res) => {
   Object.keys(ATTENDANCE_PAY_DEFAULTS).forEach((name) => {
     if (body[name] === undefined) return;
     if (ATTENDANCE_PAY_BOOLEANS.includes(name)) { setSplitPolicy(name, body[name] ? 1 : 0); return; }
+    if (ATTENDANCE_PAY_TIMES.includes(name)) {
+      if (/^\d{2}:\d{2}$/.test(String(body[name]))) setSplitPolicy(name, body[name]);
+      return;
+    }
     const n = parseFloat(body[name]);
     if (Number.isFinite(n) && n >= 0) setSplitPolicy(name, n);
   });
-  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS });
+  res.json({ config: attendancePayConfig(), booleans: ATTENDANCE_PAY_BOOLEANS, times: ATTENDANCE_PAY_TIMES });
 });
 
 // What the next run would pay, without writing anything. Running payroll for a month whose
@@ -420,12 +424,21 @@ const ATTENDANCE_PAY_DEFAULTS = {
   // punch out must not cost someone a day's pay. Those days are reported separately so HR can fix
   // the record.
   'Pay by hours worked': 1,
+  // Company rule: the working day is two sessions split at 1:30 PM — morning 09:15-13:30 and
+  // afternoon 13:30-18:00 — and each session is worth half a day. When this is on it decides a
+  // day's value instead of the hour thresholds below, which stay as the fallback for anyone who
+  // would rather measure total hours than sessions.
+  'Half day is measured by session': 1,
+  'Session split time': '13:30',
   'Minimum hours for a full day': 8,
   'Minimum hours for a half day': 4
 };
 
+
 // Which of the above are on/off switches rather than numbers — drives the settings UI.
-const ATTENDANCE_PAY_BOOLEANS = ['Unmarked working days are unpaid', 'Weekends are paid', 'Pay by hours worked'];
+const ATTENDANCE_PAY_BOOLEANS = ['Unmarked working days are unpaid', 'Weekends are paid', 'Pay by hours worked', 'Half day is measured by session'];
+// Stored as a time string, so it is neither a switch nor a plain number.
+const ATTENDANCE_PAY_TIMES = ['Session split time'];
 
 function getPolicyNumber(name, fallback) {
   const row = db.prepare('SELECT value FROM policies WHERE name = ?').get(name);
@@ -435,7 +448,14 @@ function getPolicyNumber(name, fallback) {
 
 function attendancePayConfig() {
   const cfg = {};
-  Object.keys(ATTENDANCE_PAY_DEFAULTS).forEach((name) => { cfg[name] = getPolicyNumber(name, ATTENDANCE_PAY_DEFAULTS[name]); });
+  Object.keys(ATTENDANCE_PAY_DEFAULTS).forEach((name) => {
+    if (ATTENDANCE_PAY_TIMES.includes(name)) {
+      const row = db.prepare('SELECT value FROM policies WHERE name = ?').get(name);
+      cfg[name] = /^\d{2}:\d{2}$/.test(row?.value || '') ? row.value : ATTENDANCE_PAY_DEFAULTS[name];
+      return;
+    }
+    cfg[name] = getPolicyNumber(name, ATTENDANCE_PAY_DEFAULTS[name]);
+  });
   return cfg;
 }
 
@@ -467,6 +487,9 @@ function attendanceDaysFor(employeeId, month) {
   `).all(month, month);
 
   const payByHours = cfg['Pay by hours worked'] === 1;
+  const bySession = cfg['Half day is measured by session'] === 1;
+  const splitTime = cfg['Session split time'];
+  const shiftEnd = EARLY_BEFORE; // company shift end, 18:00 — the far edge of the afternoon session
   const fullDayHours = cfg['Minimum hours for a full day'];
   const halfDayHours = cfg['Minimum hours for a half day'];
 
@@ -498,15 +521,37 @@ function attendanceDaysFor(employeeId, month) {
         shortDayUnits += Math.max(0, 0.5 - lateCutOnHalfDay);
         return;
       }
-      if (!payByHours) return;
+      if (!payByHours && !bySession) return;
       // The month's allowed early logout: they arrived on time and stayed past the earliest
       // excusable hour, so the day is paid in full even though it is short of the shift. Without
       // this the concession would be worthless — leaving at 5:00 after a 9:00 start is under the
       // full-day hours threshold, so the short-day rule would dock it anyway.
       if (row.early_logout_excused) { excusedEarlyLogouts++; return; }
       if (row.working_hours == null) { missingCheckoutDays++; return; }
-      if (row.working_hours >= fullDayHours) return;
-      const earned = row.working_hours >= halfDayHours ? 0.5 : 0;
+
+      let earned;
+      if (bySession) {
+        // The working day is two sessions, each worth half a day:
+        //   morning   shift start (with grace) -> split time
+        //   afternoon split time               -> shift end
+        // A session is earned by being there for it, which means spanning its far edge: present
+        // at the split for the morning, present to shift end for the afternoon. Someone who
+        // leaves at 13:00 has not worked the morning session through.
+        //
+        // Lateness is NOT re-judged here. It has its own rule (grace period + free monthly
+        // allowance + half-day cut), and making a late arrival also forfeit the morning session
+        // would charge twice for one fact and quietly cancel the free-late allowance. So the
+        // morning turns on being present ACROSS the morning, not on having arrived by 09:15.
+        const inT = row.check_in_time || null;
+        const outT = row.check_out_time || null;
+        const morning = !!inT && !!outT && inT < splitTime && outT >= splitTime;
+        const afternoon = !!outT && outT >= shiftEnd && (!inT || inT <= shiftEnd);
+        earned = (morning ? 0.5 : 0) + (afternoon ? 0.5 : 0);
+      } else {
+        if (row.working_hours >= fullDayHours) return;
+        earned = row.working_hours >= halfDayHours ? 0.5 : 0;
+      }
+      if (earned >= 1) return;
       if (earned === 0) zeroHourDays++;
       shortDays++;
       // A late arrival already cost half a day on this same date (half_day_flag). Charge only the
