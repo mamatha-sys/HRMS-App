@@ -675,6 +675,12 @@ function migrate() {
   // 2 free late arrivals/month, configurable via the "Free late arrivals per month" policy).
   const attCols = db.prepare('PRAGMA table_info(attendance)').all().map((c) => c.name);
   if (!attCols.includes('half_day_flag')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_flag INTEGER NOT NULL DEFAULT 0');
+  // An HR-declared half day, deliberately NOT the same column as half_day_flag: that one is
+  // derived from lateness and recomputeLateFlags overwrites it on every check-in, which would
+  // silently wipe a half day someone marked by hand. attendance.status keeps its original
+  // CHECK ('Present','Absent','Leave') — a half day is a Present day worth half, so it needs no
+  // new status value and no table rebuild.
+  if (!attCols.includes('half_day_manual')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_manual INTEGER NOT NULL DEFAULT 0');
   // Tracks whether the employee has already been alerted about THIS row being a missed
   // check-out or missing check-in, so the sweep in attendanceCore.js only ever notifies once
   // per gap instead of re-notifying every time they open Attendance or check in again.

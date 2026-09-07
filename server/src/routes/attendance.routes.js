@@ -308,16 +308,19 @@ router.get('/', (req, res) => {
     const date = req.query.date || today();
     let rows = db.prepare(`
       SELECT e.id AS employee_id, e.employee_code, e.name, e.department, e.team_id,
-             a.status, a.check_in_time, a.check_out_time, a.method, a.latitude, a.longitude, a.half_day_flag
+             a.status, a.check_in_time, a.check_out_time, a.method, a.latitude, a.longitude, a.half_day_flag, a.half_day_manual
       FROM employees e
       LEFT JOIN attendance a ON a.employee_id = e.id AND a.date = ?
       ORDER BY e.id
     `).all(date);
     rows = filterToScopeOrOwnDepartment(rows, req.user.role, myEmployee(req.user.sub)?.id);
+    // A half day is a Present row, so it stays inside `present` for the headline count and is
+    // reported alongside it rather than as a fourth, overlapping bucket that wouldn't sum.
     const present = rows.filter((r) => r.status === 'Present').length;
+    const halfDay = rows.filter((r) => r.half_day_manual).length;
     const absent = rows.filter((r) => r.status === 'Absent').length;
     const onLeave = rows.filter((r) => r.status === 'Leave').length;
-    return res.json({ date, rows, summary: { present, absent, onLeave, unmarked: rows.length - present - absent - onLeave } });
+    return res.json({ date, rows, summary: { present, halfDay, absent, onLeave, unmarked: rows.length - present - absent - onLeave } });
   }
   const me = myEmployee(req.user.sub);
   if (!me) return res.json({ rows: [], me: null });
@@ -462,7 +465,7 @@ router.get('/calendar', (req, res) => {
   }
 
   const daysInMonth = db.prepare("SELECT CAST(strftime('%d', date(? || '-01', '+1 month', '-1 day')) AS INTEGER) AS d").get(month).d;
-  const marks = db.prepare('SELECT date, status, check_in_time, check_out_time, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?').all(employee.id, month + '%');
+  const marks = db.prepare('SELECT date, status, check_in_time, check_out_time, half_day_flag, half_day_manual FROM attendance WHERE employee_id = ? AND date LIKE ?').all(employee.id, month + '%');
   const byDate = Object.fromEntries(marks.map((m) => [m.date, m]));
   const todayStr = today();
   const days = Array.from({ length: daysInMonth }, (_, i) => {
@@ -472,7 +475,8 @@ router.get('/calendar', (req, res) => {
       date, day: i + 1,
       status: mark?.status ?? (date <= todayStr ? 'Not marked' : null),
       check_in_time: mark?.check_in_time || null, check_out_time: mark?.check_out_time || null,
-      half_day_flag: !!mark?.half_day_flag
+      half_day_flag: !!mark?.half_day_flag,
+      half_day_manual: !!mark?.half_day_manual
     };
   });
   const summary = {
@@ -480,6 +484,7 @@ router.get('/calendar', (req, res) => {
     absent: days.filter((d) => d.status === 'Absent').length,
     leave: days.filter((d) => d.status === 'Leave').length,
     halfDayCut: days.filter((d) => d.half_day_flag).length,
+    halfDay: days.filter((d) => d.half_day_manual).length,
     notMarked: days.filter((d) => d.status === 'Not marked').length
   };
   res.json({ month, employee: { id: employee.id, name: employee.name, employee_code: employee.employee_code }, days, summary });
@@ -612,11 +617,19 @@ router.post('/check-out', (req, res) => {
 router.post('/mark', (req, res) => {
   if (!canModuleAdmin(req.user.role, '07')) return res.status(403).json({ error: 'Insufficient permissions' });
   const { employee_id, date, status } = req.body || {};
-  if (!employee_id || !['Present', 'Absent', 'Leave'].includes(status)) return res.status(400).json({ error: 'employee_id and a valid status are required' });
+  // 'Half Day' is not an attendance.status value — it is a Present day worth half, recorded as
+  // status Present + half_day_manual. 'Leave' stays accepted here (approved leave and existing
+  // rows still use it) even though the marking UI no longer offers it.
+  if (!employee_id || !['Present', 'Absent', 'Leave', 'Half Day'].includes(status)) {
+    return res.status(400).json({ error: 'employee_id and a valid status are required' });
+  }
   const d = date || today();
+  const halfDay = status === 'Half Day' ? 1 : 0;
+  const storedStatus = status === 'Half Day' ? 'Present' : status;
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employee_id, d);
-  if (existing) db.prepare('UPDATE attendance SET status = ? WHERE id = ?').run(status, existing.id);
-  else db.prepare('INSERT INTO attendance (employee_id, date, status) VALUES (?, ?, ?)').run(employee_id, d, status);
+  // Re-marking a day as anything else clears the half-day mark, so the two can never disagree.
+  if (existing) db.prepare('UPDATE attendance SET status = ?, half_day_manual = ? WHERE id = ?').run(storedStatus, halfDay, existing.id);
+  else db.prepare('INSERT INTO attendance (employee_id, date, status, half_day_manual) VALUES (?, ?, ?, ?)').run(employee_id, d, storedStatus, halfDay);
   res.json({ ok: true });
 });
 

@@ -39,6 +39,7 @@ const CALENDAR_COLORS = {
   Present: { bg: '#E4F5EC', color: '#1E8E5A' },
   Absent: { bg: '#FBEAE5', color: '#B3401E' },
   Leave: { bg: '#E8EEF9', color: '#2E5CB8' },
+  'Half Day': { bg: '#FBF2DE', color: '#8A5A0A' },
   'Not marked': { bg: '#EEF0F3', color: '#5A6472' }
 };
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -103,12 +104,13 @@ function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKe
         <span className="status-tag present">Present: {data.summary.present}</span>
         <span className="status-tag absent">Absent: {data.summary.absent}</span>
         <span className="status-tag info">Leave: {data.summary.leave}</span>
+        <span className="status-tag pending">Half day: {data.summary.halfDay || 0}</span>
         <span className="status-tag locked">Not marked: {data.summary.notMarked}</span>
-        {data.summary.halfDayCut > 0 && <span className="status-tag pending">Half-day cut: {data.summary.halfDayCut}</span>}
+        {data.summary.halfDayCut > 0 && <span className="status-tag absent" title="Late beyond the free monthly allowance">Late half-day cut: {data.summary.halfDayCut}</span>}
       </div>
       {canMark && employeeId && (
         <div className="feature-meta" style={{ marginBottom: 8 }}>
-          Click any day to set it Present, Absent or Leave — for correcting a missed punch the employee
+          Click any day to set it Present, Absent or Half Day — for correcting a missed punch the employee
           has raised a regularization request for. Approving that request from the Dashboard tab marks
           the day Present automatically.
         </div>
@@ -117,11 +119,14 @@ function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKe
         {WEEKDAY_LABELS.map((d) => <div key={d} className="feature-meta" style={{ textAlign: 'center', fontWeight: 700 }}>{d}</div>)}
         {cells.map((c, i) => {
           if (!c) return <div key={`blank-${i}`} />;
-          const style = c.status && CALENDAR_COLORS[c.status] ? CALENDAR_COLORS[c.status] : { bg: '#fff', color: '#B7BEC9' };
+          const style = c.half_day_manual ? CALENDAR_COLORS['Half Day']
+            : c.status && CALENDAR_COLORS[c.status] ? CALENDAR_COLORS[c.status]
+            : { bg: '#fff', color: '#B7BEC9' };
           // A future date has no status and nothing to correct, so it stays inert.
           const markable = canMark && !!employeeId && !!c.status;
+          const label = c.half_day_manual ? 'Half Day' : c.status;
           const title = c.status
-            ? `${c.date} — ${c.status}${c.check_in_time ? ` · In ${c.check_in_time}` : ''}${c.check_out_time ? ` · Out ${c.check_out_time}` : ''}${c.half_day_flag ? ' · Half-day cut' : ''}${markable ? ' · click to change' : ''}`
+            ? `${c.date} — ${label}${c.check_in_time ? ` · In ${c.check_in_time}` : ''}${c.check_out_time ? ` · Out ${c.check_out_time}` : ''}${c.half_day_flag ? ' · Late half-day cut' : ''}${markable ? ' · click to change' : ''}`
             : c.date;
           return (
             <div key={c.date} style={{ position: 'relative' }}>
@@ -136,7 +141,7 @@ function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKe
                     : c.status ? '1px solid transparent' : '1px dashed #EEF0F3'
                 }}
               >
-                {c.day}
+                {c.day}{c.half_day_manual && <span style={{ fontSize: 10, marginLeft: 1 }}>½</span>}
               </div>
               {pickFor === c.date && (
                 <div style={{
@@ -147,7 +152,7 @@ function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKe
                   <div style={{ display: 'flex', gap: 4 }}>
                     <button className="btn-approve" disabled={saving} onClick={() => markDay(c.date, 'Present')}>Present</button>
                     <button className="btn-reject" disabled={saving} onClick={() => markDay(c.date, 'Absent')}>Absent</button>
-                    <button disabled={saving} onClick={() => markDay(c.date, 'Leave')}>Leave</button>
+                    <button disabled={saving} onClick={() => markDay(c.date, 'Half Day')}>Half Day</button>
                   </div>
                 </div>
               )}
@@ -655,13 +660,15 @@ function HRAttendance({ compact, sectionLabel }) {
                   <Fragment key={r.employee_id}>
                     <tr>
                       <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
-                      <td><span className={'status-tag ' + tag(r.status)}>{r.status || 'Not marked'}</span></td>
+                      <td>
+                        <span className={'status-tag ' + tag(r.status)}>{r.half_day_manual ? 'Half Day' : (r.status || 'Not marked')}</span>
+                      </td>
                       <td>{r.check_in_time || '—'}{!!r.half_day_flag && <span className="status-tag absent" style={{ marginLeft: 6 }} title="Late beyond the free monthly allowance — half-day pay cut">½-day cut</span>}</td>
                       <td>{r.latitude != null ? <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
                       <td style={{ whiteSpace: 'nowrap' }}>
-                        <button className="btn-approve" onClick={() => mark(r.employee_id, 'Present')}>P</button>
-                        <button className="btn-reject" style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Absent')}>A</button>
-                        <button style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Leave')}>L</button>
+                        <button className="btn-approve" title="Present — full day" onClick={() => mark(r.employee_id, 'Present')}>P</button>
+                        <button className="btn-reject" style={{ marginLeft: 4 }} title="Absent" onClick={() => mark(r.employee_id, 'Absent')}>A</button>
+                        <button style={{ marginLeft: 4 }} title="Half day — paid at half a day" onClick={() => mark(r.employee_id, 'Half Day')}>½</button>
                         {/* The grid marks one date at a time; the calendar is the same data for the
                             whole month, so you can see what you just marked in context and spot the
                             gaps that Payroll will treat as Loss of Pay. */}

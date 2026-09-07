@@ -470,7 +470,7 @@ function attendanceDaysFor(employeeId, month) {
   const halfDayHours = cfg['Minimum hours for a half day'];
 
   const rowBy = new Map(
-    db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag FROM attendance WHERE employee_id = ? AND date LIKE ?')
+    db.prepare('SELECT date, status, check_out_time, working_hours, half_day_flag, half_day_manual FROM attendance WHERE employee_id = ? AND date LIKE ?')
       .all(employeeId, month + '%').map((r) => [r.date, r])
   );
 
@@ -487,7 +487,17 @@ function attendanceDaysFor(employeeId, month) {
     if (status === 'Present' || status === 'Leave') {
       paidDays++;
       // Approved leave is paid in full and has no hours to judge.
-      if (status !== 'Present' || !payByHours) return;
+      if (status !== 'Present') return;
+      // An HR-declared half day is a judgement about the day, so it stands whatever the clock
+      // says — including when hours were never recorded — and applies even with hours-based pay
+      // switched off, because someone marked it deliberately.
+      if (row.half_day_manual) {
+        shortDays++;
+        const lateCutOnHalfDay = row.half_day_flag ? 0.5 : 0;
+        shortDayUnits += Math.max(0, 0.5 - lateCutOnHalfDay);
+        return;
+      }
+      if (!payByHours) return;
       if (row.working_hours == null) { missingCheckoutDays++; return; }
       if (row.working_hours >= fullDayHours) return;
       const earned = row.working_hours >= halfDayHours ? 0.5 : 0;
