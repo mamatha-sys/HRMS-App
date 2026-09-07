@@ -7,6 +7,7 @@ import { isScopedRole, filterToScopeOrOwnDepartment } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate, enabledMethods, isMethodEnabled, setMethodEnabled, employeeCheckinMethods, setEmployeeCheckinMethods, effectiveMethodsFor, notifyIfLate, notifyIfEarlyLogout, notifyAttendanceGaps, effectiveShiftFor, computeWorkStats } from '../utils/attendanceCore.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { applyEmployeeFilters } from '../utils/employeeFilters.js';
 import { isValidDescriptor, euclideanDistance, FACE_MATCH_THRESHOLD } from '../utils/face.js';
 
 const router = Router();
@@ -20,24 +21,6 @@ router.use(requireAuth);
 // view/approval-only.
 const isHR = (role) => canModuleAdmin(role, '07') || isScopedRole(role);
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
-
-// Shared by /biometric-list, /monthly-report, /punch-log and all their /export twins — same
-// employee_code/name-contains/exact-department/exact-designation filter shape everywhere, so a
-// report and its export always agree on what "filtered" means.
-function applyEmployeeFilters(employees, query) {
-  let rows = employees;
-  if (query.employeeCode) {
-    const q = String(query.employeeCode).toLowerCase();
-    rows = rows.filter((e) => e.employee_code?.toLowerCase().includes(q));
-  }
-  if (query.name) {
-    const q = String(query.name).toLowerCase();
-    rows = rows.filter((e) => e.name?.toLowerCase().includes(q));
-  }
-  if (query.department) rows = rows.filter((e) => e.department === query.department);
-  if (query.designation) rows = rows.filter((e) => e.designation === query.designation);
-  return rows;
-}
 
 // One small workbook, one sheet, a bold header row — shared by every .xlsx export below so each
 // just supplies its own headers/rows/filename instead of repeating the workbook boilerplate.

@@ -245,6 +245,16 @@ function HRPayroll({ compact, sectionLabel }) {
   const [attBooleans, setAttBooleans] = useState([]);
   const [attTimes, setAttTimes] = useState([]);
   const [preview, setPreview] = useState(null);
+  // One set of filters for both Preview and Run Payroll, so a run always covers exactly the set
+  // that was previewed rather than quietly generating for everyone.
+  const [payFilters, setPayFilters] = useState({ employeeCode: '', name: '', department: '' });
+  const payFilterParams = () => {
+    const p = {};
+    if (payFilters.employeeCode.trim()) p.employeeCode = payFilters.employeeCode.trim();
+    if (payFilters.name.trim()) p.name = payFilters.name.trim();
+    if (payFilters.department) p.department = payFilters.department;
+    return p;
+  };
   const [previewing, setPreviewing] = useState(false);
   const [splitConfig, setSplitConfig] = useState(null);
   const [showSplitConfig, setShowSplitConfig] = useState(false);
@@ -285,7 +295,7 @@ function HRPayroll({ compact, sectionLabel }) {
   }
   async function loadPreview() {
     setError(''); setInfo(''); setPreviewing(true);
-    try { const r = await api.get('/payroll/run-preview', { params: { month } }); setPreview(r.data); }
+    try { const r = await api.get('/payroll/run-preview', { params: { month, ...payFilterParams() } }); setPreview(r.data); }
     catch (err) { setError(err.response?.data?.error || 'Could not preview this run.'); }
     finally { setPreviewing(false); }
   }
@@ -301,7 +311,11 @@ function HRPayroll({ compact, sectionLabel }) {
   }
   async function runPayroll() {
     setError(''); setInfo('');
-    try { const r = await api.post('/payroll/run', { month }); setPreview(null); setInfo(`Payroll for ${r.data.period}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
+    const filters = payFilterParams();
+    const scope = Object.keys(filters).length
+      ? ` (${[filters.employeeCode && `ID ~ ${filters.employeeCode}`, filters.name && `name ~ ${filters.name}`, filters.department].filter(Boolean).join(', ')})`
+      : '';
+    try { const r = await api.post('/payroll/run', { month, ...filters }); setPreview(null); setInfo(`Payroll for ${r.data.period}${scope}: ${r.data.generated} payslip(s) generated, ${r.data.skipped} skipped.`); load(); }
     catch (err) { setError(err.response?.data?.error || 'Run failed.'); }
   }
   async function addComponent(e) {
@@ -376,6 +390,24 @@ function HRPayroll({ compact, sectionLabel }) {
                 <input type="month" value={month} onChange={(e) => setMonth(e.target.value)} style={{ flex: '1 1 140px' }} />
                 <button onClick={loadPreview} disabled={previewing}>{previewing ? 'Checking…' : 'Preview'}</button>
                 <button className="primary" onClick={runPayroll}>Run Payroll</button>
+              </div>
+              <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                <input placeholder="Employee ID…" value={payFilters.employeeCode}
+                  onChange={(e) => setPayFilters({ ...payFilters, employeeCode: e.target.value })} style={{ flex: '1 1 110px' }} />
+                <input placeholder="Employee name…" value={payFilters.name}
+                  onChange={(e) => setPayFilters({ ...payFilters, name: e.target.value })} style={{ flex: '1 1 120px' }} />
+                <select value={payFilters.department}
+                  onChange={(e) => setPayFilters({ ...payFilters, department: e.target.value })} style={{ flex: '1 1 130px' }}>
+                  <option value="">All Departments</option>
+                  {departments.map((d) => <option key={d.id} value={d.name}>{d.name}</option>)}
+                </select>
+                {(payFilters.employeeCode || payFilters.name || payFilters.department) && (
+                  <button onClick={() => setPayFilters({ employeeCode: '', name: '', department: '' })}>Clear</button>
+                )}
+              </div>
+              <div className="feature-meta" style={{ marginTop: 4 }}>
+                Both Preview and Run Payroll use these filters — leave them blank to cover everyone.
+                A run skips anyone already generated for the month, so you can run department by department.
               </div>
               <div className="feature-meta" style={{ marginTop: 4 }}>
                 Pay follows attendance: days marked Present or on approved Leave are paid, days marked
