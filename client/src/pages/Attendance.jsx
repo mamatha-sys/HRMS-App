@@ -50,16 +50,33 @@ const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // attendance for a past date and then opening the calendar on the current month shows a grid with
 // none of the marks just made. `refreshKey` re-fetches when the underlying attendance changes, so
 // a mark made in the grid above appears on the calendar immediately.
-function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKey }) {
+function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKey, canMark }) {
   const [month, setMonth] = useState(initialMonth || new Date().toISOString().slice(0, 7));
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
+  // Which day the Present/Absent/Leave chooser is open on. Correcting a missed punch means fixing
+  // one specific past date, so the choice happens on the day itself rather than by changing the
+  // page's date filter and using the grid.
+  const [pickFor, setPickFor] = useState(null);
+  const [saving, setSaving] = useState(false);
 
   function load(m) {
     api.get('/attendance/calendar', { params: { month: m, ...(employeeId ? { id: employeeId } : {}) } })
       .then((r) => setData(r.data)).catch(() => setError('Could not load calendar.'));
   }
   useEffect(() => { load(month); }, [employeeId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function markDay(date, status) {
+    if (!employeeId) return;
+    setError(''); setSaving(true);
+    try {
+      await api.post('/attendance/mark', { employee_id: employeeId, date, status });
+      setPickFor(null);
+      load(month);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not mark that day.');
+    } finally { setSaving(false); }
+  }
 
   function changeMonth(delta) {
     const [y, m] = month.split('-').map(Number);
@@ -89,19 +106,51 @@ function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKe
         <span className="status-tag locked">Not marked: {data.summary.notMarked}</span>
         {data.summary.halfDayCut > 0 && <span className="status-tag pending">Half-day cut: {data.summary.halfDayCut}</span>}
       </div>
+      {canMark && employeeId && (
+        <div className="feature-meta" style={{ marginBottom: 8 }}>
+          Click any day to set it Present, Absent or Leave — for correcting a missed punch the employee
+          has raised a regularization request for. Approving that request from the Dashboard tab marks
+          the day Present automatically.
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: 4 }}>
         {WEEKDAY_LABELS.map((d) => <div key={d} className="feature-meta" style={{ textAlign: 'center', fontWeight: 700 }}>{d}</div>)}
         {cells.map((c, i) => {
           if (!c) return <div key={`blank-${i}`} />;
           const style = c.status && CALENDAR_COLORS[c.status] ? CALENDAR_COLORS[c.status] : { bg: '#fff', color: '#B7BEC9' };
-          const title = c.status ? `${c.date} — ${c.status}${c.check_in_time ? ` · In ${c.check_in_time}` : ''}${c.check_out_time ? ` · Out ${c.check_out_time}` : ''}${c.half_day_flag ? ' · Half-day cut' : ''}` : c.date;
+          // A future date has no status and nothing to correct, so it stays inert.
+          const markable = canMark && !!employeeId && !!c.status;
+          const title = c.status
+            ? `${c.date} — ${c.status}${c.check_in_time ? ` · In ${c.check_in_time}` : ''}${c.check_out_time ? ` · Out ${c.check_out_time}` : ''}${c.half_day_flag ? ' · Half-day cut' : ''}${markable ? ' · click to change' : ''}`
+            : c.date;
           return (
-            <div key={c.date} title={title} style={{
-              background: style.bg, color: style.color, borderRadius: 6, padding: '8px 4px', textAlign: 'center',
-              fontSize: 13, fontWeight: 600, minHeight: 40,
-              border: c.half_day_flag ? '2px solid #C2540A' : c.status ? '1px solid transparent' : '1px dashed #EEF0F3'
-            }}>
-              {c.day}
+            <div key={c.date} style={{ position: 'relative' }}>
+              <div
+                title={title}
+                onClick={markable ? () => setPickFor(pickFor === c.date ? null : c.date) : undefined}
+                style={{
+                  background: style.bg, color: style.color, borderRadius: 6, padding: '8px 4px', textAlign: 'center',
+                  fontSize: 13, fontWeight: 600, minHeight: 40, cursor: markable ? 'pointer' : 'default',
+                  border: pickFor === c.date ? '2px solid #2E5CB8'
+                    : c.half_day_flag ? '2px solid #C2540A'
+                    : c.status ? '1px solid transparent' : '1px dashed #EEF0F3'
+                }}
+              >
+                {c.day}
+              </div>
+              {pickFor === c.date && (
+                <div style={{
+                  position: 'absolute', zIndex: 5, top: '100%', left: 0, marginTop: 4, background: '#fff',
+                  border: '1px solid #E2E5EA', borderRadius: 8, padding: 8, boxShadow: '0 4px 14px rgba(0,0,0,.12)', minWidth: 150
+                }}>
+                  <div className="feature-meta" style={{ marginBottom: 6 }}>{c.date}</div>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <button className="btn-approve" disabled={saving} onClick={() => markDay(c.date, 'Present')}>Present</button>
+                    <button className="btn-reject" disabled={saving} onClick={() => markDay(c.date, 'Absent')}>Absent</button>
+                    <button disabled={saving} onClick={() => markDay(c.date, 'Leave')}>Leave</button>
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -630,6 +679,7 @@ function HRAttendance({ compact, sectionLabel }) {
                           employeeLabel={`${r.name}'s`}
                           initialMonth={date ? date.slice(0, 7) : undefined}
                           refreshKey={calRefresh}
+                          canMark={canManage}
                         />
                       </td></tr>
                     )}

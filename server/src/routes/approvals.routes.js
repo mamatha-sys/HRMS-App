@@ -4,6 +4,7 @@ import { requireAuth } from '../middleware/auth.middleware.js';
 import { evaluateDecision, approvalChainLabel } from '../utils/chain.js';
 import { isScopedRole, filterToScopeOrOwnDepartment, isEmployeeInScopeOrOwnDepartment } from '../utils/scope.js';
 import { notifyEmployee } from '../utils/notify.js';
+import { upsertAttendanceForDate, recomputeLateFlags } from '../utils/attendanceCore.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -78,8 +79,24 @@ function decide(finalStatus) {
       if (approval.type === 'Regularization') {
         const requesterEmp = employeeByName(approval.requester);
         if (requesterEmp) {
+          // Approving a regularization used to change nothing but this row's status: the employee
+          // was told "Approved" while the day stayed unmarked, so Payroll still treated it as
+          // Loss of Pay. The entire point of the request is to fix that day, so mark it Present.
+          // target_date is the column added for exactly this; older rows fall back to the
+          // "YYYY-MM-DD: reason" convention `detail` has always used.
+          const targetDate = approval.target_date
+            || (/^\d{4}-\d{2}-\d{2}/.test(approval.detail || '') ? approval.detail.slice(0, 10) : null);
+          if (finalStatus === 'Approved' && targetDate) {
+            upsertAttendanceForDate(requesterEmp.id, targetDate, { status: 'Present' });
+            // A regularized day can change how many late arrivals fall inside the free monthly
+            // allowance, which decides the half-day pay cuts for that month.
+            recomputeLateFlags(requesterEmp.id, targetDate.slice(0, 7));
+          }
+          const marked = finalStatus === 'Approved' && targetDate
+            ? ` ${targetDate} has been marked Present.`
+            : '';
           notifyEmployee(requesterEmp.id, `Regularization ${finalStatus}`,
-            `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.`, { email: true });
+            `Your attendance regularization request (${approval.detail}) was ${finalStatus.toLowerCase()} by ${req.user.name || 'HR'}.${marked}`, { email: true });
         }
       }
       // A hierarchy-approved profile edit request unlocks the employee's record back to

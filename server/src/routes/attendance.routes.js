@@ -792,9 +792,17 @@ router.post('/regularize', (req, res) => {
   if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
   const { date, reason } = req.body || {};
   if (!date || !reason) return res.status(400).json({ error: 'date and reason are required' });
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ error: 'date must be YYYY-MM-DD' });
+  if (date > today()) return res.status(400).json({ error: 'You cannot regularize a date in the future.' });
+  // One open request per date — re-raising the same day should not stack duplicates for approvers.
+  const alreadyOpen = db.prepare("SELECT 1 FROM approvals WHERE type = 'Regularization' AND requester = ? AND target_date = ? AND status = 'Pending'").get(me.name, date);
+  if (alreadyOpen) return res.status(409).json({ error: 'You already have a pending regularization request for that date.' });
+
   const stage = bottomRole();
-  db.prepare('INSERT INTO approvals (type, requester, detail, current_stage_role_id) VALUES (?, ?, ?, ?)')
-    .run('Regularization', me.name, `${date}: ${reason}`, stage ? stage.id : null);
+  // target_date is stored as its own column, not just inside `detail`: approving this request now
+  // marks that day's attendance, which needs a date the code can act on rather than parse.
+  db.prepare('INSERT INTO approvals (type, requester, detail, target_date, current_stage_role_id) VALUES (?, ?, ?, ?, ?)')
+    .run('Regularization', me.name, `${date}: ${reason}`, date, stage ? stage.id : null);
   res.status(201).json({ ok: true });
 });
 

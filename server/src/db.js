@@ -643,6 +643,17 @@ function migrate() {
     const bottom = db.prepare("SELECT id FROM roles WHERE key != 'employee' AND paused = 0 ORDER BY sort_order DESC LIMIT 1").get();
     if (bottom) db.prepare("UPDATE approvals SET current_stage_role_id = ? WHERE status = 'Pending' AND current_stage_role_id IS NULL").run(bottom.id);
   }
+  // The calendar date a Regularization request is about. It used to live only inside the free-text
+  // `detail` ("2026-08-27: forgot to punch out"), which is fine to read but no basis for acting on
+  // an approval — approving one now actually marks that day's attendance.
+  if (!apr.includes('target_date')) {
+    db.exec('ALTER TABLE approvals ADD COLUMN target_date TEXT');
+    // Backfill from the existing "YYYY-MM-DD: reason" convention so requests raised before this
+    // column existed can still be approved into a real attendance mark.
+    db.exec(`UPDATE approvals SET target_date = substr(detail, 1, 10)
+             WHERE type = 'Regularization' AND target_date IS NULL
+               AND substr(detail, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'`);
+  }
 
   // Company rule: Team Lead can only approve leave requests up to 2 days — anything longer
   // must be escalated to a more senior role. Editable per-role in Organization Structure.
