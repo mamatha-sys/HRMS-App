@@ -265,6 +265,9 @@ function HRPerformance({ compact, sectionLabel }) {
         <button className={tab === 'progress' ? 'primary' : ''} onClick={() => setTab('progress')}>Progress</button>
         <button className={tab === 'reviews' ? 'primary' : ''} onClick={() => setTab('reviews')}>Reviews</button>
         <button className={tab === 'reports' ? 'primary' : ''} onClick={() => setTab('reports')}>Reports</button>
+        {/* Goals is a full screen rather than a tab panel, but it belongs in the same row: it was
+            previously reachable ONLY from the Key Features card, and nothing else opens it. */}
+        <button onClick={() => setScreen('goals')}>Goals &amp; KPI / KRA / OKR</button>
       </div>
 
       {tab === 'reports' && (
@@ -326,27 +329,7 @@ function HRPerformance({ compact, sectionLabel }) {
 
           <div className="dashboard-grid">
             <div className="card">
-              <div className="feature-name" style={{ marginBottom: 4 }}><span className="widget-badge">1</span>Key Features</div>
-              <div className="feature-meta" style={{ marginBottom: 8 }}>Each feature opens its own screen.</div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                {ov?.keyFeatures.map((f) => (
-                  <button
-                    key={f.key}
-                    className="pill"
-                    onClick={() => {
-                      if (f.screen === 'reports') setTab('reports');
-                      else if (f.screen === 'dashboard') setTab('reviews');
-                      else setScreen(f.screen);
-                    }}
-                  >
-                    {f.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Field-Level Access</div>
+              <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">1</span>Field-Level Access</div>
               {ov?.fieldAccess.map((f) => (
                 <div key={f.field} className="rec-row"><span>{f.field}</span><span className="status-tag present">{f.access}</span></div>
               ))}
@@ -354,7 +337,7 @@ function HRPerformance({ compact, sectionLabel }) {
           </div>
 
           <div className="card">
-            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">3</span>Quick Actions</div>
+            <div className="feature-name" style={{ marginBottom: 8 }}><span className="widget-badge">2</span>Quick Actions</div>
             {user?.role === 'super_admin' && <Link to="/policies"><button style={{ width: '100%', textAlign: 'left', background: '#FBF2DE', borderColor: '#F0DDB5', color: '#8A5A0A' }}>+ Configure Policies</button></Link>}
           </div>
         </>

@@ -26,16 +26,6 @@ const SCOPE_BANNER = {
   assistant_manager: 'Team/organization performance — submit manager assessments, mark reviews complete.'
 };
 
-const KEY_FEATURES = [
-  { key: 'goals', label: 'Goal Assignment & Tracking', screen: 'goals' },
-  { key: 'kpi', label: 'KPI / KRA / OKR Management', screen: 'goals' },
-  { key: 'reviews', label: 'Performance Reviews & Appraisals', screen: 'dashboard' },
-  { key: 'self', label: 'Self-Appraisal', screen: 'dashboard' },
-  { key: 'feedback', label: '360° & Continuous Feedback', screen: 'dashboard' },
-  { key: 'competency', label: 'Competency & Skill Gap Assessment', screen: 'dashboard' },
-  { key: 'plan', label: 'Promotion & Improvement Plans (PIP)', screen: 'dashboard' },
-  { key: 'reports', label: 'Performance Reports & Analytics', screen: 'reports' }
-];
 const FIELD_ACCESS = [
   { field: 'Record Owner / Assigned-To', access: 'Editable' },
   { field: 'Internal Notes / Remarks', access: 'Editable' }
@@ -301,7 +291,6 @@ router.get('/overview', (req, res) => {
     employeeProgress,
     mySupervisorProgress,
     reviews,
-    keyFeatures: KEY_FEATURES,
     fieldAccess: FIELD_ACCESS
   });
 });
