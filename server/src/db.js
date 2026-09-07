@@ -1421,6 +1421,42 @@ function migrate() {
   const expenseCols = db.prepare('PRAGMA table_info(expense_claims)').all().map((c) => c.name);
   if (!expenseCols.includes('receipt_hash')) db.exec('ALTER TABLE expense_claims ADD COLUMN receipt_hash TEXT');
 
+  // Travel details — how many days and where. `place`/`from_date`/`to_date` apply to any
+  // category (a multi-day offsite can carry Food/Accommodation claims too, not just Travel),
+  // required only for Travel on the server. Days is never stored — it is to_date - from_date + 1,
+  // computed wherever it is shown, so it can never drift from the two dates it is derived from.
+  if (!expenseCols.includes('place')) db.exec('ALTER TABLE expense_claims ADD COLUMN place TEXT');
+  if (!expenseCols.includes('from_date')) db.exec('ALTER TABLE expense_claims ADD COLUMN from_date TEXT');
+  if (!expenseCols.includes('to_date')) db.exec('ALTER TABLE expense_claims ADD COLUMN to_date TEXT');
+
+  // Multiple receipts per claim (a multi-day trip has one bill per day, not one). Kept as a JSON
+  // array on the claim row — same "attachments as JSON" shape already used for employee documents
+  // and leave handover attachments — rather than a new join table, since a receipt is only ever
+  // read as part of its claim, never queried independently.
+  // Each entry: { name, dataUrl, hash, aiChecked, amountMatch, placeMatch, note }.
+  // receipt_data_url/receipt_hash (singular, above) stay for any claim submitted before this
+  // existed; expensePresent() in expenses.routes.js synthesizes a one-item receipts array from
+  // them when receipts_json is empty, so an old claim still displays correctly.
+  if (!expenseCols.includes('receipts_json')) db.exec('ALTER TABLE expense_claims ADD COLUMN receipts_json TEXT');
+
+  // One row per receipt hash, so Duplicate Receipt Detection is an indexed lookup instead of
+  // parsing every claim's receipts_json to check one new upload. Populated at submission time
+  // for every claim going forward (see expenses.routes.js). Backfilled here, idempotently, from
+  // any pre-existing single-receipt claims — INSERT OR IGNORE against the UNIQUE constraint below
+  // means running this again after new hashes already exist is a no-op for the rows it already has.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS expense_receipt_hashes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      claim_id INTEGER NOT NULL REFERENCES expense_claims(id) ON DELETE CASCADE,
+      hash TEXT NOT NULL,
+      UNIQUE(claim_id, hash)
+    );
+  `);
+  db.exec(`
+    INSERT OR IGNORE INTO expense_receipt_hashes (claim_id, hash)
+    SELECT id, receipt_hash FROM expense_claims WHERE receipt_hash IS NOT NULL;
+  `);
+
   // --- Employee Engagement Surveys: HR builds a rating-scale survey, employees respond once,
   // HR sees aggregated per-question averages. ---
   db.exec(`

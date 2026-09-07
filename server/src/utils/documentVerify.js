@@ -6,7 +6,7 @@ import { askOllama, parseJsonReply } from './aiAssist.js';
 
 // Reads a base64 data URL (the same storage shape used for employee documents/photos) into a
 // Buffer that tesseract.js can OCR directly.
-function bufferFromDataUrl(dataUrl) {
+export function bufferFromDataUrl(dataUrl) {
   const match = /^data:([^;]+);base64,(.+)$/.exec(dataUrl || '');
   if (!match) throw new Error('Not a valid file');
   return { mime: match[1], buffer: Buffer.from(match[2], 'base64') };
@@ -159,4 +159,69 @@ Respond with ONLY a single JSON object, no markdown, no explanation. Keep every 
     return mismatches.length ? `Mismatch on: ${mismatches.join(', ')}` : 'All fields matched the document.';
   })();
   return { results, overallNote, extractedText };
+}
+
+
+// --- Expense receipt AI check ---
+// A best-effort consistency check on ONE uploaded receipt image, not fraud detection: does the
+// claimed amount actually appear printed on it, and (for a travel claim) does the claimed place
+// show up in the text. It cannot confirm the receipt is genuine or unaltered.
+//
+// The amount is judged deterministically, the same reasoning as an ID/account number in
+// verifyDocumentFields above: testing an LLM on digit-level comparison was unreliable enough to be
+// unusable for something a payout decision might lean on. Every run of digits in the OCR'd text
+// (after stripping currency symbols/commas/decimals) is compared to the claimed amount as a whole
+// number; a receipt with GST/subtotal/total lines legitimately contains several numbers, so ANY
+// one of them matching counts as found — it is a presence check, not "the total equals this".
+//
+// Place is judged the same permissive way as a name: word overlap, not an exact phrase, since a
+// receipt prints an address/city in whatever formatting the vendor's printer used.
+function extractAmounts(text) {
+  const matches = text.match(/\d[\d,]*(?:\.\d+)?/g) || [];
+  return matches
+    .map((m) => Math.round(parseFloat(m.replace(/,/g, ''))))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+function amountFoundIn(claimedAmount, text) {
+  const claimed = Math.round(Number(claimedAmount));
+  if (!Number.isFinite(claimed) || claimed <= 0) return null;
+  return extractAmounts(text).includes(claimed);
+}
+function placeFoundIn(place, text) {
+  if (!place?.toString().trim()) return null;
+  return deterministicNameMatch(place, text);
+}
+
+export async function verifyExpenseReceipt({ amount, place }, dataUrl) {
+  const { mime, buffer } = bufferFromDataUrl(dataUrl);
+  if (mime === 'application/pdf') {
+    return {
+      extractedText: '',
+      amountMatch: null,
+      placeMatch: null,
+      note: "PDF receipts can't be read for verification yet — check this one manually."
+    };
+  }
+
+  const { data } = await recognize(buffer, 'eng');
+  const extractedText = (data?.text || '').trim();
+  if (!extractedText) {
+    return {
+      extractedText: '',
+      amountMatch: null,
+      placeMatch: null,
+      note: 'Could not read any text from this receipt — it may be too blurry or low-resolution. Check it manually.'
+    };
+  }
+
+  const amountMatch = amountFoundIn(amount, extractedText);
+  const placeMatch = placeFoundIn(place, extractedText);
+  const parts = [];
+  if (amountMatch === true) parts.push('Amount found on receipt');
+  else if (amountMatch === false) parts.push('Amount not found on receipt');
+  if (placeMatch === true) parts.push('place found');
+  else if (placeMatch === false) parts.push('place not found');
+  const note = parts.length ? parts.join(', ') : 'Nothing to check against.';
+
+  return { extractedText, amountMatch, placeMatch, note };
 }
