@@ -459,6 +459,44 @@ router.get('/mine/report/export.xlsx', async (req, res) => {
     excelRows, `my-attendance-${from}-to-${to}.xlsx`);
 });
 
+// One day's punches as a spreadsheet — what "View Logs" downloads. The row report above gives one
+// line per DAY; this is the detail inside a single day, every punch in order with whether it was a
+// check-in or a check-out, so a disputed day can be checked punch by punch.
+//
+// Device punches are the source when there are any (biometric_punches carries a punch_type per
+// event). A day with no device punches falls back to the attendance row's own check-in/check-out
+// times, and a day Super Admin/HR marked by hand has neither — that still exports, with the mark
+// and who made it, rather than downloading an empty sheet.
+router.get('/mine/logs/export.xlsx', async (req, res) => {
+  const me = myEmployee(req.user.sub);
+  if (!me) return res.status(400).json({ error: 'No employee record linked to your account.' });
+  const date = req.query.date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return res.status(400).json({ error: 'date is required in YYYY-MM-DD format' });
+
+  const att = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(me.id, date);
+  const punches = db.prepare('SELECT punch_time, punch_type, device_serial FROM biometric_punches WHERE employee_id = ? AND punch_time LIKE ? ORDER BY punch_time ASC')
+    .all(me.id, date + '%');
+
+  const TYPE_LABEL = { 'check-in': 'Check-In', 'check-out': 'Check-Out', unknown: 'Punch' };
+  let rows;
+  if (punches.length) {
+    rows = punches.map((p, i) => [i + 1, TYPE_LABEL[p.punch_type] || 'Punch', p.punch_time.slice(11, 19), 'Biometric (Fingerprint)', p.device_serial || '']);
+  } else {
+    const asHms = (t) => (t && t.length === 5 ? `${t}:00` : t);
+    rows = [];
+    if (att?.check_in_time) rows.push([rows.length + 1, 'Check-In', asHms(att.check_in_time), att.method || '', '']);
+    if (att?.check_out_time) rows.push([rows.length + 1, 'Check-Out', asHms(att.check_out_time), att.method || '', '']);
+  }
+  if (!rows.length) {
+    const markedBy = att?.marked_by ? db.prepare('SELECT name FROM users WHERE id = ?').get(att.marked_by)?.name : null;
+    rows.push(['', 'No punches recorded', '', markedBy ? `Marked ${att.half_day_manual ? 'Half Day' : att.status} by ${markedBy}` : (att ? `Marked ${att.status}` : 'Not marked'), '']);
+  }
+
+  await sendXlsx(res, `Logs ${date}`,
+    ['#', 'type', 'time', 'method', 'device'],
+    rows, `attendance-logs-${me.employee_code || me.id}-${date}.xlsx`);
+});
+
 // Calendar view — every day of one calendar month for one employee (self by default; HR/scoped
 // roles can pass ?id= for anyone in their scope, same filterToScope-then-narrow idiom as the CSV
 // exports), so the client can color a full month grid instead of just a rolling 30-day list.

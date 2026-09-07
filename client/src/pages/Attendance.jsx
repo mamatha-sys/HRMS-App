@@ -263,7 +263,7 @@ function MyAttendance({ compact }) {
   const [reportTo, setReportTo] = useState('');
   const [reportData, setReportData] = useState(null);
   const [reportError, setReportError] = useState('');
-  const [expandedDate, setExpandedDate] = useState(null);
+  const [loggingDate, setLoggingDate] = useState(null);
 
   function reportParams() {
     if (reportMonth) return { month: reportMonth };
@@ -281,6 +281,17 @@ function MyAttendance({ compact }) {
     setReportError('Choose either Month, or both a Start Date and End Date.');
   }
   function resetReportFilters() { setReportMonth(''); setReportFrom(''); setReportTo(''); setExpandedDate(null); loadReport(); }
+  // One day's punches, in order, each labelled Check-In or Check-Out.
+  async function exportDayLogs(date) {
+    setReportError(''); setLoggingDate(date);
+    try {
+      const res = await api.get('/attendance/mine/logs/export.xlsx', { params: { date }, responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a'); a.href = url; a.download = `attendance-logs-${date}.xlsx`; a.click(); URL.revokeObjectURL(url);
+    } catch {
+      setReportError(`Could not download the logs for ${date}.`);
+    } finally { setLoggingDate(null); }
+  }
   async function exportReportExcel() {
     const res = await api.get('/attendance/mine/report/export.xlsx', { params: reportParams(), responseType: 'blob' });
     const url = URL.createObjectURL(res.data);
@@ -440,15 +451,15 @@ function MyAttendance({ compact }) {
                   ) : '—'}</td>
                   <td>{r.total_hours || '—'}</td>
                   <td><span className={'status-tag ' + (r.status === 'Checked Out' ? 'present' : 'pending')}>{r.status}</span></td>
-                  <td><button onClick={() => setExpandedDate(expandedDate === r.date ? null : r.date)}>{expandedDate === r.date ? 'Hide' : 'View Logs'}</button></td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    <button
+                      onClick={() => exportDayLogs(r.date)}
+                      disabled={loggingDate === r.date}
+                      title={`Download ${r.date}'s check-ins and check-outs as Excel`}
+                    >{loggingDate === r.date ? 'Preparing…' : 'View Logs'}</button>
+                    {r.logs.length > 0 && <div className="feature-meta">{r.logs.length} punch{r.logs.length === 1 ? '' : 'es'}</div>}
+                  </td>
                 </tr>
-                {expandedDate === r.date && (
-                  <tr>
-                    <td colSpan={8}>
-                      <div className="feature-meta">{r.logs.length} punch{r.logs.length === 1 ? '' : 'es'}: {r.logs.join(', ')}</div>
-                    </td>
-                  </tr>
-                )}
               </Fragment>
             ))}</tbody>
           </table>
