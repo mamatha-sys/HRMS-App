@@ -681,6 +681,11 @@ function migrate() {
   // CHECK ('Present','Absent','Leave') — a half day is a Present day worth half, so it needs no
   // new status value and no table rebuild.
   if (!attCols.includes('half_day_manual')) db.exec('ALTER TABLE attendance ADD COLUMN half_day_manual INTEGER NOT NULL DEFAULT 0');
+  // Who marked a day by hand, and when. A manual mark moves someone's pay, so "HR says you were
+  // Absent" must be attributable — a self check-in leaves these NULL, which is how the two are
+  // told apart.
+  if (!attCols.includes('marked_by')) db.exec('ALTER TABLE attendance ADD COLUMN marked_by INTEGER REFERENCES users(id) ON DELETE SET NULL');
+  if (!attCols.includes('marked_at')) db.exec('ALTER TABLE attendance ADD COLUMN marked_at TEXT');
   // Tracks whether the employee has already been alerted about THIS row being a missed
   // check-out or missing check-in, so the sweep in attendanceCore.js only ever notifies once
   // per gap instead of re-notifying every time they open Attendance or check in again.

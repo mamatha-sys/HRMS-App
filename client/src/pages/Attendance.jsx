@@ -857,12 +857,14 @@ function MonthlyReports() {
         <>
           <div className="note" style={{ marginTop: 8 }}>Grace time 9:15 AM · {data.freeLateAllowance} free late arrival(s)/month, then each late day is flagged with an automatic half-day pay cut.</div>
           <table style={{ marginTop: 10 }}>
-            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Role</th><th>Present</th><th>Absent</th><th>Leave</th><th>Late</th><th>Half-day Cut</th><th>Attendance %</th><th></th></tr></thead>
+            <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Role</th><th title="Days marked Present, half days included">Present</th><th title="Of those Present days, how many were marked Half Day">Half Day</th><th>Absent</th><th>Leave</th><th>Late</th><th title="Late beyond the free monthly allowance">Half-day Cut</th><th title="Counts a half day as 0.5, matching what Payroll pays">Attendance %</th><th></th></tr></thead>
             <tbody>{data.rows.map((r) => (
               <Fragment key={r.id}>
                 <tr>
                   <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td><td>{r.designation || '—'}</td>
-                  <td>{r.present}</td><td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
+                  <td>{r.present}{r.halfDay > 0 && <span className="feature-meta"> ({r.effectivePresent} eff.)</span>}</td>
+                  <td>{r.halfDay > 0 ? <span className="status-tag pending">{r.halfDay}</span> : 0}</td>
+                  <td>{r.absent}</td><td>{r.leave}</td><td>{r.late}</td>
                   <td>{r.halfDayCut > 0 ? <span className="status-tag absent">{r.halfDayCut}</span> : 0}</td>
                   <td><strong>{r.attendancePct}%</strong></td>
                   <td style={{ whiteSpace: 'nowrap' }}>

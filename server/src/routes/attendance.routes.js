@@ -6,6 +6,7 @@ import { canModule, canModuleAdmin } from '../utils/rbac.js';
 import { isScopedRole, filterToScopeOrOwnDepartment } from '../utils/scope.js';
 import { bottomRole, approvalChainLabel } from '../utils/chain.js';
 import { nowTime, today, LATE_AFTER, METHODS, freeLateAllowance, recomputeLateFlags, upsertAttendanceForDate, enabledMethods, isMethodEnabled, setMethodEnabled, employeeCheckinMethods, setEmployeeCheckinMethods, effectiveMethodsFor, notifyIfLate, notifyIfEarlyLogout, notifyAttendanceGaps, effectiveShiftFor, computeWorkStats } from '../utils/attendanceCore.js';
+import { notifyEmployee } from '../utils/notify.js';
 import { isValidDescriptor, euclideanDistance, FACE_MATCH_THRESHOLD } from '../utils/face.js';
 
 const router = Router();
@@ -236,14 +237,18 @@ router.get('/monthly-report', (req, res) => {
     req.user.role, myEmployee(req.user.sub)?.id
   ), req.query);
   const rows = employees.map((e) => {
-    const marks = db.prepare('SELECT status, check_in_time, half_day_flag, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
+    const marks = db.prepare('SELECT status, check_in_time, half_day_flag, half_day_manual, late_minutes FROM attendance WHERE employee_id = ? AND date LIKE ?').all(e.id, month + '%');
     const present = marks.filter((m) => m.status === 'Present').length;
+    const halfDay = marks.filter((m) => m.half_day_manual).length;
     const absent = marks.filter((m) => m.status === 'Absent').length;
     const leave = marks.filter((m) => m.status === 'Leave').length;
     const late = marks.filter((m) => m.late_minutes > 0).length;
     const halfDayCut = marks.filter((m) => m.half_day_flag).length;
-    const attendancePct = daysInMonth > 0 ? Math.round((present / daysInMonth) * 100) : 0;
-    return { ...e, present, absent, leave, late, halfDayCut, attendancePct };
+    // A half day is stored as a Present row, so counting Present alone would report it as a whole
+    // day attended while Payroll pays it at half — the two must agree.
+    const effectivePresent = present - 0.5 * halfDay;
+    const attendancePct = daysInMonth > 0 ? Math.round((effectivePresent / daysInMonth) * 100) : 0;
+    return { ...e, present, halfDay, effectivePresent, absent, leave, late, halfDayCut, attendancePct };
   });
   res.json({ month, daysInMonth, rows, freeLateAllowance: freeLateAllowance() });
 });
@@ -627,9 +632,17 @@ router.post('/mark', (req, res) => {
   const halfDay = status === 'Half Day' ? 1 : 0;
   const storedStatus = status === 'Half Day' ? 'Present' : status;
   const existing = db.prepare('SELECT * FROM attendance WHERE employee_id = ? AND date = ?').get(employee_id, d);
+  const wasLabel = existing ? (existing.half_day_manual ? 'Half Day' : existing.status) : 'Not marked';
   // Re-marking a day as anything else clears the half-day mark, so the two can never disagree.
-  if (existing) db.prepare('UPDATE attendance SET status = ?, half_day_manual = ? WHERE id = ?').run(storedStatus, halfDay, existing.id);
-  else db.prepare('INSERT INTO attendance (employee_id, date, status, half_day_manual) VALUES (?, ?, ?, ?)').run(employee_id, d, storedStatus, halfDay);
+  if (existing) db.prepare("UPDATE attendance SET status = ?, half_day_manual = ?, marked_by = ?, marked_at = datetime('now') WHERE id = ?").run(storedStatus, halfDay, req.user.sub, existing.id);
+  else db.prepare("INSERT INTO attendance (employee_id, date, status, half_day_manual, marked_by, marked_at) VALUES (?, ?, ?, ?, ?, datetime('now'))").run(employee_id, d, storedStatus, halfDay, req.user.sub);
+
+  // A day marked by hand decides that day's pay, so the employee is told rather than left to
+  // discover it on a payslip. Silent when nothing actually changed (re-clicking the same button).
+  if (wasLabel !== status) {
+    notifyEmployee(employee_id, `Attendance updated — ${d}`,
+      `${req.user.name || 'HR'} set your attendance for ${d} to ${status}${wasLabel !== 'Not marked' ? ` (was ${wasLabel})` : ''}. Raise a regularization request from My Attendance if this is wrong.`);
+  }
   res.json({ ok: true });
 });
 
