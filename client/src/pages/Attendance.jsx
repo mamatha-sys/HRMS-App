@@ -46,8 +46,12 @@ const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // Month-grid calendar, color-coded by day status, with a per-month Present/Absent/Leave/Not-
 // marked count row — used both for an employee's own view (no employeeId) and, from HR's Monthly
 // Report, for any one employee in scope (employeeId set, mirrors the CSV export's ?id= idiom).
-function AttendanceCalendar({ employeeId, employeeLabel }) {
-  const [month, setMonth] = useState(new Date().toISOString().slice(0, 7));
+// `initialMonth` opens the calendar on the month being worked on rather than today's — marking
+// attendance for a past date and then opening the calendar on the current month shows a grid with
+// none of the marks just made. `refreshKey` re-fetches when the underlying attendance changes, so
+// a mark made in the grid above appears on the calendar immediately.
+function AttendanceCalendar({ employeeId, employeeLabel, initialMonth, refreshKey }) {
+  const [month, setMonth] = useState(initialMonth || new Date().toISOString().slice(0, 7));
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
 
@@ -55,7 +59,7 @@ function AttendanceCalendar({ employeeId, employeeLabel }) {
     api.get('/attendance/calendar', { params: { month: m, ...(employeeId ? { id: employeeId } : {}) } })
       .then((r) => setData(r.data)).catch(() => setError('Could not load calendar.'));
   }
-  useEffect(() => { load(month); }, [employeeId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { load(month); }, [employeeId, refreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function changeMonth(delta) {
     const [y, m] = month.split('-').map(Number);
@@ -407,6 +411,8 @@ function HRAttendance({ compact, sectionLabel }) {
   const [departments, setDepartments] = useState([]);
   const [error, setError] = useState('');
   const [showGrid, setShowGrid] = useState(false);
+  const [calendarFor, setCalendarFor] = useState(null);
+  const [calRefresh, setCalRefresh] = useState(0);
   const [tab, setTab] = useState('dashboard'); // dashboard | biometric | reports | methods
   const [checkInMethods, setCheckInMethods] = useState(null);
   const [empMethods, setEmpMethods] = useState(null);
@@ -441,7 +447,11 @@ function HRAttendance({ compact, sectionLabel }) {
     try { await api.post(`/approvals/${id}/${verb}`); load(date, dept); } catch (err) { setError(err.response?.data?.error || 'Action failed.'); }
   }
   async function mark(employee_id, status) {
-    try { await api.post('/attendance/mark', { employee_id, date, status }); load(date, dept); } catch (err) { setError(err.response?.data?.error || 'Could not mark.'); }
+    try {
+      await api.post('/attendance/mark', { employee_id, date, status });
+      load(date, dept);
+      setCalRefresh((k) => k + 1); // so an open calendar shows the mark that was just made
+    } catch (err) { setError(err.response?.data?.error || 'Could not mark.'); }
   }
   async function exportCsv() {
     const res = await api.get('/attendance/export', { params: { date }, responseType: 'blob' });
@@ -593,17 +603,37 @@ function HRAttendance({ compact, sectionLabel }) {
               <table>
                 <thead><tr><th>Code</th><th>Name</th><th>Department</th><th>Status</th><th>In</th><th>Location</th><th>Mark</th></tr></thead>
                 <tbody>{grid.rows.map((r) => (
-                  <tr key={r.employee_id}>
-                    <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
-                    <td><span className={'status-tag ' + tag(r.status)}>{r.status || 'Not marked'}</span></td>
-                    <td>{r.check_in_time || '—'}{!!r.half_day_flag && <span className="status-tag absent" style={{ marginLeft: 6 }} title="Late beyond the free monthly allowance — half-day pay cut">½-day cut</span>}</td>
-                    <td>{r.latitude != null ? <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>
-                      <button className="btn-approve" onClick={() => mark(r.employee_id, 'Present')}>P</button>
-                      <button className="btn-reject" style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Absent')}>A</button>
-                      <button style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Leave')}>L</button>
-                    </td>
-                  </tr>
+                  <Fragment key={r.employee_id}>
+                    <tr>
+                      <td>{r.employee_code}</td><td>{r.name}</td><td>{r.department}</td>
+                      <td><span className={'status-tag ' + tag(r.status)}>{r.status || 'Not marked'}</span></td>
+                      <td>{r.check_in_time || '—'}{!!r.half_day_flag && <span className="status-tag absent" style={{ marginLeft: 6 }} title="Late beyond the free monthly allowance — half-day pay cut">½-day cut</span>}</td>
+                      <td>{r.latitude != null ? <a className="crumb" href={mapLink(r.latitude, r.longitude)} target="_blank" rel="noreferrer">📍 map</a> : '—'}</td>
+                      <td style={{ whiteSpace: 'nowrap' }}>
+                        <button className="btn-approve" onClick={() => mark(r.employee_id, 'Present')}>P</button>
+                        <button className="btn-reject" style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Absent')}>A</button>
+                        <button style={{ marginLeft: 4 }} onClick={() => mark(r.employee_id, 'Leave')}>L</button>
+                        {/* The grid marks one date at a time; the calendar is the same data for the
+                            whole month, so you can see what you just marked in context and spot the
+                            gaps that Payroll will treat as Loss of Pay. */}
+                        <button
+                          style={{ marginLeft: 6 }}
+                          title={`Show ${r.name}'s month calendar`}
+                          onClick={() => setCalendarFor(calendarFor === r.employee_id ? null : r.employee_id)}
+                        >{calendarFor === r.employee_id ? '📅 Hide' : '📅 Calendar'}</button>
+                      </td>
+                    </tr>
+                    {calendarFor === r.employee_id && (
+                      <tr><td colSpan={7} style={{ background: '#F7F8FA' }}>
+                        <AttendanceCalendar
+                          employeeId={r.employee_id}
+                          employeeLabel={`${r.name}'s`}
+                          initialMonth={date ? date.slice(0, 7) : undefined}
+                          refreshKey={calRefresh}
+                        />
+                      </td></tr>
+                    )}
+                  </Fragment>
                 ))}</tbody>
               </table>
             </div>
