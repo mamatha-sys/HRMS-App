@@ -1642,18 +1642,35 @@ function migrate() {
     );
   `);
 
-  // --- Rewards & Recognition: peer/manager nominations with a points value per award type. ---
+  // --- Rewards & Recognition: peer/manager nominations with a points value per award type.
+  // from_employee_id is nullable: Super Admin is a pure system-administrator account with no
+  // employee record of its own, and is still allowed to give recognition (see recognition.
+  // routes.js) — a NOT NULL here would reject that on a fresh install's very first award. ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS recognitions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      from_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      from_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
       to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
       award_type TEXT NOT NULL CHECK (award_type IN ('Employee of the Month','Spot Award','Team Player','Innovation Award','Above & Beyond')),
       message TEXT NOT NULL,
       points INTEGER NOT NULL DEFAULT 10,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Award is a combobox, not a locked dropdown: pick one of the five above, or type a new one.
+    -- A typed award that isn't already known lands here so it becomes a suggested option (and
+    -- its point value is remembered) for next time — same shape as perm_custom_actions.
+    CREATE TABLE IF NOT EXISTS custom_award_types (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      points INTEGER NOT NULL DEFAULT 10,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+  // SQLite can't ALTER a CHECK constraint, so a typed award that isn't one of the five fixed
+  // values needs the constraint rebuilt off the table before it can be stored directly (rather
+  // than rejected, or silently coerced into one of the five). See migrateRecognitionsAwardType.
+  migrateRecognitionsAwardType();
 
   // --- Project & Resource Management: projects + per-employee allocation %, so over/under
   // allocation can be flagged across active projects. ---
@@ -1756,7 +1773,19 @@ function migrate() {
       note TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    -- Category is a combobox too: pick Warning/Suspension/Termination/Other, or type a new one.
+    -- Same shape as custom_award_types above.
+    CREATE TABLE IF NOT EXISTS custom_disciplinary_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
+  // Same CHECK-constraint removal as recognitions.award_type, so a typed category is stored
+  // directly instead of being rejected or coerced into 'Other'. disciplinary_cases.status keeps
+  // its own separate CHECK — see migrateDisciplinaryCategory for how the two are told apart.
+  migrateDisciplinaryCategory();
 
   migratePermissionCatalog();
   migrateTeamsAndScopes();
@@ -2489,6 +2518,73 @@ function migrateCandidatesTable() {
     });
     db.exec('DROP TABLE candidates');
     db.exec('ALTER TABLE candidates_new RENAME TO candidates');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// One-time rebuild: drop the CHECK constraint that locked award_type to 5 fixed values, so a
+// typed custom award can be stored directly in the same column — a real Recognition, not a
+// mislabeled "Other". Guarded on the CREATE TABLE sql still containing that specific CHECK
+// (rather than a column-existence check, since no column is being added), so it can never re-fire
+// once the constraint is gone.
+function migrateRecognitionsAwardType() {
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'recognitions'").get()?.sql || '';
+  if (!/award_type TEXT NOT NULL CHECK/.test(sql)) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE recognitions_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        from_employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE,
+        to_employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        award_type TEXT NOT NULL,
+        message TEXT NOT NULL,
+        points INTEGER NOT NULL DEFAULT 10,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    db.prepare(`
+      INSERT INTO recognitions_new (id, from_employee_id, to_employee_id, award_type, message, points, created_at)
+      SELECT id, from_employee_id, to_employee_id, award_type, message, points, created_at FROM recognitions
+    `).run();
+    db.exec('DROP TABLE recognitions');
+    db.exec('ALTER TABLE recognitions_new RENAME TO recognitions');
+  });
+  rebuild();
+  db.pragma('foreign_keys = ON');
+}
+
+// Same rebuild, for disciplinary_cases.category — a typed custom category is stored directly
+// rather than forced into 'Other'. status keeps its own CHECK ('Open'/'Resolved') untouched; the
+// guard names `category` specifically so it can't mistake that unrelated constraint for this one
+// and loop forever re-rebuilding.
+function migrateDisciplinaryCategory() {
+  const sql = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'disciplinary_cases'").get()?.sql || '';
+  if (!/category TEXT NOT NULL CHECK/.test(sql)) return;
+
+  db.pragma('foreign_keys = OFF');
+  const rebuild = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE disciplinary_cases_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+        category TEXT NOT NULL,
+        description TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'Open' CHECK (status IN ('Open','Resolved')),
+        raised_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        resolution_notes TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+    `);
+    db.prepare(`
+      INSERT INTO disciplinary_cases_new (id, employee_id, category, description, status, raised_by, resolution_notes, created_at, resolved_at)
+      SELECT id, employee_id, category, description, status, raised_by, resolution_notes, created_at, resolved_at FROM disciplinary_cases
+    `).run();
+    db.exec('DROP TABLE disciplinary_cases');
+    db.exec('ALTER TABLE disciplinary_cases_new RENAME TO disciplinary_cases');
   });
   rebuild();
   db.pragma('foreign_keys = ON');

@@ -23,20 +23,21 @@ export default function Disciplinary() {
 
 function HRView({ onOpen, compact, sectionLabel }) {
   const [cases, setCases] = useState([]);
+  const [categories, setCategories] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ employee_id: '', category: '', description: '' });
 
   function load() {
-    api.get('/disciplinary').then((r) => setCases(r.data.cases)).catch(() => setError('Could not load cases.'));
+    api.get('/disciplinary').then((r) => { setCases(r.data.cases); setCategories(r.data.categories || []); }).catch(() => setError('Could not load cases.'));
     api.get('/employees').then((r) => setEmployees(r.data.employees || r.data)).catch(() => {});
   }
   useEffect(load, []);
 
   async function raise(e) {
     e.preventDefault(); setError('');
-    if (!form.employee_id || !form.category || !form.description.trim()) { setError('Employee, category and description are all required.'); return; }
+    if (!form.employee_id || !form.category.trim() || !form.description.trim()) { setError('Employee, category and description are all required.'); return; }
     try { await api.post('/disciplinary', form); setForm({ employee_id: '', category: '', description: '' }); setShowForm(false); load(); }
     catch (err) { setError(err.response?.data?.error || 'Could not raise case.'); }
   }
@@ -55,11 +56,14 @@ function HRView({ onOpen, compact, sectionLabel }) {
               <option value="">Select employee…</option>
               {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
             </select>
-            <label className="field-label">Category *</label>
-            <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} required style={{ marginBottom: 10 }}>
-              <option value="">Select category…</option>
-              {['Warning', 'Suspension', 'Termination', 'Other'].map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            <label className="field-label">Category * <span className="feature-meta">(pick one, or type a new category)</span></label>
+            <input
+              list="disciplinary-categories" value={form.category} placeholder="e.g. Warning, or type a new one"
+              onChange={(e) => setForm({ ...form, category: e.target.value })} required style={{ marginBottom: 10 }}
+            />
+            <datalist id="disciplinary-categories">
+              {categories.map((c) => <option key={c} value={c} />)}
+            </datalist>
             <label className="field-label">Description *</label>
             <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} required style={{ marginBottom: 10 }} />
             <div className="row">

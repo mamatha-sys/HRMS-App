@@ -13,13 +13,28 @@ router.use(requireAuth);
 const isHR = (role) => canModuleAdmin(role, '22');
 const myEmployee = (sub) => db.prepare('SELECT * FROM employees WHERE user_id = ?').get(sub);
 
+const BUILTIN_CATEGORIES = ['Warning', 'Suspension', 'Termination', 'Other'];
+// Category is a combobox, not a locked dropdown: the 4 built-in values, plus anything HR has
+// typed before (custom_disciplinary_categories — see db.js's migrateDisciplinaryCategory, which
+// removed the CHECK constraint that used to make a custom category impossible to store).
+function allCategories() {
+  return [...BUILTIN_CATEGORIES, ...db.prepare('SELECT name FROM custom_disciplinary_categories ORDER BY name').all().map((c) => c.name)];
+}
+function rememberCustomCategory(name) {
+  if (BUILTIN_CATEGORIES.includes(name)) return;
+  db.prepare('INSERT OR IGNORE INTO custom_disciplinary_categories (name) VALUES (?)').run(name);
+}
+
 function withEmployee(rows) {
   return rows.map((r) => ({ ...r, employee_name: db.prepare('SELECT name, employee_code FROM employees WHERE id = ?').get(r.employee_id)?.name }));
 }
 
 router.get('/', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
-  res.json({ cases: withEmployee(db.prepare("SELECT * FROM disciplinary_cases ORDER BY (status='Open') DESC, created_at DESC").all()) });
+  res.json({
+    cases: withEmployee(db.prepare("SELECT * FROM disciplinary_cases ORDER BY (status='Open') DESC, created_at DESC").all()),
+    categories: allCategories()
+  });
 });
 
 router.get('/mine', (req, res) => {
@@ -32,10 +47,12 @@ router.post('/', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const { employee_id, category, description } = req.body || {};
   if (!employee_id) return res.status(400).json({ error: 'employee_id is required' });
-  if (!['Warning', 'Suspension', 'Termination', 'Other'].includes(category)) return res.status(400).json({ error: 'A valid category is required' });
+  const categoryName = category?.toString().trim();
+  if (!categoryName) return res.status(400).json({ error: 'A valid category is required' });
   if (!description?.trim()) return res.status(400).json({ error: 'A description is required' });
+  rememberCustomCategory(categoryName);
   const info = db.prepare('INSERT INTO disciplinary_cases (employee_id, category, description, raised_by) VALUES (?, ?, ?, ?)')
-    .run(employee_id, category, description.trim(), req.user.sub);
+    .run(employee_id, categoryName, description.trim(), req.user.sub);
   res.status(201).json({ case: withEmployee([db.prepare('SELECT * FROM disciplinary_cases WHERE id = ?').get(info.lastInsertRowid)])[0] });
 });
 

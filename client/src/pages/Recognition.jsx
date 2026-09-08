@@ -12,15 +12,16 @@ export default function Recognition() {
   const canGive = CAN_GIVE_ROLES.includes(user?.role);
   const [feed, setFeed] = useState([]);
   const [awardTypes, setAwardTypes] = useState([]);
+  const [awardPoints, setAwardPoints] = useState({});
   const [leaderboard, setLeaderboard] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [employeesLoaded, setEmployeesLoaded] = useState(false);
   const [error, setError] = useState('');
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ to_employee_id: '', award_type: '', message: '' });
+  const [form, setForm] = useState({ to_employee_id: '', award_type: '', message: '', points: '' });
 
   function load() {
-    api.get('/recognition/feed').then((r) => { setFeed(r.data.feed); setAwardTypes(r.data.awardTypes); }).catch(() => setError('Could not load recognitions.'));
+    api.get('/recognition/feed').then((r) => { setFeed(r.data.feed); setAwardTypes(r.data.awardTypes); setAwardPoints(r.data.awardPoints || {}); }).catch(() => setError('Could not load recognitions.'));
     api.get('/recognition/leaderboard').then((r) => setLeaderboard(r.data.leaderboard)).catch(() => {});
     if (canGive) {
       api.get('/employees').then((r) => setEmployees(r.data.employees || r.data)).catch(() => {}).finally(() => setEmployeesLoaded(true));
@@ -34,12 +35,17 @@ export default function Recognition() {
   // is exempt — a true system-administrator account is allowed to give recognition unlinked.
   const isLinked = user?.role === 'super_admin' || employees.some((e) => e.user_id === user?.id);
 
+  // Typed award that isn't one of the known ones (built-in or previously custom) needs its own
+  // points value from HR — a name alone has no natural point value.
+  const isKnownAward = awardTypes.includes(form.award_type.trim());
+  const isCustomAward = form.award_type.trim() && !isKnownAward;
+
   async function submit(e) {
     e.preventDefault(); setError('');
-    if (!form.to_employee_id || !form.award_type || !form.message.trim()) { setError('Choose who, the award type, and write a message.'); return; }
+    if (!form.to_employee_id || !form.award_type.trim() || !form.message.trim()) { setError('Choose who, the award type, and write a message.'); return; }
     try {
       await api.post('/recognition', form);
-      setForm({ to_employee_id: '', award_type: '', message: '' });
+      setForm({ to_employee_id: '', award_type: '', message: '', points: '' });
       setShowForm(false);
       load();
     } catch (err) { setError(err.response?.data?.error || 'Could not send recognition.'); }
@@ -62,11 +68,21 @@ export default function Recognition() {
                 <option value="">Select employee…</option>
                 {employees.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.employee_code})</option>)}
               </select>
-              <label className="field-label">Award *</label>
-              <select value={form.award_type} onChange={(e) => setForm({ ...form, award_type: e.target.value })} required style={{ marginBottom: 10 }}>
-                <option value="">Select award…</option>
-                {awardTypes.map((a) => <option key={a} value={a}>{a}</option>)}
-              </select>
+              <label className="field-label">Award * <span className="feature-meta">(pick one, or type a new award name)</span></label>
+              <input
+                list="award-types" value={form.award_type} placeholder="e.g. Employee of the Month, or type a new one"
+                onChange={(e) => setForm({ ...form, award_type: e.target.value })} required style={{ marginBottom: isCustomAward ? 6 : 10 }}
+              />
+              <datalist id="award-types">
+                {awardTypes.map((a) => <option key={a} value={a} />)}
+              </datalist>
+              {isKnownAward && <div className="feature-meta" style={{ marginBottom: 10 }}>Worth {awardPoints[form.award_type.trim()] ?? 10} points.</div>}
+              {isCustomAward && (
+                <>
+                  <label className="field-label">Points for this new award *</label>
+                  <input type="number" min="0" value={form.points} placeholder="e.g. 15" onChange={(e) => setForm({ ...form, points: e.target.value })} required style={{ marginBottom: 10 }} />
+                </>
+              )}
               <label className="field-label">Message *</label>
               <input value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} required style={{ marginBottom: 10 }} />
               <div className="row">
