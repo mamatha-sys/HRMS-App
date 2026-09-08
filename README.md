@@ -187,3 +187,5 @@ client/
     components/         # Sidebar, Topbar, widgets, DonutChart, FaceCapture helpers
     faceApi.js          # face-api.js model loading + descriptor extraction
 ```
+
+Automatic deployment test - 09/08/2026 20:58:24
