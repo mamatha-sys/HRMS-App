@@ -1,8 +1,9 @@
 $ErrorActionPreference = "Stop"
 
 # ==========================================
-# HRMS LOCAL → VPS DATABASE SYNC
+# HRMS LOCAL -> VPS DATABASE SYNC
 # LOCAL DATABASE = MASTER
+# WAL-SAFE SQLITE BACKUP
 # SAFE MODE + AUTO ROLLBACK
 # ==========================================
 
@@ -26,50 +27,99 @@ Write-Host ""
 Write-Host "=========================================="
 Write-Host " HRMS DATABASE SYNC"
 Write-Host " LOCAL = MASTER"
+Write-Host " WAL-SAFE SQLITE BACKUP"
 Write-Host " SAFE MODE + AUTO ROLLBACK"
 Write-Host "=========================================="
 Write-Host ""
 
 # ==========================================
 # STEP 1
-# Create SQLite snapshot
+# Create WAL-safe local backup
 # ==========================================
 
-Write-Host "[1/8] Creating SQLite snapshot..."
+Write-Host "[1/9] Creating WAL-safe SQLite backup..."
 
 if (!(Test-Path $LocalDb)) {
     throw "Local database not found: $LocalDb"
 }
 
+Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
+
 Push-Location "$ProjectRoot\server"
 
-node create-db-snapshot.cjs
+$BackupCode = @'
+const Database = require("better-sqlite3");
 
-if ($LASTEXITCODE -ne 0) {
-    Pop-Location
-    throw "SQLite snapshot creation failed."
-}
+(async () => {
+    const source = new Database("./data/hrms.db", {
+        readonly: true
+    });
+
+    try {
+        await source.backup("./data/hrms-sync-temp.db");
+        console.log("SQLite backup completed.");
+    } finally {
+        source.close();
+    }
+
+    const test = new Database("./data/hrms-sync-temp.db", {
+        readonly: true
+    });
+
+    try {
+        const integrity = test.pragma("integrity_check", {
+            simple: true
+        });
+
+        console.log("Backup integrity:", integrity);
+
+        if (integrity !== "ok") {
+            throw new Error(
+                "Backup integrity check failed: " + integrity
+            );
+        }
+    } finally {
+        test.close();
+    }
+})().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
+'@
+
+$BackupCode | Set-Content ".\create-safe-backup.cjs" -Encoding UTF8
+
+node ".\create-safe-backup.cjs"
+
+$NodeExit = $LASTEXITCODE
+
+Remove-Item ".\create-safe-backup.cjs" -Force -ErrorAction SilentlyContinue
 
 Pop-Location
 
-if (!(Test-Path $LocalSnapshot)) {
-    throw "Snapshot was not created."
+if ($NodeExit -ne 0) {
+    Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
+    throw "SQLite backup creation failed."
 }
 
-Write-Host "Snapshot created:"
+if (!(Test-Path $LocalSnapshot)) {
+    throw "SQLite backup was not created."
+}
+
+Write-Host "Backup created:"
 Write-Host $LocalSnapshot
 
 # ==========================================
 # STEP 2
-# Validate snapshot locally
+# Validate local backup
 # ==========================================
 
 Write-Host ""
-Write-Host "[2/8] Validating local snapshot..."
+Write-Host "[2/9] Validating local backup..."
 
 Push-Location "$ProjectRoot\server"
 
-$LocalCheck = node -e "const Database=require('better-sqlite3'); const db=new Database('./data/hrms-sync-temp.db',{readonly:true}); const r=db.prepare('PRAGMA integrity_check').all(); console.log(r.map(x=>x.integrity_check).join('\n')); db.close();"
+$LocalCheck = node -e "const Database=require('better-sqlite3'); const db=new Database('./data/hrms-sync-temp.db',{readonly:true}); console.log(db.pragma('integrity_check',{simple:true})); db.close();"
 
 $NodeExit = $LASTEXITCODE
 
@@ -77,7 +127,7 @@ Pop-Location
 
 if ($NodeExit -ne 0) {
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
-    throw "Local snapshot could not be opened by better-sqlite3."
+    throw "Local backup could not be opened."
 }
 
 Write-Host "Local integrity:"
@@ -85,18 +135,18 @@ Write-Host $LocalCheck
 
 if ($LocalCheck.Trim() -ne "ok") {
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
-    throw "LOCAL SNAPSHOT FAILED INTEGRITY CHECK."
+    throw "LOCAL BACKUP FAILED INTEGRITY CHECK."
 }
 
-Write-Host "Local snapshot integrity OK."
+Write-Host "Local backup integrity OK."
 
 # ==========================================
 # STEP 3
-# Upload to VPS
+# Upload temporary database
 # ==========================================
 
 Write-Host ""
-Write-Host "[3/8] Uploading snapshot..."
+Write-Host "[3/9] Uploading database backup..."
 
 scp -i $SshKey $LocalSnapshot "${VpsHost}:${VpsTempDb}"
 
@@ -109,11 +159,11 @@ Write-Host "Upload completed."
 
 # ==========================================
 # STEP 4
-# Validate uploaded VPS DB
+# Validate uploaded database
 # ==========================================
 
 Write-Host ""
-Write-Host "[4/8] Validating uploaded VPS database..."
+Write-Host "[4/9] Validating uploaded VPS database..."
 
 $VpsCheck = ssh -i $SshKey $VpsHost "sqlite3 '$VpsTempDb' 'PRAGMA integrity_check;'"
 
@@ -136,13 +186,11 @@ Write-Host "VPS temporary database integrity OK."
 
 # ==========================================
 # STEP 5
-# Stop HRMS + Backup
+# Stop HRMS and checkpoint old WAL
 # ==========================================
 
 Write-Host ""
-Write-Host "[5/8] Preparing production..."
-
-Write-Host "Stopping HRMS..."
+Write-Host "[5/9] Stopping HRMS and preparing SQLite..."
 
 ssh -i $SshKey $VpsHost "pm2 stop hrms"
 
@@ -152,37 +200,74 @@ if ($LASTEXITCODE -ne 0) {
     throw "Failed to stop HRMS."
 }
 
-Write-Host "Creating VPS backup..."
+Write-Host "HRMS stopped."
+
+Write-Host "Checkpointing existing VPS WAL..."
+
+$Checkpoint = ssh -i $SshKey $VpsHost "sqlite3 '$VpsDb' 'PRAGMA wal_checkpoint(TRUNCATE);'"
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "WAL checkpoint failed."
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsTempDb'"
+    Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
+    throw "Existing VPS WAL checkpoint failed."
+}
+
+Write-Host "WAL checkpoint:"
+Write-Host $Checkpoint
+
+# ==========================================
+# STEP 6
+# Backup complete production DB state
+# ==========================================
+
+Write-Host ""
+Write-Host "[6/9] Backing up current production database..."
 
 ssh -i $SshKey $VpsHost "cp '$VpsDb' '$VpsBackup'"
 
 if ($LASTEXITCODE -ne 0) {
-    ssh -i $SshKey $VpsHost "pm2 restart hrms"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
     ssh -i $SshKey $VpsHost "rm -f '$VpsTempDb'"
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
-    throw "Failed to create VPS backup."
+    throw "Failed to create VPS production backup."
 }
 
-Write-Host "Backup created:"
+Write-Host "Production backup:"
 Write-Host $BackupName
 
 # ==========================================
-# STEP 6
-# Replace production DB
+# STEP 7
+# Remove stale WAL/SHM and replace DB
 # ==========================================
 
 Write-Host ""
-Write-Host "[6/8] Replacing production database..."
+Write-Host "[7/9] Replacing production database..."
+
+# Remove old WAL/SHM only after HRMS is stopped
+# and WAL checkpoint has completed.
+
+ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to remove old WAL/SHM files."
+    ssh -i $SshKey $VpsHost "cp '$VpsBackup' '$VpsDb'"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsTempDb'"
+    Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
+    throw "Could not remove old SQLite WAL/SHM files."
+}
 
 ssh -i $SshKey $VpsHost "mv '$VpsTempDb' '$VpsDb'"
 
 if ($LASTEXITCODE -ne 0) {
+    Write-Host "Database replacement failed."
+    Write-Host "Restoring previous database..."
 
-    Write-Host "Replacement failed."
-    Write-Host "Restoring backup..."
-
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
     ssh -i $SshKey $VpsHost "cp '$VpsBackup' '$VpsDb'"
-    ssh -i $SshKey $VpsHost "pm2 restart hrms"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
 
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
 
@@ -191,20 +276,34 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Production database replaced."
 
-Write-Host "Checking production integrity..."
+# Make absolutely sure no stale sidecar files survived
+ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
+
+Write-Host "Old WAL/SHM files cleared."
+
+# ==========================================
+# STEP 8
+# Validate production and restart
+# ==========================================
+
+Write-Host ""
+Write-Host "[8/9] Validating production database..."
 
 $ProductionCheck = ssh -i $SshKey $VpsHost "sqlite3 '$VpsDb' 'PRAGMA integrity_check;'"
 
+Write-Host "Production integrity:"
 Write-Host $ProductionCheck
 
 if ($LASTEXITCODE -ne 0 -or $ProductionCheck.Trim() -ne "ok") {
 
     Write-Host ""
-    Write-Host "Integrity failed."
-    Write-Host "Restoring previous database..."
+    Write-Host "PRODUCTION INTEGRITY FAILED."
+    Write-Host "Automatic rollback starting..."
 
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb'"
     ssh -i $SshKey $VpsHost "cp '$VpsBackup' '$VpsDb'"
-    ssh -i $SshKey $VpsHost "pm2 restart hrms"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
     ssh -i $SshKey $VpsHost "pm2 save"
 
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
@@ -212,25 +311,23 @@ if ($LASTEXITCODE -ne 0 -or $ProductionCheck.Trim() -ne "ok") {
     throw "Production integrity failed. Previous database restored."
 }
 
-Write-Host "Production integrity OK."
-
-# ==========================================
-# STEP 7
-# Restart HRMS
-# ==========================================
+Write-Host "Production database integrity OK."
 
 Write-Host ""
-Write-Host "[7/8] Starting HRMS..."
+Write-Host "Starting HRMS..."
 
-ssh -i $SshKey $VpsHost "pm2 restart hrms"
+ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
 
 if ($LASTEXITCODE -ne 0) {
 
     Write-Host "HRMS restart failed."
-    Write-Host "Restoring previous database..."
+    Write-Host "Automatic database rollback starting..."
 
+    ssh -i $SshKey $VpsHost "pm2 stop hrms"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb'"
     ssh -i $SshKey $VpsHost "cp '$VpsBackup' '$VpsDb'"
-    ssh -i $SshKey $VpsHost "pm2 restart hrms"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
     ssh -i $SshKey $VpsHost "pm2 save"
 
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
@@ -238,23 +335,23 @@ if ($LASTEXITCODE -ne 0) {
     throw "HRMS restart failed."
 }
 
-ssh -i $SshKey $VpsHost "pm2 save"
-
 Start-Sleep -Seconds 5
 
-Write-Host "Checking API..."
+Write-Host "Checking API health..."
 
 $Health = ssh -i $SshKey $VpsHost "curl -fsS http://127.0.0.1:4000/api/health"
 
 if ($LASTEXITCODE -ne 0) {
 
     Write-Host ""
-    Write-Host "API health failed."
-    Write-Host "Restoring previous database..."
+    Write-Host "API HEALTH CHECK FAILED."
+    Write-Host "Automatic database rollback starting..."
 
     ssh -i $SshKey $VpsHost "pm2 stop hrms"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb-wal' '$VpsDb-shm'"
+    ssh -i $SshKey $VpsHost "rm -f '$VpsDb'"
     ssh -i $SshKey $VpsHost "cp '$VpsBackup' '$VpsDb'"
-    ssh -i $SshKey $VpsHost "pm2 restart hrms"
+    ssh -i $SshKey $VpsHost "pm2 restart hrms --update-env"
     ssh -i $SshKey $VpsHost "pm2 save"
 
     Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
@@ -265,13 +362,15 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "API:"
 Write-Host $Health
 
+ssh -i $SshKey $VpsHost "pm2 save"
+
 # ==========================================
-# STEP 8
+# STEP 9
 # Cleanup
 # ==========================================
 
 Write-Host ""
-Write-Host "[8/8] Cleaning temporary files..."
+Write-Host "[9/9] Cleaning temporary files..."
 
 Remove-Item $LocalSnapshot -Force -ErrorAction SilentlyContinue
 
