@@ -811,6 +811,97 @@ function HRLeave({ compact, sectionLabel }) {
   );
 }
 
+// Employee ID / Name / Department / Role / Date-range filters over every leave request (any
+// status, any leave type) — a different report from the balance ledger below it: this is who
+// actually applied for leave and when, not how many days they have left.
+function LeaveRequestsReport() {
+  const [requests, setRequests] = useState(null);
+  const [error, setError] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const [filters, setFilters] = useState({ code: '', name: '', department: '', role: '', from: '', to: '' });
+
+  useEffect(() => { api.get('/leaves/reports/requests').then((r) => setRequests(r.data.requests)).catch(() => setError('Could not load leave requests.')); }, []);
+
+  const departments = [...new Set((requests || []).map((r) => r.department).filter(Boolean))].sort();
+  const roles = [...new Set((requests || []).map((r) => r.designation).filter(Boolean))].sort();
+
+  // Date range is by overlap, not "starts within" — a 5-day request that only partly falls
+  // inside the picked range still answers "who was on leave during this period".
+  const filtered = (requests || []).filter((r) =>
+    (!filters.code || (r.employee_code || '').toLowerCase().includes(filters.code.trim().toLowerCase())) &&
+    (!filters.name || (r.employee_name || '').toLowerCase().includes(filters.name.trim().toLowerCase())) &&
+    (!filters.department || r.department === filters.department) &&
+    (!filters.role || r.designation === filters.role) &&
+    (!filters.from || r.to_date >= filters.from) &&
+    (!filters.to || r.from_date <= filters.to)
+  );
+  const anyFilter = filters.code || filters.name || filters.department || filters.role || filters.from || filters.to;
+
+  async function exportExcel() {
+    setExporting(true); setError('');
+    try {
+      const res = await api.get('/leaves/reports/requests/export.xlsx', { responseType: 'blob' });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement('a'); a.href = url; a.download = 'leave-requests.xlsx'; a.click(); URL.revokeObjectURL(url);
+    } catch { setError('Could not export.'); }
+    finally { setExporting(false); }
+  }
+
+  const STATUS_CLASS = { Pending: 'pending', Approved: 'present', Rejected: 'absent', Cancelled: 'locked' };
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="row" style={{ justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 8 }}>
+        <div className="feature-name">Leave Requests Report</div>
+        <button className="primary" onClick={exportExcel} disabled={exporting}>{exporting ? 'Preparing…' : 'Export (Excel)'}</button>
+      </div>
+      {error && <div className="banner error">{error}</div>}
+
+      <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+        <input placeholder="Employee ID…" value={filters.code} onChange={(e) => setFilters({ ...filters, code: e.target.value })} style={{ flex: '1 1 110px', maxWidth: 160 }} />
+        <input placeholder="Employee name…" value={filters.name} onChange={(e) => setFilters({ ...filters, name: e.target.value })} style={{ flex: '1 1 130px', maxWidth: 190 }} />
+        <select value={filters.department} onChange={(e) => setFilters({ ...filters, department: e.target.value })} style={{ flex: '1 1 130px', maxWidth: 190 }}>
+          <option value="">All Departments</option>
+          {departments.map((d) => <option key={d} value={d}>{d}</option>)}
+        </select>
+        <select value={filters.role} onChange={(e) => setFilters({ ...filters, role: e.target.value })} style={{ flex: '1 1 130px', maxWidth: 190 }}>
+          <option value="">All Roles</option>
+          {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <input type="date" title="From date" value={filters.from} onChange={(e) => setFilters({ ...filters, from: e.target.value })} style={{ width: 'auto' }} />
+        <input type="date" title="To date" value={filters.to} min={filters.from || undefined} onChange={(e) => setFilters({ ...filters, to: e.target.value })} style={{ width: 'auto' }} />
+        {anyFilter && <button onClick={() => setFilters({ code: '', name: '', department: '', role: '', from: '', to: '' })}>Clear</button>}
+        <div className="spacer" />
+        {requests && <span className="feature-meta">{filtered.length} of {requests.length}</span>}
+      </div>
+
+      {!requests && <div className="empty">Loading…</div>}
+      {requests && requests.length === 0 && <div className="empty">No leave requests yet.</div>}
+      {requests && requests.length > 0 && filtered.length === 0 && <div className="empty">No requests match these filters.</div>}
+      {filtered.length > 0 && (
+        <div className="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th><th>Name</th><th>Department</th><th>Role</th><th>Leave Type</th>
+                <th>From</th><th>To</th><th>Days</th><th>Status</th><th>Reason</th><th>Applied On</th>
+              </tr>
+            </thead>
+            <tbody>{filtered.map((r) => (
+              <tr key={r.id}>
+                <td>{r.employee_code}</td><td>{r.employee_name}</td><td>{r.department}</td><td>{r.designation || '—'}</td>
+                <td>{r.type}</td><td>{r.from_date}</td><td>{r.to_date}</td><td>{r.days}</td>
+                <td><span className={'status-tag ' + (STATUS_CLASS[r.status] || 'info')}>{r.status}</span></td>
+                <td>{r.reason || '—'}</td><td>{r.created_at?.slice(0, 10)}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function LeaveReports() {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -840,6 +931,8 @@ function LeaveReports() {
 
   return (
     <div>
+      <LeaveRequestsReport />
+
       {error && <div className="banner error">{error}</div>}
       <div className="row" style={{ justifyContent: 'flex-end', marginBottom: 10 }}><button className="primary" onClick={exportCsv}>Export balances</button></div>
 

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import ExcelJS from 'exceljs';
 import db from '../db.js';
 import { requireAuth } from '../middleware/auth.middleware.js';
 import { canModule, canModuleAdmin, canFeatureAction } from '../utils/rbac.js';
@@ -429,6 +430,47 @@ router.put('/approval-reasons/:id', (req, res) => {
 });
 
 // --- Reports: per-type balances table + full balance-change history ---
+// Every leave request (any status, any leave type) with the fields a Leave Requests Report is
+// filtered on: Employee ID/Name, Department, Role (designation — same "Role" column meaning
+// already used on Attendance's own reports, not the RBAC login role), and the request's own
+// From/To dates. Filtering itself happens client-side on this one fetch, same as the Payroll
+// preview and Performance progress table — this just returns the scoped set.
+function leaveRequestReportRows(req) {
+  const rows = db.prepare('SELECT * FROM leaves ORDER BY from_date DESC').all();
+  const enriched = rows.map((r) => {
+    const e = db.prepare('SELECT employee_code, name, department, team_id, designation FROM employees WHERE id = ?').get(r.employee_id) || {};
+    return {
+      id: r.id, employee_id: r.employee_id,
+      employee_code: e.employee_code, employee_name: e.name, department: e.department, team_id: e.team_id, designation: e.designation,
+      type: r.type, from_date: r.from_date, to_date: r.to_date, days: r.days,
+      status: r.cancelled ? 'Cancelled' : r.status, reason: r.reason, created_at: r.created_at
+    };
+  });
+  return filterToScopeOrOwnDepartment(enriched, req.user.role, myEmployee(req.user.sub)?.id);
+}
+
+router.get('/reports/requests', (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  res.json({ requests: leaveRequestReportRows(req) });
+});
+
+router.get('/reports/requests/export.xlsx', async (req, res) => {
+  if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
+  const rows = leaveRequestReportRows(req);
+  const wb = new ExcelJS.Workbook();
+  const sheet = wb.addWorksheet('Leave Requests');
+  sheet.addRow(['Employee Code', 'Employee Name', 'Department', 'Role', 'Leave Type', 'From', 'To', 'Days', 'Status', 'Reason', 'Applied On']).font = { bold: true };
+  rows.forEach((r) => sheet.addRow([
+    r.employee_code, r.employee_name, r.department, r.designation || '', r.type,
+    r.from_date, r.to_date, r.days, r.status, r.reason || '', r.created_at
+  ]));
+  sheet.columns.forEach((c) => { c.width = 18; });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="leave-requests.xlsx"');
+  await wb.xlsx.write(res);
+  res.end();
+});
+
 router.get('/reports', (req, res) => {
   if (!isHR(req.user.role)) return res.status(403).json({ error: 'Insufficient permissions' });
   const types = activeTypes();
