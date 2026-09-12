@@ -228,6 +228,12 @@ function HRPayroll({ compact, sectionLabel }) {
   const [ov, setOv] = useState(null);
   const [structures, setStructures] = useState([]);
   const [components, setComponents] = useState([]);
+  // Every component regardless of active/paused status, for the management pill row below — kept
+  // separate from `components` (which stays active-only, straight off /payroll/structures, since
+  // that one drives the actual salary-structure table columns and a paused component must not get
+  // a column there). Without this, /payroll/structures never returns a paused component at all, so
+  // pausing one made it vanish from the only place that could ever click it back on.
+  const [allSalaryComponents, setAllSalaryComponents] = useState([]);
   const [payslips, setPayslips] = useState([]);
   const [error, setError] = useState('');
   const [info, setInfo] = useState('');
@@ -253,6 +259,7 @@ function HRPayroll({ compact, sectionLabel }) {
   function load() {
     api.get('/payroll/overview').then((r) => setOv(r.data)).catch(() => setError('Could not load overview.'));
     api.get('/payroll/structures').then((r) => { setStructures(r.data.structures); setComponents(r.data.components); }).catch(() => {});
+    api.get('/payroll/components').then((r) => setAllSalaryComponents(r.data.components)).catch(() => {});
     api.get('/payroll/payslips').then((r) => setPayslips(r.data.payslips)).catch(() => {});
     api.get('/payroll/split-config').then((r) => { setSplitConfig(r.data.config); setSplitDraft(r.data.config); }).catch(() => {});
     api.get('/payroll/attendance-pay-config').then((r) => { setAttConfig(r.data.config); setAttBooleans(r.data.booleans || []); setAttTimes(r.data.times || []); }).catch(() => {});
@@ -603,7 +610,7 @@ function HRPayroll({ compact, sectionLabel }) {
               )}
 
               <div className="feature-meta" style={{ marginBottom: 8 }}>
-                All components: {components.map((c) => (
+                All components (including paused — click any to pause/resume): {allSalaryComponents.map((c) => (
                   <span key={c.id} className={'status-tag ' + (c.active ? (c.type === 'earning' ? 'present' : c.type === 'deduction' ? 'absent' : 'info') : 'pending')} style={{ marginRight: 6, cursor: 'pointer' }} onClick={() => toggleComponent(c)} title="Click to pause/resume">
                     {c.label}{!c.active ? ' (paused)' : ''}
                   </span>
