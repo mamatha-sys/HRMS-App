@@ -55,7 +55,7 @@ router.get('/cdata', (req, res) => {
     'TransTimes=00:00;23:59',
     'TransInterval=1',
     'TransFlag=TransData AttLog',
-    'TimeZone=5.5',
+    'TimeZone=330',
     'Realtime=1',
     'Encrypt=None',
     ''
