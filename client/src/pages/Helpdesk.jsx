@@ -30,15 +30,15 @@ function CategoryBadge({ category }) {
 }
 
 const KEY_FEATURES = [
-  { key: 'creation', label: 'Ticket Creation, Assignment & Categorization' },
-  { key: 'sla', label: 'SLA Tracking & Status' },
-  { key: 'resolution', label: 'Ticket Resolution, Closure & Reopening' },
-  { key: 'notes', label: 'Internal Notes, Attachments & Screenshots' },
-  { key: 'kb', label: 'Knowledge Base' },
-  { key: 'routing', label: 'Auto Routing & Email Notifications' },
-  { key: 'escalation', label: 'Ticket Escalation' },
-  { key: 'csat', label: 'CSAT / Customer Satisfaction Feedback' },
-  { key: 'reports', label: 'Helpdesk Dashboard, Reports & Analytics' }
+  { key: 'creation', label: 'Ticket Creation, Assignment & Categorization', blurb: 'Raise a ticket and assign it to someone.' },
+  { key: 'sla', label: 'SLA Tracking & Status', blurb: 'Within-SLA vs breached, per ticket.' },
+  { key: 'resolution', label: 'Ticket Resolution, Closure & Reopening', blurb: 'Resolve, close after confirmation, reopen.' },
+  { key: 'notes', label: 'Internal Notes, Attachments & Screenshots', blurb: 'Private HR/IT thread, hidden from the requester.' },
+  { key: 'kb', label: 'Knowledge Base', blurb: 'Self-serve help articles.' },
+  { key: 'routing', label: 'Auto Routing & Email Notifications', blurb: 'Auto-assign by category, email on new ticket.' },
+  { key: 'escalation', label: 'Ticket Escalation', blurb: 'Manually escalate SLA-breached tickets.' },
+  { key: 'csat', label: 'CSAT / Customer Satisfaction Feedback', blurb: 'Requester rates the resolution 1–5.' },
+  { key: 'reports', label: 'Helpdesk Dashboard, Reports & Analytics', blurb: 'Ticket volume and resolution-time stats.' }
 ];
 
 function readFileAsDataUrl(file) {
@@ -337,7 +337,12 @@ function HRHelpdesk({ compact, sectionLabel }) {
             {/* Non-canManage (Assistant Manager/STL/TL) only get view-safe screens — every other
                 tile drives a write endpoint (create/assign/resolve/escalate/KB-manage/routing/
                 reports) that's now blocked server-side for them. */}
-            {KEY_FEATURES.filter((f) => canManage || ['sla', 'kb'].includes(f.key)).map((f) => <button key={f.key} className="pill" onClick={() => setScreen(f.key)}>{f.label}</button>)}
+            {KEY_FEATURES.filter((f) => canManage || ['sla', 'kb'].includes(f.key)).map((f) => (
+              <button key={f.key} className="pill" style={{ textAlign: 'left', height: 'auto', padding: '8px 10px' }} onClick={() => setScreen(f.key)}>
+                <div>{f.label}</div>
+                <div className="feature-meta" style={{ fontWeight: 400, marginTop: 2 }}>{f.blurb}</div>
+              </button>
+            ))}
           </div>
         </div>
       </div>
